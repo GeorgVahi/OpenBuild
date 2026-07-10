@@ -14,26 +14,26 @@ It packages one explicit skill, **Build**, with five modes:
 
 OpenBuild is self-contained. It does not require separate discovery, TDD, or review skills, telemetry, a hosted service, or background network access.
 
-> OpenBuild `v0.1.0` is a preview release. Install a version tag for reproducibility; use `main` only when you intentionally want the latest preview.
+> OpenBuild `v0.2.0` is the current release. Install a version tag for reproducibility; use `main` only when you intentionally want the latest development commit.
 
-The current `main` preview reports plugin version `0.2.0-dev.2`; the immutable release tag remains `v0.1.0` until a new release is published.
+The current manifest reports plugin version `0.2.0`, synchronized with immutable release tag `v0.2.0` at this release boundary.
 
 ## Requirements
 
 - A current Codex surface that supports skills. Plugin installation is available in Codex CLI and supported plugin surfaces.
 - Git, when Build is expected to create milestone commits or review a task diff.
-- Windows is verified for `v0.1.0`. macOS and Linux are documented as best-effort until native validation is completed.
+- Windows is verified for `v0.2.0`. macOS and Linux are documented as best-effort until native validation is completed.
 
-OpenBuild `v0.1.0` supports Codex only. It does not claim compatibility with Claude Code, Cursor, Gemini CLI, or other coding agents.
+OpenBuild `v0.2.0` supports Codex only. It does not claim compatibility with Claude Code, Cursor, Gemini CLI, or other coding agents.
 
 ## Install as a plugin — recommended
 
 The plugin is the primary distribution channel. It gives you versioned marketplace installation and the namespaced invocation `$openbuild:build`.
 
-### Pinned preview `v0.1.0`
+### Pinned release `v0.2.0`
 
 ```bash
-codex plugin marketplace add GeorgVahi/OpenBuild --ref v0.1.0
+codex plugin marketplace add GeorgVahi/OpenBuild --ref v0.2.0
 codex plugin add openbuild@openbuild
 ```
 
@@ -70,11 +70,11 @@ A versioned/tag-pinned marketplace is fixed to its selected tag. To move from on
 ```bash
 codex plugin remove openbuild@openbuild
 codex plugin marketplace remove openbuild
-codex plugin marketplace add GeorgVahi/OpenBuild --ref v0.1.0
+codex plugin marketplace add GeorgVahi/OpenBuild --ref v0.2.0
 codex plugin add openbuild@openbuild
 ```
 
-Replace `v0.1.0` with the target release tag.
+Replace `v0.2.0` with the target release tag.
 
 ### Uninstall the plugin
 
@@ -88,7 +88,7 @@ codex plugin marketplace remove openbuild
 Standalone installation gives you the shorter `$build` invocation. Ask the preinstalled system skill installer to install the canonical Build folder:
 
 ```text
-Use $skill-installer to install the skill from https://github.com/GeorgVahi/OpenBuild/tree/v0.1.0/plugins/openbuild/skills/build
+Use $skill-installer to install the skill from https://github.com/GeorgVahi/OpenBuild/tree/v0.2.0/plugins/openbuild/skills/build
 ```
 
 Start a new Codex thread after installation. Open `/skills` or type `$` and verify that `build` appears, then invoke:
@@ -217,9 +217,9 @@ Build classifies each task as `low`, `medium`, `high`, or `critical`. It starts 
 | `high` | Cross-layer state, public contracts, persistence, concurrency, auth, permissions, privacy | Strong |
 | `critical` | Irreversible actions, live infrastructure, secrets, destructive migration | Strongest available |
 
-Reviewers return acceptance coverage, evidence-backed findings, confidence, a verdict, and an optional score. After confirmed findings are fixed and validation reruns, Build escalates when the score is below `9.5`, confidence is low, coverage is incomplete, reviewers conflict, validation fails, a high-impact finding remains, or the diff changed materially.
+Reviewers return acceptance coverage, evidence-backed findings, confidence, a verdict, and an optional score. After confirmed findings are fixed and validation reruns, Build escalates when confidence is low, coverage is incomplete, reviewers conflict, validation fails, a high-impact finding remains, or the diff changed materially. A score below `9.5` triggers escalation only when the reviewer ties it to a concrete finding, uncertainty, or coverage gap.
 
-The score is only an escalation signal. Completion still requires green validation, evidence for every acceptance criterion, and no confirmed actionable findings. The loop is bounded by distinct proven tiers and never repeats the same reviewer on an unchanged diff.
+The score is only a secondary escalation signal. An evidence-backed accept verdict with sufficient confidence, green validation, complete acceptance coverage, and no confirmed actionable findings is enough even when a score is omitted or below `9.5` without a concrete gap. The loop is bounded by distinct proven tiers and never repeats the same reviewer on an unchanged diff.
 
 When Codex does not expose a model selector, Build does not invent one. It falls back through configured profiles, supported reasoning efforts, a read-only explorer role, a generic subagent, and finally root-only self-review. The effective mode and any unknown tier are recorded explicitly.
 
@@ -241,9 +241,9 @@ Build uses an explicit path when provided. Otherwise it prefers a relevant `BUIL
 
 ## Versioning and commits
 
-Before a milestone or final commit, Build discovers the repository's authoritative version source and policy, then records `version impact` as `none`, `prerelease`, `patch`, `minor`, or `major`. When a commit changes installable behavior or a public distribution contract and policy requires a bump, the root updates the version, changelog, and required documentation in that same commit.
+Before a milestone or final commit, Build discovers the repository's authoritative version source and policy, then records `version impact` as `not applicable`, `prerelease`, `patch`, `minor`, or `major`. In a versioned repository, every Build-created commit receives a unique higher version by default, with the changelog and required documentation updated in that same commit.
 
-Build does not invent versioning for an unversioned repository or bump mechanically for prose-only/internal commits. It never moves a published tag. Tag creation, GitHub Release creation, package publication, and promotion from prerelease to stable remain separately authorized publication actions.
+Build does not invent versioning for an unversioned repository, and it follows an explicit repository policy that uses release-only or generated versions. OpenBuild itself requires a bump for every commit after the repository root, including prose, internal validation changes, and otherwise empty commits. Build never moves a published tag. Tag creation, GitHub Release creation, package publication, and promotion from prerelease to stable remain separately authorized publication actions.
 
 OpenBuild's own contributor, version, commit, and release rules are documented in [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -279,6 +279,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the `main` workflow, Semantic Version
 From the repository root:
 
 ```bash
+python -m unittest discover -s scripts -p "test_*.py" -v
 python scripts/validate_package.py
 ```
 

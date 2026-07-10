@@ -32,6 +32,7 @@ REQUIRED = [
     SKILL / "references" / "review-protocol.md",
     SKILL / "references" / "tdd-workflow.md",
     SKILL / "references" / "versioning.md",
+    ROOT / "scripts" / "test_validate_package.py",
 ]
 
 TEXT_SUFFIXES = {".md", ".json", ".yaml", ".yml", ".toml", ".py"}
@@ -48,7 +49,6 @@ SEMVER_PARTS = re.compile(
 )
 MANIFEST_RELATIVE = "plugins/openbuild/.codex-plugin/plugin.json"
 VERSION_SYNC_PATHS = {MANIFEST_RELATIVE, "CHANGELOG.md", "README.md", "README.ru.md"}
-VERSIONED_CONTRACT_PATHS = {".agents/plugins/marketplace.json", "README.md", "README.ru.md"}
 
 
 def fail(errors: list[str], message: str) -> None:
@@ -147,8 +147,10 @@ def normalized_paths(*outputs: str | None) -> set[str]:
     return result
 
 
-def changes_versioned_contract(paths: set[str]) -> bool:
-    return any(path.startswith("plugins/openbuild/") or path in VERSIONED_CONTRACT_PATHS for path in paths)
+def commit_requires_version_bump(paths: set[str], *, commit_exists: bool = False) -> bool:
+    """OpenBuild assigns a unique SemVer version to every commit after the root."""
+
+    return commit_exists or bool(paths)
 
 
 def is_public_package_path(path: str) -> bool:
@@ -227,30 +229,34 @@ def validate_version_progression(current: str, errors: list[str], commit_gate: b
 
         staged_paths = normalized_paths(git_output("diff", "--cached", "--name-only", "HEAD", "--"))
         if staged_paths:
-            if changes_versioned_contract(staged_paths):
+            if commit_requires_version_bump(staged_paths):
                 validate_version_snapshot("INDEX", "HEAD", staged_paths, errors, "index versus HEAD")
             return
-        if changes_versioned_contract(working_paths):
+        if commit_requires_version_bump(working_paths):
             fail(errors, "version commit gate: stage the complete task diff before validation")
             return
 
         committed_paths = normalized_paths(
-            git_output("diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD", "--")
+            git_output("diff-tree", "--no-commit-id", "--name-only", "-r", "-m", "HEAD", "--")
         )
-        if changes_versioned_contract(committed_paths) and git_output("rev-parse", "HEAD^") is not None:
+        parent_exists = git_output("rev-parse", "HEAD^") is not None
+        if commit_requires_version_bump(committed_paths, commit_exists=parent_exists):
             validate_version_snapshot("HEAD", "HEAD^", committed_paths, errors, "HEAD versus HEAD^")
         return
 
     previous_revision: str | None = None
     context = ""
-    if changes_versioned_contract(working_paths):
+    if commit_requires_version_bump(working_paths):
         previous_revision = "HEAD"
         context = "working tree versus HEAD"
     else:
         committed_paths = normalized_paths(
-            git_output("diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD", "--")
+            git_output("diff-tree", "--no-commit-id", "--name-only", "-r", "-m", "HEAD", "--")
         )
-        if changes_versioned_contract(committed_paths):
+        if commit_requires_version_bump(
+            committed_paths,
+            commit_exists=git_output("rev-parse", "HEAD^") is not None,
+        ):
             previous_revision = "HEAD^"
             context = "HEAD versus HEAD^"
 
@@ -262,7 +268,7 @@ def validate_version_progression(current: str, errors: list[str], commit_gate: b
     if semver_key(current) <= semver_key(previous):
         fail(
             errors,
-            f"plugin.json: installable contract changed ({context}) but version did not increase "
+            f"plugin.json: repository commit changed ({context}) but version did not increase "
             f"({previous} -> {current})",
         )
 
@@ -342,8 +348,8 @@ def main() -> int:
     metadata_text = read_text(SKILL / "agents" / "openai.yaml", errors)
     if 'allow_implicit_invocation: false' not in metadata_text:
         fail(errors, "agents/openai.yaml: implicit invocation must be disabled")
-    if "$build" not in metadata_text:
-        fail(errors, "agents/openai.yaml: default prompt must mention $build")
+    if "this Build skill" not in metadata_text or "full mode" not in metadata_text:
+        fail(errors, "agents/openai.yaml: default prompt must be invocation-neutral and select full mode")
 
     readme = read_text(ROOT / "README.md", errors)
     readme_ru = read_text(ROOT / "README.ru.md", errors)
@@ -382,8 +388,8 @@ def main() -> int:
 
     if "TZ.md" not in read_text(ROOT / ".gitignore", errors).splitlines():
         fail(errors, ".gitignore: local TZ.md must be ignored")
-    if "## [0.1.0] - 2026-07-10" not in read_text(ROOT / "CHANGELOG.md", errors):
-        fail(errors, "CHANGELOG.md: missing 0.1.0 release entry")
+    if "## [0.2.0] - 2026-07-10" not in read_text(ROOT / "CHANGELOG.md", errors):
+        fail(errors, "CHANGELOG.md: missing 0.2.0 release entry")
     changelog = read_text(ROOT / "CHANGELOG.md", errors)
     for token in ["openbuild-discovery", "TDD-first", "version impact"]:
         if token not in changelog:
@@ -397,13 +403,22 @@ def main() -> int:
         "plugins/openbuild/.codex-plugin/plugin.json",
         "version impact",
         "prerelease counter",
+        "Every OpenBuild commit",
         "immutable",
     ]:
         if token not in contributing:
             fail(errors, f"CONTRIBUTING.md: missing versioning contract {token}")
 
     versioning_text = read_text(SKILL / "references" / "versioning.md", errors)
-    for token in ["Version impact", "prerelease", "patch", "minor", "major", "immutable"]:
+    for token in [
+        "Version impact",
+        "every Build-created commit",
+        "prerelease",
+        "patch",
+        "minor",
+        "major",
+        "immutable",
+    ]:
         if token not in versioning_text:
             fail(errors, f"references/versioning.md: missing contract {token}")
 

@@ -15,7 +15,7 @@ Provide the reviewer with:
 - the requested review tier and the evidence supporting that tier;
 - the repository path and explicit read-only boundary.
 
-Use a fresh context when available. Do not reveal earlier reviewer conclusions; pass source artifacts instead.
+Use a fresh context with conversation-history inheritance disabled when the runtime supports it, such as `fork_turns: "none"` or an equivalent `fork_context: false`. If no isolation control exists, disclose possible inherited context and label independence as limited. Do not reveal earlier reviewer conclusions; pass source artifacts instead.
 
 ## Required result
 
@@ -59,10 +59,10 @@ A finding without concrete evidence, impact, and an actionable owning-layer fix 
 The optional score is a secondary escalation signal, not the completion gate.
 
 - `9.5-10.0`: no known actionable gap and strong evidence coverage.
-- `8.0-9.4`: credible improvement, uncertainty, or incomplete coverage remains.
+- `8.0-9.4`: may indicate a credible improvement, uncertainty, or incomplete coverage when the reviewer names the concrete gap.
 - below `8.0`: material correctness, safety, or acceptance gaps remain.
 
-Do not force a reviewer to invent a score when the runtime does not support calibrated scoring. Do not make cosmetic changes merely to raise a number.
+Do not force a reviewer to invent a score when the runtime does not support calibrated scoring. A score alone is never an escalation trigger; require an evidence-backed finding, uncertainty, or coverage gap. Do not make cosmetic changes merely to raise a number.
 
 ## Root adjudication
 
@@ -80,7 +80,7 @@ Reviewers do not edit tests or implementation, run write-capable remediation, co
 
 After adjudication and remediation, move one proven tier higher when any trigger remains:
 
-- score is below `9.5`;
+- score is below `9.5` and is tied to a concrete finding, uncertainty, or coverage gap;
 - confidence is low;
 - acceptance coverage is incomplete or based on weak evidence;
 - reviewers conflict on a material conclusion;

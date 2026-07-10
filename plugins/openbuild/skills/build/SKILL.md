@@ -1,6 +1,6 @@
 ---
 name: build
-description: "Turn a plain-language idea or an existing BUILD.md, SPEC.md, or TZ.md into a repository-grounded specification, refine it, or execute it through delegated code discovery, TDD-first milestones, version-aware commits, capability-aware subagents, and progressive review. Use only when explicitly invoked as $build for new, refine, run, full, or setup-models workflows; do not invoke for ordinary build commands."
+description: "Turn a plain-language idea or an existing BUILD.md, SPEC.md, or TZ.md into a repository-grounded specification, refine it, or execute it through delegated code discovery, TDD-first milestones, version-aware commits, capability-aware subagents, and progressive review. Use only when explicitly invoked as the standalone $build skill or a namespaced plugin skill such as $openbuild:build; do not invoke for ordinary build commands."
 ---
 
 # Build
@@ -9,7 +9,7 @@ Run one durable workflow from an idea to an evidence-backed specification and, w
 
 ## Parse the invocation
 
-Support these explicit modes:
+Support these explicit modes. The examples use standalone `$build`; plugin users apply the same mode suffix to `$openbuild:build` or the namespace assigned by their marketplace:
 
 - `$build new <idea>`: discover, interview, and create or update a specification; stop before implementation.
 - `$build refine [path]`: verify and improve an existing specification; stop before implementation.
@@ -18,19 +18,19 @@ Support these explicit modes:
 - `$build setup-models`: configure an optional, permission-gated model ladder for future subagents.
 - `$build <idea>`: treat as `full` when no mode is present.
 
-Treat `/build` only as a text alias when a user types it in prose. Do not claim that Build registers a slash command.
+Do not claim that Build registers `/build` or any other slash command. If a user types `/build` in prose, explain the supported explicit skill invocation instead of silently treating it as an installed command.
 
 Reply and write the specification in the user's language. Keep paths, symbols, commands, and code in their native form.
 
 ## Select the specification safely
 
-Use an explicit path when supplied. Otherwise:
+Use an explicit path when supplied and verify that it exists before `refine` or `run`. Otherwise:
 
 1. Prefer a relevant existing `BUILD.md`.
 2. Then consider a relevant `SPEC.md` or `TZ.md`.
-3. For a new task with no relevant file, create `<project-root>/BUILD.md`.
+3. For `new`, or `full` with a new idea, create `<project-root>/BUILD.md` when no relevant file exists.
 
-Before changing an existing candidate, read it and confirm that it belongs to the current task. When several candidates are relevant or a file belongs to another task, ask which file to use or propose a descriptive `BUILD-<name>.md`. Never silently replace an unrelated document.
+For `refine` or `run`, stop and request a valid path when no relevant specification exists or a supplied explicit path does not exist. Before changing an existing candidate, read it and confirm that it belongs to the current task. When several candidates are relevant or a file belongs to another task, ask which file to use or propose a descriptive `BUILD-<name>.md`. Never silently replace an unrelated document.
 
 Read [the specification template](references/spec-template.md) before creating or materially restructuring a specification.
 
@@ -42,11 +42,12 @@ Read [the specification template](references/spec-template.md) before creating o
 - Delegate repository reading, evidence gathering, log triage, and independent review as read-only work. Do not let explorers or reviewers edit, commit, push, or make product decisions.
 - Route broad repository search through [code discovery](references/code-discovery.md) before the root performs broad search when a suitable worker is available. Keep targeted verification with the root.
 - Keep reviewers read-only. Route confirmed behavioral findings through [the TDD workflow](references/tdd-workflow.md) under root ownership instead of asking a reviewer to edit.
-- Before milestone or final commits, follow [versioning](references/versioning.md) when the repository has a version source or release policy.
+- Before milestone or final commits, follow [versioning](references/versioning.md). In a versioned repository, give every Build-created commit a unique higher version unless an applicable repository policy explicitly defines a different release-only scheme.
 - Never infer a model's cost or capability from its slug. Report a selected model or tier only when the runtime or confirmed configuration exposes it.
 - Never alter user-level or project-level model configuration without showing the exact proposed changes and receiving separate permission.
 - In `new` and `refine`, do not edit implementation files, run destructive commands, or begin milestones.
 - During `run` and `full`, make milestone commits when Git is available, task changes can be isolated, and repository/user instructions do not forbid commits. Never push without explicit authorization.
+- Never print or commit secret values, tokens, passwords, cookies, private keys, customer data, raw `.env` contents, or credential-bearing remote URLs. Inspect only the metadata needed for the task and redact credentials from durable specifications, logs, reviews, and reports.
 - Stop before destructive or irreversible actions, secrets, purchases, live infrastructure, external publication without existing authorization, or material scope expansion.
 
 ## Establish the baseline
@@ -55,9 +56,9 @@ Before discovery or edits:
 
 1. Find the project root and applicable instructions.
 2. Inspect the current Git branch, `HEAD`, staged/unstaged/untracked state, remotes, version/release sources, and available validation entry points.
-3. Record a durable review baseline in the specification. For Git, include `branch@SHA` and a concise initial status. For non-Git work, record the in-scope artifact manifest and hashes when practical.
+3. Record a durable review baseline in the specification. For Git, include `branch@SHA` and a concise initial status. For non-Git work, record the in-scope artifact manifest and hashes when practical. On continuation of the same task, preserve the original baseline instead of replacing it with the latest milestone.
 4. Mark pre-existing or unrelated changes as out of scope.
-5. On continuation, reread the specification and current project state instead of relying on chat memory.
+5. On continuation, reread the specification and current project state instead of relying on chat memory. If the original baseline is absent, recover it from the parent of the first identifiable task commit when evidence permits; otherwise record the earliest verifiable boundary and the resulting review limitation.
 
 ## Discover repository evidence
 
@@ -151,8 +152,8 @@ For each milestone:
 2. For TDD-first work, follow [the TDD workflow](references/tdd-workflow.md): establish the owner and primary signal, run the smallest meaningful red test when practical, then implement the minimum coherent owner-layer change.
 3. For Direct or Investigation work, use the narrow signal appropriate to that mode and reclassify before changing behavior.
 4. Require focused green validation, refactor only after green when it removes current complexity, then run wider checks according to risk.
-5. Review the task diff against the saved baseline and remove unrelated changes.
-6. Apply [versioning](references/versioning.md): classify the version impact, update required version/changelog/documentation surfaces in the same commit, and validate their agreement. Use `none` when policy does not require a bump.
+5. Review the task diff against the saved baseline. Revert only accidental out-of-scope edits made by Build during this task; leave pre-existing or user-owned unrelated changes untouched and exclude them from review and commits.
+6. Apply [versioning](references/versioning.md): classify the version impact, update required version/changelog/documentation surfaces in the same commit, and validate their agreement. Use `not applicable` only when there is no authoritative version source or no commit will be created.
 7. Run the built-in progressive review described in [the review protocol](references/review-protocol.md) against the complete diff, including versioning changes.
 8. Adjudicate every finding. Fix confirmed actionable issues, rerun affected validation, and repeat review whenever remediation or version synchronization changes the reviewed diff.
 9. Close the milestone only when its primary signal is met, validation is green, acceptance coverage is complete, and no actionable finding remains.
@@ -165,13 +166,13 @@ Read [the review protocol](references/review-protocol.md) for `run` and `full`.
 
 Build an ordered ladder only from native per-spawn selectors, confirmed custom agent profiles, or supported reasoning-effort tiers. Choose the minimum sufficient starting tier from the complexity class. A discovery tier may be cheaper than the required final review tier.
 
-Use a fresh reviewer context when available. Pass the specification, baseline, current task diff, validation evidence, and acceptance criteria without leaking earlier reviewer conclusions.
+Use a fresh reviewer context with history inheritance disabled when the runtime supports it, such as `fork_turns: "none"` or an equivalent `fork_context: false`. If isolation controls are unavailable, disclose that the context may be inherited and do not claim full independence. Pass the specification, preserved original baseline, current full task diff, validation evidence, and acceptance criteria without leaking earlier reviewer conclusions.
 
-Require a structured result containing verdict, confidence, acceptance coverage, evidence-backed findings, observed routing mode/tier, and an optional score. A score below `9.5`, low confidence, incomplete coverage, conflicting reviews, failed validation, unresolved high-impact findings, or a material post-review diff triggers escalation after confirmed findings are handled.
+Require a structured result containing verdict, confidence, acceptance coverage, evidence-backed findings, observed routing mode/tier, and an optional score. Low confidence, incomplete coverage, conflicting reviews, failed validation, unresolved high-impact findings, or a material post-review diff triggers escalation after confirmed findings are handled. A score below `9.5` triggers escalation only when the reviewer ties it to a concrete finding, uncertainty, or coverage gap.
 
 For TDD-first milestones, require the reviewer to audit the red signal, owning layer, focused green result, and risk-based coverage without editing. The root verifies confirmed findings and sends behavioral remediation back through the TDD workflow before the next review cycle.
 
-Treat scores only as escalation signals. Never accept work from a number alone. Bound the loop by the distinct available tiers and do not repeat the same reviewer on an unchanged diff. For high and critical work, request the required strong/strongest final pass even when a cheaper reviewer scores it highly. If the runtime cannot prove tiers, use the strongest available root/reviewer fallback, record `observed tier: unknown`, and evaluate completion from evidence unless project policy explicitly requires a named tier.
+Treat scores only as secondary escalation signals. An evidence-backed `ACCEPT` with green validation, complete acceptance coverage, sufficient confidence, and no actionable findings is enough even when an optional score is omitted or below `9.5` without a concrete gap. Never accept work from a number alone. Bound the loop by the distinct available tiers and do not repeat the same reviewer on an unchanged diff. For high and critical work, request the required strong/strongest final pass even when a cheaper reviewer scores it highly. If the runtime cannot prove tiers, use the strongest available root/reviewer fallback, record `observed tier: unknown`, and evaluate completion from evidence unless project policy explicitly requires a named tier.
 
 If the strongest available reviewer still finds blocking issues, keep the task incomplete and record the exact blocker. Missing tier metadata alone is a disclosed limitation, not an automatic blocker. When no independent reviewer exists, perform sequential self-review and label it `self-review, limited` rather than claiming independence.
 
