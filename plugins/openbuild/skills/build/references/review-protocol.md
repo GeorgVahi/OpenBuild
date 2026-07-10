@@ -11,6 +11,7 @@ Provide the reviewer with:
 - the exact task diff, including committed milestone changes and relevant uncommitted work;
 - validation commands and current results;
 - the implementation mode and, for TDD-first work, the owning layer plus red/green evidence;
+- the version impact, authoritative version source, and synchronized version/changelog/documentation evidence;
 - the requested review tier and the evidence supporting that tier;
 - the repository path and explicit read-only boundary.
 
@@ -43,6 +44,9 @@ Validation assessment:
 
 TDD assessment:
 - <met | not met | not applicable — red signal, owner layer, focused green, and risk coverage>
+
+Version assessment:
+- <met | not met | not applicable — impact, version source, synchronized files, and release evidence>
 
 Escalation recommendation:
 - <next tier and trigger, or none>
@@ -103,6 +107,7 @@ Accept a milestone only when all are true:
 - its primary signal is met;
 - relevant validation is green;
 - TDD-first work has a meaningful red signal and focused green evidence, or a documented reason why an automated red signal was impractical;
+- required version, changelog, and documentation surfaces agree with the reviewed diff and no published tag was rewritten;
 - every acceptance criterion is covered by authoritative evidence;
 - no confirmed actionable finding remains;
 - reviewer confidence and tier satisfy the complexity floor;

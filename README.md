@@ -16,7 +16,7 @@ OpenBuild is self-contained. It does not require separate discovery, TDD, or rev
 
 > OpenBuild `v0.1.0` is a preview release. Install a version tag for reproducibility; use `main` only when you intentionally want the latest preview.
 
-The current `main` preview reports plugin version `0.2.0-dev.1`; the immutable stable tag remains `v0.1.0` until a new release is published.
+The current `main` preview reports plugin version `0.2.0-dev.2`; the immutable release tag remains `v0.1.0` until a new release is published.
 
 ## Requirements
 
@@ -30,7 +30,7 @@ OpenBuild `v0.1.0` supports Codex only. It does not claim compatibility with Cla
 
 The plugin is the primary distribution channel. It gives you versioned marketplace installation and the namespaced invocation `$openbuild:build`.
 
-### Stable `v0.1.0`
+### Pinned preview `v0.1.0`
 
 ```bash
 codex plugin marketplace add GeorgVahi/OpenBuild --ref v0.1.0
@@ -63,9 +63,9 @@ codex plugin marketplace upgrade openbuild
 codex plugin add openbuild@openbuild
 ```
 
-### Upgrade between stable tags
+### Switch between release tags
 
-A stable marketplace is pinned to its tag. To move from one tag to another, remove the installed plugin and marketplace entry, then add the new tag:
+A versioned/tag-pinned marketplace is fixed to its selected tag. To move from one tag to another, remove the installed plugin and marketplace entry, then add the new tag:
 
 ```bash
 codex plugin remove openbuild@openbuild
@@ -239,6 +239,14 @@ Build uses an explicit path when provided. Otherwise it prefers a relevant `BUIL
 - No telemetry, daemon, `curl | shell`, hidden auto-update, or background network service is included.
 - Build follows the repository's `AGENTS.md`, sandbox, approval, validation, and security rules.
 
+## Versioning and commits
+
+Before a milestone or final commit, Build discovers the repository's authoritative version source and policy, then records `version impact` as `none`, `prerelease`, `patch`, `minor`, or `major`. When a commit changes installable behavior or a public distribution contract and policy requires a bump, the root updates the version, changelog, and required documentation in that same commit.
+
+Build does not invent versioning for an unversioned repository or bump mechanically for prose-only/internal commits. It never moves a published tag. Tag creation, GitHub Release creation, package publication, and promotion from prerelease to stable remain separately authorized publication actions.
+
+OpenBuild's own contributor, version, commit, and release rules are documented in [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Troubleshooting
 
 ### The skill does not appear
@@ -265,6 +273,8 @@ The discovered file is ambiguous or belongs to another task. Pass the intended p
 Build records the initial status, excludes unrelated changes, and commits only task-scoped files. If changes cannot be isolated safely, it stops before committing rather than hiding or publishing them.
 
 ## Development and validation
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the `main` workflow, Semantic Versioning rules, same-commit version gate, and immutable release checklist.
 
 From the repository root:
 

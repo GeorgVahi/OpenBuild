@@ -10,11 +10,14 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 - Automatic broad code-discovery routing to a dedicated read-only worker with compact evidence maps, root verification, and honest quota/model fallbacks.
 - Self-contained Direct/Investigation/TDD-first classification with red → green → refactor milestones and reviewer TDD-evidence audits.
+- Version-aware milestone commits with an explicit `version impact`, same-commit manifest/changelog/documentation synchronization, and immutable release boundaries.
+- Public contributor, validation, Git, versioning, and release guidance in `CONTRIBUTING.md`.
 
 ### Changed
 
 - Optional model setup now proposes an `openbuild-discovery` profile for the minimum proven suitable code-search model and a complete fast-to-strongest review ladder without hard-coding model slugs.
-- Main preview plugin version advanced to `0.2.0-dev.1`; immutable release `v0.1.0` remains unchanged.
+- Main preview plugin version advanced to `0.2.0-dev.2`; immutable release `v0.1.0` remains unchanged.
+- README terminology now identifies `v0.1.0` as a pinned prerelease instead of calling it stable.
 
 ## [0.1.0] - 2026-07-10
 

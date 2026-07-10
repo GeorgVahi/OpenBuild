@@ -16,7 +16,7 @@ OpenBuild самодостаточен. Ему не нужны отдельны�
 
 > OpenBuild `v0.1.0` — preview-релиз. Для воспроизводимости устанавливайте tag версии; используйте `main` только если осознанно хотите последнюю preview-версию.
 
-Текущая preview-версия в `main` имеет plugin version `0.2.0-dev.1`; immutable stable tag остаётся `v0.1.0` до публикации нового релиза.
+Текущая preview-версия в `main` имеет plugin version `0.2.0-dev.2`; immutable release tag остаётся `v0.1.0` до публикации нового релиза.
 
 ## Требования
 
@@ -30,7 +30,7 @@ OpenBuild `v0.1.0` поддерживает только Codex. Совмести
 
 Plugin — основной канал распространения. Он даёт версионированную установку через marketplace и namespaced-вызов `$openbuild:build`.
 
-### Стабильный `v0.1.0`
+### Закреплённый preview `v0.1.0`
 
 ```bash
 codex plugin marketplace add GeorgVahi/OpenBuild --ref v0.1.0
@@ -63,9 +63,9 @@ codex plugin marketplace upgrade openbuild
 codex plugin add openbuild@openbuild
 ```
 
-### Переход между стабильными tags
+### Переход между release tags
 
-Stable marketplace закреплён за выбранным tag. Для перехода на другую версию удалите установленный plugin и запись marketplace, затем добавьте новый tag:
+Versioned/tag-pinned marketplace закреплён за выбранным tag. Для перехода на другую версию удалите установленный plugin и запись marketplace, затем добавьте новый tag:
 
 ```bash
 codex plugin remove openbuild@openbuild
@@ -239,6 +239,14 @@ Score — только сигнал эскалации. Для завершен�
 - Нет telemetry, daemon, `curl | shell`, скрытого auto-update или фонового сетевого сервиса.
 - Соблюдаются `AGENTS.md`, sandbox, approvals, validation и security-правила репозитория.
 
+## Версионность и коммиты
+
+Перед milestone- или финальным commit Build находит авторитетный источник версии и политику репозитория, затем записывает `version impact`: `none`, `prerelease`, `patch`, `minor` или `major`. Если commit меняет устанавливаемое поведение или публичный distribution contract и policy требует bump, главный агент обновляет версию, CHANGELOG и обязательную документацию в том же commit.
+
+Build не придумывает versioning для неверсионируемого репозитория и не повышает версию механически для prose-only/internal commits. Опубликованный tag никогда не передвигается. Создание tag, GitHub Release, публикация package и перевод prerelease в stable остаются отдельно авторизуемыми внешними действиями.
+
+Правила contribution, version, commit и release самого OpenBuild описаны в [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Решение проблем
 
 ### Skill не появился
@@ -265,6 +273,8 @@ Score — только сигнал эскалации. Для завершен�
 Build сохранит initial status, исключит чужие изменения и будет коммитить только task-scoped файлы. Если безопасно изолировать изменения нельзя, он остановится перед commit, а не спрячет или опубликует их.
 
 ## Разработка и проверка
+
+В [CONTRIBUTING.md](CONTRIBUTING.md) описаны workflow ветки `main`, правила Semantic Versioning, same-commit version gate и checklist неизменяемого релиза.
 
 Из корня репозитория:
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -19,6 +20,7 @@ REQUIRED = [
     ROOT / ".gitignore",
     ROOT / "README.md",
     ROOT / "README.ru.md",
+    ROOT / "CONTRIBUTING.md",
     ROOT / "LICENSE",
     ROOT / "CHANGELOG.md",
     PLUGIN / ".codex-plugin" / "plugin.json",
@@ -29,10 +31,24 @@ REQUIRED = [
     SKILL / "references" / "model-routing.md",
     SKILL / "references" / "review-protocol.md",
     SKILL / "references" / "tdd-workflow.md",
+    SKILL / "references" / "versioning.md",
 ]
 
 TEXT_SUFFIXES = {".md", ".json", ".yaml", ".yml", ".toml", ".py"}
-SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$")
+SEMVER_IDENTIFIER = r"(?:0|[1-9]\d*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+SEMVER_PRERELEASE = rf"{SEMVER_IDENTIFIER}(?:\.{SEMVER_IDENTIFIER})*"
+SEMVER_BUILD = r"[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*"
+SEMVER = re.compile(
+    rf"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+    rf"(?:-{SEMVER_PRERELEASE})?(?:\+{SEMVER_BUILD})?$"
+)
+SEMVER_PARTS = re.compile(
+    r"^(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)"
+    rf"(?:-(?P<prerelease>{SEMVER_PRERELEASE}))?(?:\+{SEMVER_BUILD})?$"
+)
+MANIFEST_RELATIVE = "plugins/openbuild/.codex-plugin/plugin.json"
+VERSION_SYNC_PATHS = {MANIFEST_RELATIVE, "CHANGELOG.md", "README.md", "README.ru.md"}
+VERSIONED_CONTRACT_PATHS = {".agents/plugins/marketplace.json", "README.md", "README.ru.md"}
 
 
 def fail(errors: list[str], message: str) -> None:
@@ -77,6 +93,180 @@ def validate_local_links(path: Path, text: str, errors: list[str]) -> None:
             fail(errors, f"{path.relative_to(ROOT)}: missing local link target {target}")
 
 
+def semver_key(value: str) -> tuple[int, int, int, int, tuple[tuple[int, int | str], ...]]:
+    match = SEMVER_PARTS.fullmatch(value)
+    if not match:
+        raise ValueError(f"invalid SemVer: {value}")
+    prerelease = match.group("prerelease")
+    parts: tuple[tuple[int, int | str], ...] = ()
+    if prerelease is not None:
+        parts = tuple((0, int(item)) if item.isdigit() else (1, item) for item in prerelease.split("."))
+    return (
+        int(match.group("major")),
+        int(match.group("minor")),
+        int(match.group("patch")),
+        1 if prerelease is None else 0,
+        parts,
+    )
+
+
+def contains_exact_version(text: str, version: str) -> bool:
+    return re.search(rf"(?<![0-9A-Za-z.-]){re.escape(version)}(?![0-9A-Za-z.-])", text) is not None
+
+
+def validate_semver_contract(errors: list[str]) -> None:
+    valid = ["0.2.0-dev.2", "0.2.0", "1.0.0-alpha.1", "1.0.0+build.01"]
+    invalid = ["0.2.0-dev..2", "0.2.0-dev.01", "01.0.0", "1.0.0-", "1.0.0+build..1"]
+    for value in valid:
+        if not SEMVER.fullmatch(value):
+            fail(errors, f"internal SemVer validator rejected valid case {value}")
+    for value in invalid:
+        if SEMVER.fullmatch(value):
+            fail(errors, f"internal SemVer validator accepted invalid case {value}")
+
+
+def git_output(*args: str) -> str | None:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def normalized_paths(*outputs: str | None) -> set[str]:
+    result: set[str] = set()
+    for output in outputs:
+        if output:
+            result.update(line.strip().replace("\\", "/") for line in output.splitlines() if line.strip())
+    return result
+
+
+def changes_versioned_contract(paths: set[str]) -> bool:
+    return any(path.startswith("plugins/openbuild/") or path in VERSIONED_CONTRACT_PATHS for path in paths)
+
+
+def is_public_package_path(path: str) -> bool:
+    relative = Path(path.replace("\\", "/"))
+    if any(part in {".git", ".tmp", "__pycache__"} for part in relative.parts):
+        return False
+    if relative.as_posix() == "TZ.md":
+        return False
+    if relative.as_posix().startswith("plugins/openbuild/"):
+        return True
+    return relative.suffix.lower() in TEXT_SUFFIXES or relative.name in {"LICENSE", ".gitignore", ".gitattributes"}
+
+
+def text_from_snapshot(revision: str, path: str) -> str | None:
+    selector = f":{path}" if revision == "INDEX" else f"{revision}:{path}"
+    return git_output("show", selector)
+
+
+def version_from_git(revision: str) -> str | None:
+    text = text_from_snapshot(revision, MANIFEST_RELATIVE)
+    if text is None:
+        return None
+    try:
+        value = json.loads(text).get("version")
+    except (json.JSONDecodeError, AttributeError):
+        return None
+    return value if isinstance(value, str) and SEMVER.fullmatch(value) else None
+
+
+def validate_version_snapshot(
+    revision: str,
+    previous_revision: str,
+    changed_paths: set[str],
+    errors: list[str],
+    context: str,
+) -> None:
+    missing = VERSION_SYNC_PATHS - changed_paths
+    if missing:
+        fail(errors, f"version commit gate ({context}): synchronized files missing from one diff: {sorted(missing)}")
+        return
+
+    current = version_from_git(revision)
+    previous = version_from_git(previous_revision)
+    if current is None or previous is None:
+        fail(errors, f"version commit gate ({context}): could not read strict SemVer manifests")
+        return
+    if semver_key(current) <= semver_key(previous):
+        fail(errors, f"version commit gate ({context}): version did not increase ({previous} -> {current})")
+
+    for path in ["README.md", "README.ru.md", "CHANGELOG.md"]:
+        text = text_from_snapshot(revision, path)
+        if text is None or not contains_exact_version(text, current):
+            fail(errors, f"version commit gate ({context}): {path} does not contain exact version {current}")
+
+
+def validate_version_progression(current: str, errors: list[str], commit_gate: bool) -> None:
+    if git_output("rev-parse", "--is-inside-work-tree") != "true":
+        return
+
+    tracked_working = git_output("diff", "--name-only", "HEAD", "--")
+    untracked_working = git_output("ls-files", "--others", "--exclude-standard")
+    working_paths = normalized_paths(tracked_working, untracked_working)
+
+    if commit_gate:
+        unstaged_paths = normalized_paths(
+            git_output("diff", "--name-only", "--"),
+            untracked_working,
+        )
+        unstaged_package_files = {path for path in unstaged_paths if is_public_package_path(path)}
+        if unstaged_package_files:
+            fail(
+                errors,
+                f"commit gate: public package files are not fully staged: {sorted(unstaged_package_files)}",
+            )
+            return
+
+        staged_paths = normalized_paths(git_output("diff", "--cached", "--name-only", "HEAD", "--"))
+        if staged_paths:
+            if changes_versioned_contract(staged_paths):
+                validate_version_snapshot("INDEX", "HEAD", staged_paths, errors, "index versus HEAD")
+            return
+        if changes_versioned_contract(working_paths):
+            fail(errors, "version commit gate: stage the complete task diff before validation")
+            return
+
+        committed_paths = normalized_paths(
+            git_output("diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD", "--")
+        )
+        if changes_versioned_contract(committed_paths) and git_output("rev-parse", "HEAD^") is not None:
+            validate_version_snapshot("HEAD", "HEAD^", committed_paths, errors, "HEAD versus HEAD^")
+        return
+
+    previous_revision: str | None = None
+    context = ""
+    if changes_versioned_contract(working_paths):
+        previous_revision = "HEAD"
+        context = "working tree versus HEAD"
+    else:
+        committed_paths = normalized_paths(
+            git_output("diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD", "--")
+        )
+        if changes_versioned_contract(committed_paths):
+            previous_revision = "HEAD^"
+            context = "HEAD versus HEAD^"
+
+    if previous_revision is None:
+        return
+    previous = version_from_git(previous_revision)
+    if previous is None:
+        return
+    if semver_key(current) <= semver_key(previous):
+        fail(
+            errors,
+            f"plugin.json: installable contract changed ({context}) but version did not increase "
+            f"({previous} -> {current})",
+        )
+
+
 def public_text_files() -> list[Path]:
     result: list[Path] = []
     for path in ROOT.rglob("*"):
@@ -93,7 +283,13 @@ def public_text_files() -> list[Path]:
 
 
 def main() -> int:
+    args = sys.argv[1:]
+    if any(arg != "--commit-gate" for arg in args) or len(args) > 1:
+        print("Usage: python scripts/validate_package.py [--commit-gate]")
+        return 2
+    commit_gate = "--commit-gate" in args
     errors: list[str] = []
+    validate_semver_contract(errors)
 
     for path in REQUIRED:
         if not path.is_file():
@@ -112,8 +308,8 @@ def main() -> int:
     version = plugin.get("version")
     if not isinstance(version, str) or not SEMVER.fullmatch(version):
         fail(errors, "plugin.json: version must be strict SemVer")
-    if version != "0.2.0-dev.1":
-        fail(errors, "plugin.json: main preview version must be 0.2.0-dev.1")
+    if isinstance(version, str) and SEMVER.fullmatch(version):
+        validate_version_progression(version, errors, commit_gate)
     if plugin.get("license") != "MIT":
         fail(errors, "plugin.json: license must be MIT")
     if plugin.get("skills") != "./skills/":
@@ -133,9 +329,11 @@ def main() -> int:
     required_skill_tokens = [
         "[code discovery](references/code-discovery.md)",
         "[the TDD workflow](references/tdd-workflow.md)",
+        "[versioning](references/versioning.md)",
         "openbuild-discovery",
         "TDD-first",
         "attempt budget",
+        "version impact",
     ]
     for token in required_skill_tokens:
         if token not in skill_text:
@@ -162,6 +360,7 @@ def main() -> int:
         "openbuild-discovery",
         "openbuild-review-fast",
         "TDD-first",
+        "CONTRIBUTING.md",
     ]
     for token in required_docs_tokens:
         if token not in readme:
@@ -186,9 +385,34 @@ def main() -> int:
     if "## [0.1.0] - 2026-07-10" not in read_text(ROOT / "CHANGELOG.md", errors):
         fail(errors, "CHANGELOG.md: missing 0.1.0 release entry")
     changelog = read_text(ROOT / "CHANGELOG.md", errors)
-    for token in ["openbuild-discovery", "TDD-first", "0.2.0-dev.1"]:
+    for token in ["openbuild-discovery", "TDD-first", "version impact"]:
         if token not in changelog:
             fail(errors, f"CHANGELOG.md: missing Unreleased contract {token}")
+    if isinstance(version, str) and not contains_exact_version(changelog, version):
+        fail(errors, f"CHANGELOG.md: current plugin version {version} is not documented")
+
+    contributing = read_text(ROOT / "CONTRIBUTING.md", errors)
+    for token in [
+        "Semantic Versioning",
+        "plugins/openbuild/.codex-plugin/plugin.json",
+        "version impact",
+        "prerelease counter",
+        "immutable",
+    ]:
+        if token not in contributing:
+            fail(errors, f"CONTRIBUTING.md: missing versioning contract {token}")
+
+    versioning_text = read_text(SKILL / "references" / "versioning.md", errors)
+    for token in ["Version impact", "prerelease", "patch", "minor", "major", "immutable"]:
+        if token not in versioning_text:
+            fail(errors, f"references/versioning.md: missing contract {token}")
+
+    for path, text in [(ROOT / "README.md", readme), (ROOT / "README.ru.md", readme_ru)]:
+        if isinstance(version, str) and not contains_exact_version(text, version):
+            fail(errors, f"{path.name}: current plugin version {version} is not documented")
+        for stale in ["immutable stable tag", "### Stable `v0.1.0`", "stable tags"]:
+            if stale.lower() in text.lower():
+                fail(errors, f"{path.name}: stale stable-release wording {stale!r}")
     if not read_text(ROOT / "LICENSE", errors).startswith("MIT License"):
         fail(errors, "LICENSE: expected MIT license text")
 

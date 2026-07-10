@@ -1,6 +1,6 @@
 ---
 name: build
-description: "Turn a plain-language idea or an existing BUILD.md, SPEC.md, or TZ.md into a repository-grounded specification, refine it, or execute it through delegated code discovery, TDD-first milestones, capability-aware subagents, and progressive review. Use only when explicitly invoked as $build for new, refine, run, full, or setup-models workflows; do not invoke for ordinary build commands."
+description: "Turn a plain-language idea or an existing BUILD.md, SPEC.md, or TZ.md into a repository-grounded specification, refine it, or execute it through delegated code discovery, TDD-first milestones, version-aware commits, capability-aware subagents, and progressive review. Use only when explicitly invoked as $build for new, refine, run, full, or setup-models workflows; do not invoke for ordinary build commands."
 ---
 
 # Build
@@ -42,6 +42,7 @@ Read [the specification template](references/spec-template.md) before creating o
 - Delegate repository reading, evidence gathering, log triage, and independent review as read-only work. Do not let explorers or reviewers edit, commit, push, or make product decisions.
 - Route broad repository search through [code discovery](references/code-discovery.md) before the root performs broad search when a suitable worker is available. Keep targeted verification with the root.
 - Keep reviewers read-only. Route confirmed behavioral findings through [the TDD workflow](references/tdd-workflow.md) under root ownership instead of asking a reviewer to edit.
+- Before milestone or final commits, follow [versioning](references/versioning.md) when the repository has a version source or release policy.
 - Never infer a model's cost or capability from its slug. Report a selected model or tier only when the runtime or confirmed configuration exposes it.
 - Never alter user-level or project-level model configuration without showing the exact proposed changes and receiving separate permission.
 - In `new` and `refine`, do not edit implementation files, run destructive commands, or begin milestones.
@@ -53,7 +54,7 @@ Read [the specification template](references/spec-template.md) before creating o
 Before discovery or edits:
 
 1. Find the project root and applicable instructions.
-2. Inspect the current Git branch, `HEAD`, staged/unstaged/untracked state, remotes, and available validation entry points.
+2. Inspect the current Git branch, `HEAD`, staged/unstaged/untracked state, remotes, version/release sources, and available validation entry points.
 3. Record a durable review baseline in the specification. For Git, include `branch@SHA` and a concise initial status. For non-Git work, record the in-scope artifact manifest and hashes when practical.
 4. Mark pre-existing or unrelated changes as out of scope.
 5. On continuation, reread the specification and current project state instead of relying on chat memory.
@@ -134,6 +135,7 @@ Require the specification to contain:
 - observable acceptance criteria and invariants;
 - failure modes, edge cases, compatibility, security, data, rollout, and rollback concerns;
 - complexity class and model-routing mode;
+- version source, policy, and expected version impact, or why versioning is not applicable;
 - primary signal, validation strategy, coherent milestones, and review plan;
 - no blocking product questions.
 
@@ -150,11 +152,12 @@ For each milestone:
 3. For Direct or Investigation work, use the narrow signal appropriate to that mode and reclassify before changing behavior.
 4. Require focused green validation, refactor only after green when it removes current complexity, then run wider checks according to risk.
 5. Review the task diff against the saved baseline and remove unrelated changes.
-6. Run the built-in progressive review described in [the review protocol](references/review-protocol.md).
-7. Adjudicate every finding. Fix confirmed actionable issues, rerun affected validation, and escalate review when required.
-8. Close the milestone only when its primary signal is met, validation is green, acceptance coverage is complete, and no actionable finding remains.
-9. Update milestone status, evidence, review mode/tier, and validation log in the specification.
-10. Create a scoped milestone commit when allowed and safe. Do not include unrelated changes and do not push without explicit authorization.
+6. Apply [versioning](references/versioning.md): classify the version impact, update required version/changelog/documentation surfaces in the same commit, and validate their agreement. Use `none` when policy does not require a bump.
+7. Run the built-in progressive review described in [the review protocol](references/review-protocol.md) against the complete diff, including versioning changes.
+8. Adjudicate every finding. Fix confirmed actionable issues, rerun affected validation, and repeat review whenever remediation or version synchronization changes the reviewed diff.
+9. Close the milestone only when its primary signal is met, validation is green, acceptance coverage is complete, and no actionable finding remains.
+10. Update milestone status, evidence, review mode/tier, and validation log in the specification.
+11. Create a scoped milestone commit when allowed and safe. Do not include unrelated changes and do not push without explicit authorization.
 
 ## Run progressive review
 
@@ -189,9 +192,9 @@ After all milestones:
 1. Run relevant end-to-end validation.
 2. Review the full task diff against the saved baseline with a fresh reviewer at the minimum final tier.
 3. Verify every acceptance criterion with authoritative evidence.
-4. Check documentation, compatibility, migration, rollout/rollback, security, and remaining risks.
+4. Check documentation, version impact, compatibility, migration, rollout/rollback, security, and remaining risks.
 5. Fix confirmed gaps and repeat affected checks and review.
 6. Set `Complete` only when every requirement is proven. Otherwise preserve the exact status and continue or request missing authority.
 7. Update the final specification log and create the final scoped commit when allowed. Push only when explicitly authorized.
 
-Report the outcome, closed milestones, discovery routing/fallback, implementation mode and red/green evidence, acceptance evidence, validation, review mode/tier, commits, documentation status, migration implications, and real remaining risks.
+Report the outcome, closed milestones, discovery routing/fallback, implementation mode and red/green evidence, version impact and before/after version, acceptance evidence, validation, review mode/tier, commits, documentation status, migration implications, and real remaining risks.

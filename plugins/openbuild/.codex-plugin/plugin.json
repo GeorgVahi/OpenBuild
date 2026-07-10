@@ -1,6 +1,6 @@
 {
   "name": "openbuild",
-  "version": "0.2.0-dev.1",
+  "version": "0.2.0-dev.2",
   "description": "Evidence-grounded specifications, delegated code discovery, TDD-first implementation, and progressive review for Codex.",
   "author": {
     "name": "GeorgVahi",
