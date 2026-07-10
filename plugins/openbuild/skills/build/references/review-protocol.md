@@ -10,6 +10,7 @@ Provide the reviewer with:
 - the saved review baseline;
 - the exact task diff, including committed milestone changes and relevant uncommitted work;
 - validation commands and current results;
+- the implementation mode and, for TDD-first work, the owning layer plus red/green evidence;
 - the requested review tier and the evidence supporting that tier;
 - the repository path and explicit read-only boundary.
 
@@ -40,6 +41,9 @@ Findings:
 Validation assessment:
 - <check and interpretation>
 
+TDD assessment:
+- <met | not met | not applicable — red signal, owner layer, focused green, and risk coverage>
+
 Escalation recommendation:
 - <next tier and trigger, or none>
 ```
@@ -62,11 +66,11 @@ For every finding, the root agent must:
 
 1. Reproduce or verify the evidence.
 2. Decide whether it is task-scoped and actionable.
-3. Fix confirmed findings in the owning layer.
+3. For a confirmed behavioral finding, establish or reproduce the failing signal and fix it in the owning layer through [the TDD workflow](tdd-workflow.md).
 4. Reject hypothetical, duplicate, style-only, or pre-existing out-of-scope findings with a recorded reason.
 5. Rerun affected validation.
 
-Reviewers do not edit, commit, push, expand scope, or make product decisions.
+Reviewers do not edit tests or implementation, run write-capable remediation, commit, push, expand scope, or make product decisions. They audit TDD evidence when applicable; the root owns the remediation cycle.
 
 ## Escalation triggers
 
@@ -98,6 +102,7 @@ Accept a milestone only when all are true:
 
 - its primary signal is met;
 - relevant validation is green;
+- TDD-first work has a meaningful red signal and focused green evidence, or a documented reason why an automated red signal was impractical;
 - every acceptance criterion is covered by authoritative evidence;
 - no confirmed actionable finding remains;
 - reviewer confidence and tier satisfy the complexity floor;

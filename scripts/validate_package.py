@@ -25,8 +25,10 @@ REQUIRED = [
     SKILL / "SKILL.md",
     SKILL / "agents" / "openai.yaml",
     SKILL / "references" / "spec-template.md",
+    SKILL / "references" / "code-discovery.md",
     SKILL / "references" / "model-routing.md",
     SKILL / "references" / "review-protocol.md",
+    SKILL / "references" / "tdd-workflow.md",
 ]
 
 TEXT_SUFFIXES = {".md", ".json", ".yaml", ".yml", ".toml", ".py"}
@@ -110,8 +112,8 @@ def main() -> int:
     version = plugin.get("version")
     if not isinstance(version, str) or not SEMVER.fullmatch(version):
         fail(errors, "plugin.json: version must be strict SemVer")
-    if version != "0.1.0":
-        fail(errors, "plugin.json: release version must be 0.1.0")
+    if version != "0.2.0-dev.1":
+        fail(errors, "plugin.json: main preview version must be 0.2.0-dev.1")
     if plugin.get("license") != "MIT":
         fail(errors, "plugin.json: license must be MIT")
     if plugin.get("skills") != "./skills/":
@@ -128,6 +130,16 @@ def main() -> int:
         fail(errors, "SKILL.md: missing name: build")
     if len(skill_text.splitlines()) > 500:
         fail(errors, "SKILL.md: exceeds the 500-line progressive-disclosure limit")
+    required_skill_tokens = [
+        "[code discovery](references/code-discovery.md)",
+        "[the TDD workflow](references/tdd-workflow.md)",
+        "openbuild-discovery",
+        "TDD-first",
+        "attempt budget",
+    ]
+    for token in required_skill_tokens:
+        if token not in skill_text:
+            fail(errors, f"SKILL.md: missing orchestration contract {token}")
 
     metadata_text = read_text(SKILL / "agents" / "openai.yaml", errors)
     if 'allow_implicit_invocation: false' not in metadata_text:
@@ -147,6 +159,9 @@ def main() -> int:
         "$build full",
         "$build setup-models",
         "$skill-installer",
+        "openbuild-discovery",
+        "openbuild-review-fast",
+        "TDD-first",
     ]
     for token in required_docs_tokens:
         if token not in readme:
@@ -154,15 +169,34 @@ def main() -> int:
         if token not in readme_ru:
             fail(errors, f"README.ru.md: missing documented token {token}")
 
+    required_doc_sections = [
+        ("## How automatic code discovery works", "## Как работает автоматический поиск по коду"),
+        ("## How TDD-first implementation works", "## Как работает TDD-first реализация"),
+        ("## How progressive review works", "## Как работает progressive review"),
+        ("## Git and safety policy", "## Git и безопасность"),
+    ]
+    for english, russian in required_doc_sections:
+        if english not in readme:
+            fail(errors, f"README.md: missing required section {english}")
+        if russian not in readme_ru:
+            fail(errors, f"README.ru.md: missing required section {russian}")
+
     if "TZ.md" not in read_text(ROOT / ".gitignore", errors).splitlines():
         fail(errors, ".gitignore: local TZ.md must be ignored")
     if "## [0.1.0] - 2026-07-10" not in read_text(ROOT / "CHANGELOG.md", errors):
         fail(errors, "CHANGELOG.md: missing 0.1.0 release entry")
+    changelog = read_text(ROOT / "CHANGELOG.md", errors)
+    for token in ["openbuild-discovery", "TDD-first", "0.2.0-dev.1"]:
+        if token not in changelog:
+            fail(errors, f"CHANGELOG.md: missing Unreleased contract {token}")
     if not read_text(ROOT / "LICENSE", errors).startswith("MIT License"):
         fail(errors, "LICENSE: expected MIT license text")
 
     forbidden = ["[TO" + "DO", "TO" + "DO:", "C:" + "\\Users\\", "BIAS" + "MACHINE"]
-    fixed_model = re.compile("gpt-" + r"\d", re.IGNORECASE)
+    fixed_model = re.compile(r"\b(?:gpt[\s\-_‑–—]?\d|o\d(?:[-._][a-z0-9]+)?|claude[\s\-_‑–—]?\d|gemini[\s\-_‑–—]?\d)", re.IGNORECASE)
+    active_model_assignment = re.compile(
+        r'''(?im)^\s*["']?(?:model|model_id)["']?\s*[:=]\s*["'](?![<{])([^"']+)["']'''
+    )
     for path in public_text_files():
         text = read_text(path, errors)
         relative = path.relative_to(ROOT)
@@ -171,6 +205,9 @@ def main() -> int:
                 fail(errors, f"{relative}: forbidden marker {marker!r}")
         if fixed_model.search(text):
             fail(errors, f"{relative}: fixed model slug is not allowed")
+        assignment = active_model_assignment.search(text)
+        if assignment:
+            fail(errors, f"{relative}: active fixed model assignment is not allowed ({assignment.group(1)!r})")
         if path.suffix.lower() == ".md":
             validate_local_links(path, text, errors)
 

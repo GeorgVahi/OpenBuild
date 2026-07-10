@@ -2,7 +2,7 @@
 
 [Русская версия](README.ru.md)
 
-OpenBuild is a Codex workflow for turning a plain-language idea or an existing specification into a repository-grounded plan and, when requested, a tested implementation with progressive review.
+OpenBuild is a Codex workflow for turning a plain-language idea or an existing specification into a repository-grounded plan and, when requested, a tested implementation with delegated code discovery, TDD-first milestones, and progressive review.
 
 It packages one explicit skill, **Build**, with five modes:
 
@@ -12,9 +12,11 @@ It packages one explicit skill, **Build**, with five modes:
 - `full` — go from an idea through specification, implementation, validation, and review;
 - `setup-models` — optionally configure permission-gated read-only model-tier profiles.
 
-OpenBuild is self-contained. It does not require a separate review skill, telemetry, a hosted service, or background network access.
+OpenBuild is self-contained. It does not require separate discovery, TDD, or review skills, telemetry, a hosted service, or background network access.
 
 > OpenBuild `v0.1.0` is a preview release. Install a version tag for reproducibility; use `main` only when you intentionally want the latest preview.
+
+The current `main` preview reports plugin version `0.2.0-dev.1`; the immutable stable tag remains `v0.1.0` until a new release is published.
 
 ## Requirements
 
@@ -119,7 +121,7 @@ Build will:
 
 1. inspect the current repository and applicable `AGENTS.md` files;
 2. establish a Git or artifact baseline;
-3. map relevant code, contracts, tests, and blind spots;
+3. delegate broad code search to bounded read-only discovery workers when available, then verify their evidence map;
 4. ask only unresolved product questions using short answers such as `1a 2b`;
 5. create `BUILD.md` in the user's language;
 6. stop before implementation.
@@ -155,7 +157,7 @@ Build compares the document with the current repository, preserves manual edits,
 $build run BUILD.md
 ```
 
-Build first verifies that the specification can reach `Ready`. It then implements coherent milestones, runs focused validation, performs progressive review, updates the specification log, and creates scoped milestone commits when repository policy allows. It never pushes the user's repository without explicit authorization.
+Build first verifies that the specification can reach `Ready`. It classifies implementation work as `Direct`, `Investigation`, or `TDD-first`, then implements coherent milestones, runs focused validation, performs progressive review, updates the specification log, and creates scoped milestone commits when repository policy allows. It never pushes the user's repository without explicit authorization.
 
 ### 4. Run the full workflow
 
@@ -177,7 +179,7 @@ $build Add organization-level API keys with rotation and audit history
 $build setup-models
 ```
 
-Build first checks the capabilities exposed by the current Codex runtime. If native per-subagent selection already provides a proven ladder, no files are needed. Otherwise it may propose read-only custom-agent profiles for `fast`, `balanced`, `strong`, and `strongest` work.
+Build first checks the capabilities exposed by the current Codex runtime. If native per-subagent selection already provides a proven ladder, no files are needed. Otherwise it may propose a read-only `openbuild-discovery` profile for broad code search plus `openbuild-review-fast`, `balanced`, `strong`, and `strongest` review profiles.
 
 Before writing anything, Build must show:
 
@@ -187,6 +189,22 @@ Before writing anything, Build must show:
 - exact target files and exact diff.
 
 It writes only after separate permission, never overwrites an existing profile, validates TOML, and requires a reload or new session before claiming that model switching works. Declining setup leaves the zero-config workflow operational.
+
+## How automatic code discovery works
+
+Before broad file listing, repository-wide search, symbol lookup, dependency tracing, or route/test/config mapping, the root agent creates a compact search plan and delegates independent branches to bounded read-only discovery workers when available. Workers return only an evidence map with `path:line`, symbol or route, a confirmed fact, relevance, negative results, and confidence.
+
+The root agent remains the orchestrator: it deduplicates the evidence, verifies critical files with targeted reads, makes product and architecture decisions, edits, validates, owns Git, and writes the final answer. Discovery workers never edit or decide architecture.
+
+`openbuild-discovery` can be explicitly mapped to a suitable lower-cost code-search model through `$build setup-models` when runtime metadata or user-confirmed configuration proves the mapping. OpenBuild does not assume a particular model version, infer cost from a slug, or claim savings when the actual model is hidden. If the preferred worker is unavailable, rate-limited, or exhausted, Build immediately falls back through explorer, generic-subagent, and root-only modes without asking the user or blocking the task.
+
+## How TDD-first implementation works
+
+Behavior, contracts, validation, routing, state, auth or permissions, persistence, concurrency, integrations, security, and non-trivial user-facing changes use a red → green → refactor workflow. Build finds the narrowest supported test path, records a meaningful failing signal when practical, makes the minimum coherent owner-layer change, requires focused green validation, and refactors only after green.
+
+Direct documentation or cosmetic work does not get ceremonial failing tests. Investigation work first reproduces or traces the failure and is reclassified as TDD-first before behavior changes. When an automated red signal is impractical, Build records why and uses the best reproducible contract or runtime signal.
+
+Reviewers stay read-only. They audit the red signal, owning layer, focused green result, and risk-based coverage. Confirmed behavioral findings go back to the root agent, which runs remediation through the same TDD-first workflow before requesting another review.
 
 ## How progressive review works
 
@@ -217,6 +235,7 @@ Build uses an explicit path when provided. Otherwise it prefers a relevant `BUIL
 - Milestone commits are created when Git is available, changes can be isolated, and applicable instructions do not forbid commits.
 - Push always requires explicit authorization.
 - Model configuration requires a separate preview and permission.
+- Discovery and review workers are read-only; the root agent owns decisions, edits, TDD remediation, validation, Git, and final reporting.
 - No telemetry, daemon, `curl | shell`, hidden auto-update, or background network service is included.
 - Build follows the repository's `AGENTS.md`, sandbox, approval, validation, and security rules.
 
@@ -253,7 +272,7 @@ From the repository root:
 python scripts/validate_package.py
 ```
 
-The release process also runs the official Codex skill and plugin validators, clean plugin installation, standalone installation from the tagged GitHub path, forward-tests for `new`, `refine`, `run`, and model-routing fallbacks, and a fresh full-diff review.
+The release process also runs the official Codex skill and plugin validators, clean plugin installation, standalone installation from the tagged GitHub path, forward-tests for `new`, `refine`, `run`, delegated discovery, TDD-first remediation, and model-routing fallbacks, and a fresh full-diff review.
 
 Useful official references:
 

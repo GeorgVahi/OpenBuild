@@ -2,7 +2,7 @@
 
 [English version](README.md)
 
-OpenBuild — workflow для Codex, который превращает идею простыми словами или существующее ТЗ в проверенную по репозиторию спецификацию и, когда это запрошено, в протестированную реализацию с прогрессивным review.
+OpenBuild — workflow для Codex, который превращает идею простыми словами или существующее ТЗ в проверенную по репозиторию спецификацию и, когда это запрошено, в протестированную реализацию с делегированным поиском кода, TDD-first milestones и прогрессивным review.
 
 В plugin входит один явно вызываемый skill **Build** с пятью режимами:
 
@@ -12,9 +12,11 @@ OpenBuild — workflow для Codex, который превращает иде�
 - `full` — пройти путь от идеи до реализации, проверок и review;
 - `setup-models` — при желании настроить read-only профили уровней моделей с отдельным разрешением.
 
-OpenBuild самодостаточен. Ему не нужны отдельный review-skill, telemetry, внешний сервис или фоновые сетевые процессы.
+OpenBuild самодостаточен. Ему не нужны отдельные discovery-, TDD- или review-skills, telemetry, внешний сервис или фоновые сетевые процессы.
 
 > OpenBuild `v0.1.0` — preview-релиз. Для воспроизводимости устанавливайте tag версии; используйте `main` только если осознанно хотите последнюю preview-версию.
+
+Текущая preview-версия в `main` имеет plugin version `0.2.0-dev.1`; immutable stable tag остаётся `v0.1.0` до публикации нового релиза.
 
 ## Требования
 
@@ -119,7 +121,7 @@ Build:
 
 1. изучит текущий репозиторий и применимые `AGENTS.md`;
 2. зафиксирует Git- или artifact-baseline;
-3. найдёт релевантный код, контракты, тесты и блайндспоты;
+3. по возможности делегирует широкий поиск кода ограниченным read-only discovery workers, затем проверит их evidence map;
 4. задаст только оставшиеся продуктовые вопросы с короткими ответами вида `1а 2б`;
 5. создаст `BUILD.md` на языке пользователя;
 6. остановится до реализации.
@@ -155,7 +157,7 @@ Build сверит документ с текущим репозиторием, 
 $build run BUILD.md
 ```
 
-Build сначала проверит, что спецификацию можно довести до `Ready`. Затем выполнит когерентные milestones, запустит проверки, проведёт progressive review, обновит журнал спецификации и создаст scoped milestone-коммиты, если политика репозитория разрешает. Push пользовательского репозитория без явного разрешения не выполняется.
+Build сначала проверит, что спецификацию можно довести до `Ready`. Затем классифицирует реализацию как `Direct`, `Investigation` или `TDD-first`, выполнит когерентные milestones, запустит проверки, проведёт progressive review, обновит журнал спецификации и создаст scoped milestone-коммиты, если политика репозитория разрешает. Push пользовательского репозитория без явного разрешения не выполняется.
 
 ### 4. Полный цикл
 
@@ -177,7 +179,7 @@ $build Добавить API-ключи организаций с ротацие�
 $build setup-models
 ```
 
-Build сначала проверит возможности текущего Codex runtime. Если native per-subagent selector уже даёт доказанную лестницу, файлы не нужны. Иначе Build может предложить read-only custom-agent profiles для уровней `fast`, `balanced`, `strong` и `strongest`.
+Build сначала проверит возможности текущего Codex runtime. Если native per-subagent selector уже даёт доказанную лестницу, файлы не нужны. Иначе Build может предложить read-only профиль `openbuild-discovery` для широкого поиска кода и review-профили `openbuild-review-fast`, `balanced`, `strong` и `strongest`.
 
 До записи Build обязан показать:
 
@@ -187,6 +189,22 @@ Build сначала проверит возможности текущего Co
 - точные пути и полный diff.
 
 Запись выполняется только после отдельного разрешения. Существующие profiles не перезаписываются, TOML проверяется, а переключение моделей считается рабочим только после reload/new session и фактического обнаружения profiles. Отказ от setup не отключает zero-config workflow.
+
+## Как работает автоматический поиск по коду
+
+Перед широким листингом файлов, repository-wide search, поиском symbols, трассировкой зависимостей или картированием routes/tests/configs главный агент составляет короткий search plan и по возможности делегирует независимые ветки ограниченным read-only discovery workers. Они возвращают только evidence map: `path:line`, symbol или route, подтверждённый факт, его значение, negative results и confidence.
+
+Главный агент остаётся оркестратором: убирает дубли, точечно перечитывает критические файлы, принимает продуктовые и архитектурные решения, редактирует, валидирует, управляет Git и отвечает пользователю. Discovery workers не редактируют код и не выбирают архитектуру.
+
+Через `$build setup-models` профиль `openbuild-discovery` можно явно сопоставить с подходящей более экономичной моделью для поиска кода, когда mapping подтверждён runtime metadata или пользователем. OpenBuild не предполагает конкретную версию модели, не выводит стоимость из slug и не заявляет экономию, если настоящая модель скрыта. Если предпочтительный worker недоступен, исчерпал лимит или квоту, Build без дополнительного вопроса переходит к explorer, generic-subagent или root-only fallback и не блокирует задачу.
+
+## Как работает TDD-first реализация
+
+Изменения поведения, контрактов, validation, routing, state, auth/permissions, persistence, concurrency, integrations, security и нетривиального пользовательского поведения идут по циклу red → green → refactor. Build находит самый узкий поддерживаемый test path, по возможности фиксирует осмысленный failing signal, вносит минимальное когерентное изменение во владеющем слое, требует focused green validation и рефакторит только после green.
+
+Для документации и косметических Direct-изменений искусственный failing test не создаётся. Investigation сначала воспроизводит или трассирует проблему и перед изменением поведения переклассифицируется в TDD-first. Если автоматический red signal непрактичен, Build записывает причину и использует лучший воспроизводимый contract/runtime signal.
+
+Reviewers остаются read-only. Они проверяют red signal, owning layer, focused green result и покрытие по риску. Подтверждённые behavioral findings возвращаются главному агенту, который проводит remediation через тот же TDD-first workflow и только затем запускает следующий review.
 
 ## Как работает progressive review
 
@@ -217,6 +235,7 @@ Score — только сигнал эскалации. Для завершен�
 - Milestone-коммиты создаются, когда Git доступен, изменения можно изолировать и применимые инструкции не запрещают commit.
 - Push всегда требует явного разрешения.
 - Настройка моделей требует отдельного preview и разрешения.
+- Discovery и review workers остаются read-only; главный агент владеет решениями, edits, TDD remediation, validation, Git и итоговым ответом.
 - Нет telemetry, daemon, `curl | shell`, скрытого auto-update или фонового сетевого сервиса.
 - Соблюдаются `AGENTS.md`, sandbox, approvals, validation и security-правила репозитория.
 
@@ -253,7 +272,7 @@ Build сохранит initial status, исключит чужие измене�
 python scripts/validate_package.py
 ```
 
-Release-процесс также запускает официальные Codex validators для skill/plugin, чистую установку plugin, standalone-установку по tagged GitHub path, forward-tests режимов `new`, `refine`, `run` и routing fallbacks, а также свежий review полного diff.
+Release-процесс также запускает официальные Codex validators для skill/plugin, чистую установку plugin, standalone-установку по tagged GitHub path, forward-tests режимов `new`, `refine`, `run`, delegated discovery, TDD-first remediation и routing fallbacks, а также свежий review полного diff.
 
 Официальные материалы:
 

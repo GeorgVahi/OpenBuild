@@ -1,7 +1,7 @@
 {
   "name": "openbuild",
-  "version": "0.1.0",
-  "description": "Evidence-grounded specifications, implementation, and progressive review for Codex.",
+  "version": "0.2.0-dev.1",
+  "description": "Evidence-grounded specifications, delegated code discovery, TDD-first implementation, and progressive review for Codex.",
   "author": {
     "name": "GeorgVahi",
     "url": "https://github.com/GeorgVahi"
@@ -13,14 +13,16 @@
     "specification",
     "planning",
     "code-review",
+    "code-discovery",
     "multi-agent",
+    "tdd",
     "codex"
   ],
   "skills": "./skills/",
   "interface": {
     "displayName": "OpenBuild",
     "shortDescription": "Plan, build, and review from one durable specification",
-    "longDescription": "Turn ideas or existing specifications into repository-grounded plans, execute tested milestones, and escalate review across available model tiers.",
+    "longDescription": "Turn ideas or existing specifications into repository-grounded plans, delegate broad code search, execute TDD-first milestones, and escalate review across available model tiers.",
     "developerName": "GeorgVahi",
     "category": "Productivity",
     "capabilities": [

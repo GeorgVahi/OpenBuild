@@ -11,7 +11,9 @@ Use this as a flexible structure. Remove irrelevant sections and keep the docume
 - Primary signal: <observable proof of success>
 - Review baseline: <Git branch@SHA and initial status, or a non-Git artifact manifest>
 - Complexity: low | medium | high | critical — <evidence>
+- Implementation mode: Direct | Investigation | TDD-first — <evidence>
 - Routing mode: native-selector | configured-profiles | reasoning-ladder | role-only | generic-subagent | root-only
+- Discovery mode: delegated | mixed | root-fallback — <observed model/tier or unknown>
 
 ## 1. Outcome
 
@@ -96,6 +98,8 @@ Use this as a flexible structure. Remove irrelevant sections and keep the docume
 ## 7. Validation and review
 
 - Primary signal: <main proof>.
+- Red signal: <failing test/reproduction and intended reason, or why not applicable/practical>.
+- Focused green: `<exact command or scenario>` -> <result>.
 - Targeted checks: `<command or scenario>`.
 - Wider checks: `<risk-based command or scenario>`.
 - Manual/runtime check: <if required>.
@@ -110,7 +114,9 @@ Use this as a flexible structure. Remove irrelevant sections and keep the docume
 - Status: Pending | In progress | Complete
 - Scope: <included work>
 - Excludes: <excluded work>
-- Test-first signal: <test or reproduction>
+- Implementation mode: Direct | Investigation | TDD-first
+- Red signal: <test/reproduction and expected failure, or not applicable with reason>
+- Focused green: `<command or scenario>` -> <result>
 - Validation: `<commands or scenarios>`
 - Acceptance: AC-01, AC-02
 - Review: Pending | Accepted — <mode/tier/confidence>
@@ -150,6 +156,8 @@ Non-blocking assumptions:
 - Repository evidence supports decisions without becoming a raw code dump.
 - Product decisions are separate from autonomous technical choices.
 - Complexity and routing claims use actual risk and runtime evidence.
+- Broad code discovery records delegation or an honest root fallback, with critical findings verified by the root.
+- TDD-first milestones record an intended red signal, owner-layer implementation, and focused green evidence, or explain why an automated red signal was impractical.
 - Milestones deliver coherent outcomes rather than arbitrary file groups.
 - Validation commands exist or are explicitly marked as proposed.
 - Blocking questions are empty before implementation starts.

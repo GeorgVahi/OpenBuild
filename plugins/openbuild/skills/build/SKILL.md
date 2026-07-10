@@ -1,6 +1,6 @@
 ---
 name: build
-description: "Turn a plain-language idea or an existing BUILD.md, SPEC.md, or TZ.md into a repository-grounded specification, refine it, or execute it through tested milestones with capability-aware subagents and progressive review. Use only when explicitly invoked as $build for new, refine, run, full, or setup-models workflows; do not invoke for ordinary build commands."
+description: "Turn a plain-language idea or an existing BUILD.md, SPEC.md, or TZ.md into a repository-grounded specification, refine it, or execute it through delegated code discovery, TDD-first milestones, capability-aware subagents, and progressive review. Use only when explicitly invoked as $build for new, refine, run, full, or setup-models workflows; do not invoke for ordinary build commands."
 ---
 
 # Build
@@ -40,6 +40,8 @@ Read [the specification template](references/spec-template.md) before creating o
 - Treat current files and user edits as authoritative. Preserve unrelated changes and exclude them from edits, review, commits, and pushes.
 - Keep the root agent as the owner of product questions, architecture, edits, finding adjudication, validation choices, Git, and final synthesis.
 - Delegate repository reading, evidence gathering, log triage, and independent review as read-only work. Do not let explorers or reviewers edit, commit, push, or make product decisions.
+- Route broad repository search through [code discovery](references/code-discovery.md) before the root performs broad search when a suitable worker is available. Keep targeted verification with the root.
+- Keep reviewers read-only. Route confirmed behavioral findings through [the TDD workflow](references/tdd-workflow.md) under root ownership instead of asking a reviewer to edit.
 - Never infer a model's cost or capability from its slug. Report a selected model or tier only when the runtime or confirmed configuration exposes it.
 - Never alter user-level or project-level model configuration without showing the exact proposed changes and receiving separate permission.
 - In `new` and `refine`, do not edit implementation files, run destructive commands, or begin milestones.
@@ -67,7 +69,19 @@ Search only areas that can change the decision. Establish:
 - affected users, data, integrations, security boundaries, and rollout concerns;
 - the concrete mismatch between the requested result and the current project.
 
-Use [model routing](references/model-routing.md) before delegating. Prefer bounded read-only explorers and return a compact evidence map with `path:line`, symbol or route, confirmed fact, and why it matters. Do not copy raw logs or large file dumps into the root context.
+Read [code discovery](references/code-discovery.md) before file discovery, repository-wide grep, symbol lookup, dependency tracing, route mapping, test/config/schema search, or other broad repository inspection. Create a compact search plan, then use [model routing](references/model-routing.md) to select the first proven capability branch. Prefer a confirmed read-only `openbuild-discovery` profile or minimum sufficient native tier, but never invent the model or savings.
+
+Delegate independent search branches when useful. Require a compact evidence map with `path:line`, symbol or route, confirmed fact, relevance, negative results, and confidence. Aggregate and deduplicate the map, then let the root perform targeted verification. Give each branch a task-appropriate time and attempt budget. A short parent polling timeout is not a completed worker failure. Fall back when the platform reports unavailability/quota/failure, the declared budget is exceeded, or two completed attempts return unusable evidence; record the actual mode instead of waiting indefinitely.
+
+## Classify the implementation mode
+
+Before implementation, assign and record one mode using [the TDD workflow](references/tdd-workflow.md):
+
+- `Direct` for documentation, cosmetic, or obvious local edits without behavior changes;
+- `Investigation` while the root cause or owning layer is unclear;
+- `TDD-first` for behavior, logic, contracts, auth or permissions, persistence, routing, state, concurrency, integrations, security, or non-trivial user-visible changes.
+
+Do not force a failing test for Direct work. Reclassify Investigation work to TDD-first before changing behavior.
 
 ## Classify complexity and risk
 
@@ -131,10 +145,10 @@ In `new` or `refine`, set the specification to `Ready`, summarize it, and stop. 
 
 For each milestone:
 
-1. Reconfirm its acceptance criteria, complexity floor, and owning files.
-2. Define or add the smallest meaningful failing test or primary signal for behavior, contracts, state, data, security, or fixes when practical.
-3. Make the smallest coherent change in the owning layer. Keep overlapping edits with the root agent.
-4. Run narrow validation first, then wider checks according to risk.
+1. Reconfirm its acceptance criteria, implementation mode, complexity floor, and owning files.
+2. For TDD-first work, follow [the TDD workflow](references/tdd-workflow.md): establish the owner and primary signal, run the smallest meaningful red test when practical, then implement the minimum coherent owner-layer change.
+3. For Direct or Investigation work, use the narrow signal appropriate to that mode and reclassify before changing behavior.
+4. Require focused green validation, refactor only after green when it removes current complexity, then run wider checks according to risk.
 5. Review the task diff against the saved baseline and remove unrelated changes.
 6. Run the built-in progressive review described in [the review protocol](references/review-protocol.md).
 7. Adjudicate every finding. Fix confirmed actionable issues, rerun affected validation, and escalate review when required.
@@ -152,6 +166,8 @@ Use a fresh reviewer context when available. Pass the specification, baseline, c
 
 Require a structured result containing verdict, confidence, acceptance coverage, evidence-backed findings, observed routing mode/tier, and an optional score. A score below `9.5`, low confidence, incomplete coverage, conflicting reviews, failed validation, unresolved high-impact findings, or a material post-review diff triggers escalation after confirmed findings are handled.
 
+For TDD-first milestones, require the reviewer to audit the red signal, owning layer, focused green result, and risk-based coverage without editing. The root verifies confirmed findings and sends behavioral remediation back through the TDD workflow before the next review cycle.
+
 Treat scores only as escalation signals. Never accept work from a number alone. Bound the loop by the distinct available tiers and do not repeat the same reviewer on an unchanged diff. For high and critical work, request the required strong/strongest final pass even when a cheaper reviewer scores it highly. If the runtime cannot prove tiers, use the strongest available root/reviewer fallback, record `observed tier: unknown`, and evaluate completion from evidence unless project policy explicitly requires a named tier.
 
 If the strongest available reviewer still finds blocking issues, keep the task incomplete and record the exact blocker. Missing tier metadata alone is a disclosed limitation, not an automatic blocker. When no independent reviewer exists, perform sequential self-review and label it `self-review, limited` rather than claiming independence.
@@ -162,7 +178,7 @@ For `$build setup-models`, read [model routing](references/model-routing.md) and
 
 First detect whether a native selector already provides a proven ladder. If configuration is useful, inspect only capabilities actually exposed by the runtime. Propose a deduplicated `fast`, `balanced`, `strong`, and `strongest` mapping; show the model/reasoning evidence, target scope, exact file paths, and exact diff.
 
-Ask for separate permission before writing user-level `~/.codex/agents` or project-level `.codex/agents`. Create uniquely named read-only `openbuild-*` profiles. Never overwrite or silently merge an existing profile. Validate TOML, instruct the user to reload or start a new session, then verify that profiles are actually discoverable before claiming model switching works.
+Ask for separate permission before writing user-level `~/.codex/agents` or project-level `.codex/agents`. Prefer a uniquely named read-only `openbuild-discovery` profile for broad code search plus risk-appropriate `openbuild-review-*` profiles. Never overwrite or silently merge an existing profile. Validate TOML, instruct the user to reload or start a new session, then verify that profiles are actually discoverable before claiming model switching works.
 
 If setup is declined or unsupported, leave zero-config routing fully functional and report the effective fallback mode.
 
@@ -178,4 +194,4 @@ After all milestones:
 6. Set `Complete` only when every requirement is proven. Otherwise preserve the exact status and continue or request missing authority.
 7. Update the final specification log and create the final scoped commit when allowed. Push only when explicitly authorized.
 
-Report the outcome, closed milestones, acceptance evidence, validation, review mode/tier, commits, documentation status, migration implications, and real remaining risks.
+Report the outcome, closed milestones, discovery routing/fallback, implementation mode and red/green evidence, acceptance evidence, validation, review mode/tier, commits, documentation status, migration implications, and real remaining risks.

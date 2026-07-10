@@ -5,18 +5,19 @@ Use this reference whenever Build delegates repository discovery, log analysis, 
 ## Routing principles
 
 1. Keep the current root agent as orchestrator and decision owner.
-2. Use cheaper or faster subagents only for bounded read-only work whose output the root verifies.
-3. Choose models or tiers only from capabilities exposed by the runtime or confirmed configuration.
-4. Never rank a model by parsing its name. A model catalog may expose IDs, supported reasoning efforts, a default, or an upgrade path without exposing cost or a complete strength ordering.
-5. Never claim that a model changed unless the spawn result, selected profile, or runtime evidence proves it.
-6. Preserve a functional root-only fallback.
+2. Route broad repository search to a bounded read-only discovery worker when available; keep decisions, targeted verification, edits, and final synthesis with the root.
+3. Use cheaper or faster subagents only when the runtime or confirmed configuration proves their suitability; do not assume savings from a role or model name.
+4. Choose models or tiers only from capabilities exposed by the runtime or confirmed configuration.
+5. Never rank a model by parsing its name. A model catalog may expose IDs, supported reasoning efforts, a default, or an upgrade path without exposing cost or a complete strength ordering.
+6. Never claim that a model changed unless the spawn result, selected profile, or runtime evidence proves it.
+7. Preserve a functional root-only fallback.
 
 ## Capability order
 
 Use the first supported branch:
 
 1. **Native selector:** the spawn tool accepts a model or tier and the runtime exposes a confirmed ordered ladder.
-2. **Configured profiles:** available custom agents explicitly map `openbuild-*` roles to confirmed models and reasoning efforts.
+2. **Configured profiles:** available custom agents explicitly map `openbuild-discovery` and `openbuild-review-*` roles to confirmed models and reasoning efforts.
 3. **Reasoning ladder:** one confirmed model supports ordered reasoning efforts suitable for the task.
 4. **Role-only:** use a built-in read-heavy `explorer` or reviewer role, but report the model as unknown.
 5. **Generic subagent:** send a strict read-only brief; report model and savings as unknown.
@@ -47,6 +48,8 @@ Give each explorer or reviewer:
 
 Keep raw logs and large dumps out of the root context. Aggregate and deduplicate findings before making decisions.
 
+For broad repository search, use the full search-plan, evidence-map, fallback, and root-verification contract in [code discovery](code-discovery.md). Discovery workers and reviewers are separate roles: discovery maps evidence; review evaluates a current diff and acceptance evidence.
+
 ## `$build setup-models`
 
 ### Preflight
@@ -58,9 +61,10 @@ Keep raw logs and large dumps out of the root context. Aggregate and deduplicate
 
 ### Proposal
 
-Propose up to four roles:
+Propose up to five roles, collapsing duplicates when fewer distinct tiers exist:
 
-- `openbuild-explorer-fast`: repository search and evidence gathering;
+- `openbuild-discovery`: repository search and evidence gathering on the minimum proven suitable read-only model/tier;
+- `openbuild-review-fast`: low-risk documentation and mechanical-change review;
 - `openbuild-review-balanced`: normal contained changes;
 - `openbuild-review-strong`: high-risk or escalated review;
 - `openbuild-review-strongest`: critical or final escalated review.
@@ -113,7 +117,9 @@ Record this for each run or milestone:
 ```text
 Complexity: <low|medium|high|critical> — <evidence>
 Routing mode: <native-selector|configured-profiles|reasoning-ladder|role-only|generic-subagent|root-only>
+Discovery mode: <delegated|mixed|root-fallback>
 Discovery tier: <observed tier or unknown>
+Discovery branches: <objectives and worker count>
 Starting review tier: <observed tier or unknown>
 Required final tier: <tier based on risk>
 Actual escalation: <tier sequence or none>
