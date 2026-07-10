@@ -1,0 +1,266 @@
+# OpenBuild
+
+[English version](README.md)
+
+OpenBuild — workflow для Codex, который превращает идею простыми словами или существующее ТЗ в проверенную по репозиторию спецификацию и, когда это запрошено, в протестированную реализацию с прогрессивным review.
+
+В plugin входит один явно вызываемый skill **Build** с пятью режимами:
+
+- `new` — создать спецификацию и остановиться до изменений кода;
+- `refine` — проверить и улучшить существующую спецификацию без изменений кода;
+- `run` — выполнить готовую или дополняемую спецификацию;
+- `full` — пройти путь от идеи до реализации, проверок и review;
+- `setup-models` — при желании настроить read-only профили уровней моделей с отдельным разрешением.
+
+OpenBuild самодостаточен. Ему не нужны отдельный review-skill, telemetry, внешний сервис или фоновые сетевые процессы.
+
+> OpenBuild `v0.1.0` — preview-релиз. Для воспроизводимости устанавливайте tag версии; используйте `main` только если осознанно хотите последнюю preview-версию.
+
+## Требования
+
+- Актуальная поверхность Codex с поддержкой skills. Установка plugins доступна в Codex CLI и поддерживаемых plugin-поверхностях.
+- Git, если Build должен создавать milestone-коммиты или проверять task diff.
+- Для `v0.1.0` нативно проверен Windows. Документация для macOS и Linux считается best-effort до отдельных нативных проверок.
+
+OpenBuild `v0.1.0` поддерживает только Codex. Совместимость с Claude Code, Cursor, Gemini CLI и другими coding agents не заявляется.
+
+## Установка как plugin — рекомендуется
+
+Plugin — основной канал распространения. Он даёт версионированную установку через marketplace и namespaced-вызов `$openbuild:build`.
+
+### Стабильный `v0.1.0`
+
+```bash
+codex plugin marketplace add GeorgVahi/OpenBuild --ref v0.1.0
+codex plugin add openbuild@openbuild
+```
+
+Начните новый Codex thread и проверьте установку:
+
+```bash
+codex plugin list
+```
+
+Явный вызов:
+
+```text
+$openbuild:build new Добавить сохранённые поиски в приложение
+```
+
+### Preview из `main`
+
+```bash
+codex plugin marketplace add GeorgVahi/OpenBuild --ref main
+codex plugin add openbuild@openbuild
+```
+
+Обновление установки из `main`:
+
+```bash
+codex plugin marketplace upgrade openbuild
+codex plugin add openbuild@openbuild
+```
+
+### Переход между стабильными tags
+
+Stable marketplace закреплён за выбранным tag. Для перехода на другую версию удалите установленный plugin и запись marketplace, затем добавьте новый tag:
+
+```bash
+codex plugin remove openbuild@openbuild
+codex plugin marketplace remove openbuild
+codex plugin marketplace add GeorgVahi/OpenBuild --ref v0.1.0
+codex plugin add openbuild@openbuild
+```
+
+Замените `v0.1.0` на нужный release tag.
+
+### Удаление plugin
+
+```bash
+codex plugin remove openbuild@openbuild
+codex plugin marketplace remove openbuild
+```
+
+## Установка как standalone skill
+
+Standalone-установка даёт короткий вызов `$build`. Попросите предустановленный системный skill-installer установить canonical папку Build:
+
+```text
+Используй $skill-installer и установи skill из https://github.com/GeorgVahi/OpenBuild/tree/v0.1.0/plugins/openbuild/skills/build
+```
+
+После установки начните новый Codex thread. Откройте `/skills` или введите `$`, убедитесь, что появился `build`, и вызовите:
+
+```text
+$build new Добавить сохранённые поиски в приложение
+```
+
+Installer не перезаписывает существующую папку `$CODEX_HOME/skills/build`. При обновлении сначала проверьте её, осознанно сделайте backup или удалите и повторите установку. Для удаления standalone-версии удалите только подтверждённую папку `$CODEX_HOME/skills/build` и перезапустите Codex.
+
+Plugin и standalone используют одну canonical source-папку; дублирующихся реализаций в репозитории нет.
+
+## Использование
+
+### 1. Создать спецификацию с нуля
+
+Plugin:
+
+```text
+$openbuild:build new Добавить список желаний в существующий магазин
+```
+
+Standalone:
+
+```text
+$build new Добавить список желаний в существующий магазин
+```
+
+Build:
+
+1. изучит текущий репозиторий и применимые `AGENTS.md`;
+2. зафиксирует Git- или artifact-baseline;
+3. найдёт релевантный код, контракты, тесты и блайндспоты;
+4. задаст только оставшиеся продуктовые вопросы с короткими ответами вида `1а 2б`;
+5. создаст `BUILD.md` на языке пользователя;
+6. остановится до реализации.
+
+Пример вопроса:
+
+```text
+1. Кто может сохранять список желаний?
+   а) Только авторизованные пользователи; список привязан к аккаунту.
+   б) Также гости; локальный список может объединиться после входа.
+   Рекомендация: 1а — в первой версии не потребуется отдельная политика merge.
+
+Можно ответить: 1а
+```
+
+### 2. Улучшить существующую спецификацию
+
+```text
+$build refine BUILD.md
+```
+
+Можно передать `SPEC.md`, `TZ.md` или любой явный путь:
+
+```text
+$build refine docs/checkout-spec.md
+```
+
+Build сверит документ с текущим репозиторием, сохранит ручные правки, найдёт противоречия и unknown unknowns, обновит acceptance criteria и milestones и остановится в состоянии `Ready`. Если подходят несколько файлов или выбранный документ относится к другой задаче, Build спросит до изменений.
+
+### 3. Выполнить спецификацию
+
+```text
+$build run BUILD.md
+```
+
+Build сначала проверит, что спецификацию можно довести до `Ready`. Затем выполнит когерентные milestones, запустит проверки, проведёт progressive review, обновит журнал спецификации и создаст scoped milestone-коммиты, если политика репозитория разрешает. Push пользовательского репозитория без явного разрешения не выполняется.
+
+### 4. Полный цикл
+
+```text
+$build full Добавить API-ключи организаций с ротацией и аудитом
+```
+
+Идея без указанного режима считается `full`:
+
+```text
+$build Добавить API-ключи организаций с ротацией и аудитом
+```
+
+`full` может менять реализацию после достижения Ready-gate. Build всё равно остановится перед разрушительными действиями, секретами, live-инфраструктурой, внешней публикацией без уже выданного разрешения или существенным расширением scope.
+
+### 5. Настроить уровни моделей
+
+```text
+$build setup-models
+```
+
+Build сначала проверит возможности текущего Codex runtime. Если native per-subagent selector уже даёт доказанную лестницу, файлы не нужны. Иначе Build может предложить read-only custom-agent profiles для уровней `fast`, `balanced`, `strong` и `strongest`.
+
+До записи Build обязан показать:
+
+- evidence доступных моделей и reasoning efforts;
+- предлагаемое распределение tiers;
+- scope: пользовательский `~/.codex/agents` или проектный `.codex/agents`;
+- точные пути и полный diff.
+
+Запись выполняется только после отдельного разрешения. Существующие profiles не перезаписываются, TOML проверяется, а переключение моделей считается рабочим только после reload/new session и фактического обнаружения profiles. Отказ от setup не отключает zero-config workflow.
+
+## Как работает progressive review
+
+Build классифицирует задачу как `low`, `medium`, `high` или `critical` и начинает с минимально достаточного reviewer tier:
+
+| Сложность | Типичная работа | Начальный запрос review |
+|---|---|---|
+| `low` | Документация или локальная механическая правка | Fast/economy |
+| `medium` | Ограниченная логика или refactor с тестами | Balanced |
+| `high` | Межслойное состояние, публичные контракты, persistence, concurrency, auth, permissions, privacy | Strong |
+| `critical` | Необратимые действия, live-инфраструктура, secrets, разрушительная миграция | Strongest available |
+
+Reviewer возвращает покрытие acceptance criteria, findings с evidence, confidence, verdict и optional score. После исправления подтверждённых замечаний и повторных проверок Build повышает tier, если score ниже `9.5`, confidence низкий, coverage неполный, reviewers конфликтуют, validation падает, остаётся high-impact finding или diff существенно изменился.
+
+Score — только сигнал эскалации. Для завершения по-прежнему нужны зелёная validation, evidence по всем acceptance criteria и отсутствие подтверждённых actionable findings. Loop ограничен реальными tiers и не повторяет одного reviewer на неизменённом diff.
+
+Если Codex не раскрывает model selector, Build не выдумывает его. Последовательность fallback: настроенные profiles, поддерживаемые reasoning efforts, read-only explorer, generic subagent и root-only self-review. Фактический режим и неизвестный tier явно записываются.
+
+## Выбор файла спецификации
+
+Явный путь имеет приоритет. Иначе Build выбирает релевантный `BUILD.md`, затем релевантный `SPEC.md` или `TZ.md`, а для новой задачи создаёт `BUILD.md`. Документ другой задачи никогда не перезаписывается молча.
+
+## Git и безопасность
+
+- Исходные изменения пользователя остаются вне scope, если спецификация явно не включает их.
+- `new` и `refine` могут менять только спецификацию.
+- `run` и `full` могут менять реализацию после Ready-gate.
+- Milestone-коммиты создаются, когда Git доступен, изменения можно изолировать и применимые инструкции не запрещают commit.
+- Push всегда требует явного разрешения.
+- Настройка моделей требует отдельного preview и разрешения.
+- Нет telemetry, daemon, `curl | shell`, скрытого auto-update или фонового сетевого сервиса.
+- Соблюдаются `AGENTS.md`, sandbox, approvals, validation и security-правила репозитория.
+
+## Решение проблем
+
+### Skill не появился
+
+- Начните новый thread или перезапустите Codex после установки.
+- Для plugin запустите `codex plugin list` и проверьте статус `openbuild@openbuild`.
+- Откройте `/skills` или введите `$` для просмотра skills.
+- Для plugin используйте `$openbuild:build`, для standalone — `$build`.
+
+### Видны и `$build`, и `$openbuild:build`
+
+Установлены оба канала. Они используют один source, но являются отдельными локальными установками. Используйте namespaced-вызов plugin или осознанно удалите standalone-папку `$CODEX_HOME/skills/build`.
+
+### Переключение моделей недоступно или не подтверждено
+
+Запустите `$build setup-models`. Если runtime не поддерживает ни per-spawn selection, ни custom agents, Build продолжит через role/reasoning/root fallback и честно укажет ограничение.
+
+### Build отказывается перезаписывать спецификацию
+
+Найденный документ неоднозначен или относится к другой задаче. Передайте нужный путь явно или выберите описательное имя, например `BUILD-wishlist.md`.
+
+### В worktree уже есть изменения
+
+Build сохранит initial status, исключит чужие изменения и будет коммитить только task-scoped файлы. Если безопасно изолировать изменения нельзя, он остановится перед commit, а не спрячет или опубликует их.
+
+## Разработка и проверка
+
+Из корня репозитория:
+
+```bash
+python scripts/validate_package.py
+```
+
+Release-процесс также запускает официальные Codex validators для skill/plugin, чистую установку plugin, standalone-установку по tagged GitHub path, forward-tests режимов `new`, `refine`, `run` и routing fallbacks, а также свежий review полного diff.
+
+Официальные материалы:
+
+- [Build skills](https://learn.chatgpt.com/docs/build-skills)
+- [Build plugins](https://learn.chatgpt.com/docs/build-plugins)
+- [Codex subagents and custom agents](https://learn.chatgpt.com/docs/agent-configuration/subagents)
+
+## Лицензия
+
+[MIT](LICENSE)

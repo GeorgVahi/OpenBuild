@@ -1,0 +1,37 @@
+{
+  "name": "openbuild",
+  "version": "0.1.0",
+  "description": "Evidence-grounded specifications, implementation, and progressive review for Codex.",
+  "author": {
+    "name": "GeorgVahi",
+    "url": "https://github.com/GeorgVahi"
+  },
+  "homepage": "https://github.com/GeorgVahi/OpenBuild#readme",
+  "repository": "https://github.com/GeorgVahi/OpenBuild",
+  "license": "MIT",
+  "keywords": [
+    "specification",
+    "planning",
+    "code-review",
+    "multi-agent",
+    "codex"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "OpenBuild",
+    "shortDescription": "Plan, build, and review from one durable specification",
+    "longDescription": "Turn ideas or existing specifications into repository-grounded plans, execute tested milestones, and escalate review across available model tiers.",
+    "developerName": "GeorgVahi",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/GeorgVahi/OpenBuild",
+    "defaultPrompt": [
+      "Use Build to turn this idea into a reviewed implementation.",
+      "Refine an existing specification against the current repository.",
+      "Execute a ready specification with progressive review."
+    ]
+  }
+}
