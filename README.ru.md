@@ -14,26 +14,26 @@ OpenBuild — workflow для Codex, который превращает иде�
 
 OpenBuild самодостаточен. Ему не нужны отдельные discovery-, TDD- или review-skills, telemetry, внешний сервис или фоновые сетевые процессы.
 
-> OpenBuild `v0.1.0` — preview-релиз. Для воспроизводимости устанавливайте tag версии; используйте `main` только если осознанно хотите последнюю preview-версию.
+> OpenBuild `v0.2.0` — текущий релиз. Для воспроизводимости устанавливайте tag версии; используйте `main` только если осознанно хотите последний development-коммит.
 
-Текущая preview-версия в `main` имеет plugin version `0.2.0-dev.3`; immutable release tag остаётся `v0.1.0` до публикации нового релиза.
+Текущий development manifest указывает plugin version `0.3.0`; последний immutable release tag остаётся `v0.2.0`.
 
 ## Требования
 
 - Актуальная поверхность Codex с поддержкой skills. Установка plugins доступна в Codex CLI и поддерживаемых plugin-поверхностях.
 - Git, если Build должен создавать milestone-коммиты или проверять task diff.
-- Для `v0.1.0` нативно проверен Windows. Документация для macOS и Linux считается best-effort до отдельных нативных проверок.
+- Для `v0.2.0` нативно проверен Windows. Документация для macOS и Linux считается best-effort до отдельных нативных проверок.
 
-OpenBuild `v0.1.0` поддерживает только Codex. Совместимость с Claude Code, Cursor, Gemini CLI и другими coding agents не заявляется.
+OpenBuild `v0.2.0` поддерживает только Codex. Совместимость с Claude Code, Cursor, Gemini CLI и другими coding agents не заявляется.
 
 ## Установка как plugin — рекомендуется
 
 Plugin — основной канал распространения. Он даёт версионированную установку через marketplace и namespaced-вызов `$openbuild:build`.
 
-### Закреплённый preview `v0.1.0`
+### Закреплённый релиз `v0.2.0`
 
 ```bash
-codex plugin marketplace add GeorgVahi/OpenBuild --ref v0.1.0
+codex plugin marketplace add GeorgVahi/OpenBuild --ref v0.2.0
 codex plugin add openbuild@openbuild
 ```
 
@@ -70,11 +70,11 @@ Versioned/tag-pinned marketplace закреплён за выбранным tag.
 ```bash
 codex plugin remove openbuild@openbuild
 codex plugin marketplace remove openbuild
-codex plugin marketplace add GeorgVahi/OpenBuild --ref v0.1.0
+codex plugin marketplace add GeorgVahi/OpenBuild --ref v0.2.0
 codex plugin add openbuild@openbuild
 ```
 
-Замените `v0.1.0` на нужный release tag.
+Замените `v0.2.0` на нужный release tag.
 
 ### Удаление plugin
 
@@ -88,7 +88,7 @@ codex plugin marketplace remove openbuild
 Standalone-установка даёт короткий вызов `$build`. Попросите предустановленный системный skill-installer установить canonical папку Build:
 
 ```text
-Используй $skill-installer и установи skill из https://github.com/GeorgVahi/OpenBuild/tree/v0.1.0/plugins/openbuild/skills/build
+Используй $skill-installer и установи skill из https://github.com/GeorgVahi/OpenBuild/tree/v0.2.0/plugins/openbuild/skills/build
 ```
 
 После установки начните новый Codex thread. Откройте `/skills` или введите `$`, убедитесь, что появился `build`, и вызовите:
@@ -225,9 +225,9 @@ Build классифицирует задачу как `low`, `medium`, `high` �
 | `high` | Межслойное состояние, публичные контракты, persistence, concurrency, auth, permissions, privacy | Strong |
 | `critical` | Необратимые действия, live-инфраструктура, secrets, разрушительная миграция | Strongest available |
 
-Reviewer возвращает покрытие acceptance criteria, findings с evidence, confidence, verdict и optional score. После исправления подтверждённых замечаний и повторных проверок Build повышает tier, если score ниже `9.5`, confidence низкий, coverage неполный, reviewers конфликтуют, validation падает, остаётся high-impact finding или diff существенно изменился.
+Reviewer возвращает покрытие acceptance criteria, findings с evidence, confidence, verdict и optional score. После исправления подтверждённых замечаний и повторных проверок Build повышает tier, если confidence низкий, coverage неполный, reviewers конфликтуют, validation падает, остаётся high-impact finding или diff существенно изменился. Score ниже `9.5` запускает эскалацию только вместе с конкретным finding, uncertainty или пробелом coverage.
 
-Score — только сигнал эскалации. Для завершения по-прежнему нужны зелёная validation, evidence по всем acceptance criteria и отсутствие подтверждённых actionable findings. Loop ограничен реальными tiers и не повторяет одного reviewer на неизменённом diff.
+Score — только вторичный сигнал эскалации. Evidence-backed verdict `ACCEPT` с достаточным confidence, зелёной validation, полным coverage и без подтверждённых actionable findings достаточен, даже если score отсутствует или ниже `9.5` без конкретного пробела. Loop ограничен реальными tiers и не повторяет одного reviewer на неизменённом diff.
 
 Если Codex не раскрывает model selector, Build не выдумывает его. Последовательность fallback: настроенные profiles, поддерживаемые reasoning efforts, read-only explorer, generic subagent и root-only self-review. Фактический режим и неизвестный tier явно записываются.
 
@@ -249,9 +249,9 @@ Score — только сигнал эскалации. Для завершен�
 
 ## Версионность и коммиты
 
-Перед milestone- или финальным commit Build находит авторитетный источник версии и политику репозитория, затем записывает `version impact`: `none`, `prerelease`, `patch`, `minor` или `major`. Если commit меняет устанавливаемое поведение или публичный distribution contract и policy требует bump, главный агент обновляет версию, CHANGELOG и обязательную документацию в том же commit.
+Перед milestone- или финальным commit Build находит авторитетный источник версии и политику репозитория, затем записывает `version impact`: `not applicable`, `prerelease`, `patch`, `minor` или `major`. В версионируемом репозитории каждый созданный Build commit по умолчанию получает уникальную более высокую версию, а CHANGELOG и обязательная документация обновляются в том же commit.
 
-Build не придумывает versioning для неверсионируемого репозитория и не повышает версию механически для prose-only/internal commits. Опубликованный tag никогда не передвигается. Создание tag, GitHub Release, публикация package и перевод prerelease в stable остаются отдельно авторизуемыми внешними действиями.
+Build не придумывает versioning для неверсионируемого репозитория и соблюдает явную политику проекта с release-only или generated versions. Сам OpenBuild требует bump для каждого commit после корневого, включая prose, внутренний validator и иначе пустые commits. Опубликованный tag никогда не передвигается. Создание tag, GitHub Release, публикация package и перевод prerelease в stable остаются отдельно авторизуемыми внешними действиями.
 
 Правила contribution, version, commit и release самого OpenBuild описаны в [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -287,6 +287,7 @@ Build сохранит initial status, исключит чужие измене�
 Из корня репозитория:
 
 ```bash
+python -m unittest discover -s scripts -p "test_*.py" -v
 python scripts/validate_package.py
 ```
 

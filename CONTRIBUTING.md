@@ -6,7 +6,7 @@ OpenBuild accepts focused changes against `main`. Keep the public plugin self-co
 
 1. Start from a clean `main` checkout and record the baseline commit.
 2. Keep changes scoped to one coherent behavior or documentation contract.
-3. Update `CHANGELOG.md` under `Unreleased` for user-visible or maintainer-visible changes.
+3. Update `CHANGELOG.md` for the new commit version.
 4. Determine the version impact before committing.
 5. Run the contributor checks below; maintainers perform the additional Codex-specific checks before merge or release.
 6. Use a fresh read-only reviewer for non-trivial changes and fix confirmed findings before committing.
@@ -15,27 +15,26 @@ OpenBuild accepts focused changes against `main`. Keep the public plugin self-co
 
 OpenBuild follows [Semantic Versioning](https://semver.org/). The authoritative version source is `plugins/openbuild/.codex-plugin/plugin.json`.
 
-Every commit that changes the installable plugin/skill behavior or its public distribution contract must include the version bump in that same commit. Record `version impact` using these rules:
+Every OpenBuild commit must include a unique higher version in that same commit, together with the synchronized changelog and README references. Record `version impact` using these rules:
 
 - `patch` for a backward-compatible fix;
 - `minor` for a backward-compatible capability;
 - `major` for a breaking contract;
-- `prerelease` for another `main` iteration toward an already selected release;
-- `none` for tests, internal maintenance, or prose-only changes outside OpenBuild's versioned public surfaces, unless another repository rule says otherwise.
+- `prerelease` for another development iteration toward an already selected release.
 
-For pre-`1.0.0` development, a new backward-compatible capability normally advances the minor line. That is why delegated discovery and TDD-first orchestration target `0.2.0`, not `0.1.1`.
+`none` is not valid for an OpenBuild commit after the repository root. In a Build specification it may be recorded as `not applicable` only when no version source exists or no commit will be created.
 
-`main` uses unique prerelease versions. The current manifest is authoritative; the next commit that changes the installable/public contract must advance the prerelease counter or select a new SemVer target. Keep the manifest version synchronized with both READMEs and the `Unreleased` changelog entry.
+For pre-`1.0.0` development, a new backward-compatible capability normally advances the minor line. That is why delegated discovery, TDD-first orchestration, and per-commit version enforcement ship as `0.2.0`, not `0.1.1`.
 
-For this repository, `plugins/openbuild/**`, `.agents/plugins/marketplace.json`, `README.md`, and `README.ru.md` are versioned public surfaces. A commit changing any of them must carry the synchronized version files even when the change is small. Pure changes to tests, contributor prose, or internal validation code may use `none` when they do not alter those surfaces.
+The manifest is authoritative. Every commit on `main` must advance to a unique SemVer value: a stable patch/minor/major version or the next prerelease counter on an explicitly selected release line. Keep it synchronized with both READMEs and a truthful `CHANGELOG.md` entry.
 
-Do not bump a version mechanically for every Git commit when no shipped contract changed. Do not postpone a required bump to a later cleanup commit.
+All tracked repository paths are covered, including tests, contributor prose, and internal validation code. Do not postpone the bump or changelog update to a later cleanup commit.
 
 ## Pull request workflow
 
 1. Create a focused branch from the current `main` and target the pull request back to `main`.
-2. Implement one coherent change, update both READMEs when public behavior is documented, and record it under `CHANGELOG.md#Unreleased`.
-3. If a versioned public surface changed, update the manifest version and all synchronized files before staging.
+2. Implement one coherent change, update both READMEs, and record the exact new version and outcome under `CHANGELOG.md#Unreleased`.
+3. Update the manifest version, changelog, and both READMEs before staging any non-empty commit.
 4. Run the contributor checks below, then stage the complete task diff.
 5. Run the commit gate against the staged snapshot and commit only when it is green.
 6. Push the contributor branch and open a PR describing the outcome, `version impact`, exact validation output, and any unverified platform/runtime behavior.
@@ -45,6 +44,7 @@ Do not bump a version mechanically for every Git commit when no shipped contract
 From the repository root:
 
 ```bash
+python -m unittest discover -s scripts -p "test_*.py" -v
 python scripts/validate_package.py
 git diff --check
 git add <task-scoped-files>
@@ -52,7 +52,7 @@ git diff --cached --check
 python scripts/validate_package.py --commit-gate
 ```
 
-Before staging, the normal validator checks the working tree, including untracked plugin files. After staging, `--commit-gate` rejects any remaining unstaged public package file, so structural checks match the index content; it then compares the staged version snapshot with `HEAD` and requires the manifest, CHANGELOG, and both READMEs in the same versioned commit.
+The unit suite locks the version-gate contract. Before staging, the normal validator checks the working tree, including untracked plugin files. After staging, `--commit-gate` rejects any remaining unstaged public package file, so structural checks match the index content; it then compares every non-empty staged snapshot with `HEAD` and requires a strictly higher manifest version plus CHANGELOG and both READMEs in the same commit.
 
 For Build behavior changes, add a small fixture or realistic prompt and report the observable forward-test result. For documentation-only work, verify every changed command and local link.
 

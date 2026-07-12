@@ -12,7 +12,7 @@ Use this as a flexible structure. Remove irrelevant sections and keep the docume
 - Review baseline: <Git branch@SHA and initial status, or a non-Git artifact manifest>
 - Complexity: low | medium | high | critical — <evidence>
 - Implementation mode: Direct | Investigation | TDD-first — <evidence>
-- Version impact: none | prerelease | patch | minor | major — <version source, policy, and evidence>
+- Version impact: not applicable | prerelease | patch | minor | major — <version source, policy, and evidence>
 - Routing mode: native-selector | configured-profiles | reasoning-ladder | role-only | generic-subagent | root-only
 - Discovery mode: delegated | mixed | root-fallback — <observed model/tier or unknown>
 
@@ -166,7 +166,7 @@ Non-blocking assumptions:
 - Repository evidence supports decisions without becoming a raw code dump.
 - Product decisions are separate from autonomous technical choices.
 - Complexity and routing claims use actual risk and runtime evidence.
-- Version impact follows repository policy; required manifest, changelog, and documentation updates stay in the same commit.
+- Every Build-created commit in a versioned repository receives a unique higher version by default; required manifest, changelog, and documentation updates stay in the same commit.
 - Broad code discovery records delegation or an honest root fallback, with critical findings verified by the root.
 - TDD-first milestones record an intended red signal, owner-layer implementation, and focused green evidence, or explain why an automated red signal was impractical.
 - Implementation milestones record an evidence-backed minimality decision without weakening acceptance criteria or safeguards.

@@ -1,6 +1,6 @@
 # Versioning and release contract
 
-Use this contract in `run` and `full` before any milestone or final commit when the repository has package, application, API, schema, plugin, or release version metadata.
+Use this contract in `run` and `full` before every milestone or final commit. When the repository has package, application, API, schema, plugin, or release version metadata, every Build-created commit receives a unique higher version by default.
 
 ## Discover the repository policy
 
@@ -18,25 +18,25 @@ Do not introduce a version scheme into an unversioned repository unless the task
 
 Record `Version impact` as one of:
 
-- `none`: no shipped behavior, compatibility, installation, or public contract changed, and repository policy does not require a bump;
+- `not applicable`: there is no authoritative version source or no commit will be created;
 - `prerelease`: another development iteration toward an already selected next release, such as incrementing `-dev.N`;
 - `patch`: a backward-compatible fix to released behavior;
 - `minor`: a backward-compatible feature or capability;
 - `major`: a breaking public contract, migration, or compatibility change.
 
-Follow the repository's own SemVer interpretation, especially before `1.0.0`. When policy and impact are unambiguous, the root agent decides autonomously. Ask the user only when selecting a release line, accepting a breaking change, or resolving a material policy ambiguity.
+Follow the repository's own SemVer interpretation, especially before `1.0.0`. If the repository has a version source but no explicit commit policy, default to a unique higher version for each Build-created commit. An applicable repository policy may instead require a release-only or generated version; follow it and record the exception. When policy and impact are unambiguous, the root agent decides autonomously. Ask the user only when selecting a release line, accepting a breaking change, or resolving a material policy ambiguity.
 
 ## Same-commit gate
 
 Before creating a scoped commit:
 
-1. Compare the task diff with the saved baseline and identify shipped/public contract changes.
-2. Apply the repository's bump rule and compute the next version from the authoritative source.
+1. Compare the task diff with the saved baseline and identify the commit's observable impact.
+2. Apply the repository's bump rule and compute a unique higher version from the authoritative source.
 3. Update the authoritative version, changelog, user-facing version references, and required generated metadata in the same commit.
 4. Run the repository's version/package validation and confirm every synchronized surface agrees.
 5. Record the previous version, next version, impact, evidence, and validation in the specification.
 
-Do not bump merely because a Git commit exists unless repository policy explicitly requires per-commit versions. Do not omit a required bump by splitting the version change into a later cleanup commit.
+For a versioned repository, bump every Build-created commit unless an applicable repository policy explicitly defines a different release-only or generated scheme. Never postpone a required bump to a later cleanup commit.
 
 ## Prerelease and release boundary
 
@@ -48,7 +48,7 @@ Do not bump merely because a Git commit exists unless repository policy explicit
 
 ## Reviewer audit
 
-Reviewers remain read-only. When `Version impact` is not `none`, require them to verify:
+Reviewers remain read-only. When `Version impact` is not `not applicable`, require them to verify:
 
 - the selected impact matches the observable diff and repository policy;
 - the authoritative source and synchronized copies agree;
@@ -63,7 +63,7 @@ The root agent adjudicates findings and makes any version correction before the 
 ```text
 Version source: <path/key or not applicable>
 Version policy: <repository rule or not found>
-Version impact: <none|prerelease|patch|minor|major> — <evidence>
+Version impact: <not applicable|prerelease|patch|minor|major> — <evidence>
 Previous version: <value or none>
 Next version: <value or unchanged>
 Synchronized files: <manifest, changelog, docs, generated metadata>
