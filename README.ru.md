@@ -17,7 +17,50 @@ OpenBuild самодостаточен. Ему не нужны отдельны�
 
 > OpenBuild `0.4.0` — текущий релиз. Immutable release tag — `v0.4.0`; закрепляйте его для воспроизводимой установки или осознанно используйте `main` для ещё не выпущенных изменений.
 
-Development version manifest на `main` — `1.0.0`; latest immutable release tag и GitHub Release остаются синхронизированы на `0.4.0` до отдельно авторизованной публикации.
+Development version manifest на `main` — `1.0.1`; latest immutable release tag и GitHub Release остаются синхронизированы на `0.4.0` до отдельно авторизованной публикации.
+
+## Workflow в одной схеме
+
+```mermaid
+flowchart LR
+    A["Идея или существующая спецификация"] --> B{"Явный режим или auto evidence"}
+    B -->|new / full| C["Исследование репозитория"]
+    B -->|refine| D["Сверка спецификации"]
+    B -->|run| E["Проверка готовности"]
+    B -->|auto| F["Первый незавершённый этап"]
+    C --> D
+    F --> C
+    F --> D
+    F --> E
+    D --> G["Покрытие blind spots и решения"]
+    G --> H{"Ready gate"}
+    H -->|есть gaps| D
+    H -->|покрыто| T{"Цель workflow"}
+    E --> H
+    T -->|только спецификация| Q["Готовая спецификация"]
+    T -->|реализация| I["Реализация моделью по риску"]
+    I --> J["Focused и risk-based validation"]
+    J --> K["Progressive read-only review"]
+    K -->|actionable finding| I
+    K -->|принято| L["Complete record и scoped Git handoff"]
+
+    classDef input fill:#0f172a,color:#f8fafc,stroke:#38bdf8,stroke-width:2px;
+    classDef phase fill:#172554,color:#eff6ff,stroke:#60a5fa,stroke-width:1.5px;
+    classDef gate fill:#422006,color:#fffbeb,stroke:#f59e0b,stroke-width:2px;
+    classDef done fill:#052e16,color:#ecfdf5,stroke:#34d399,stroke-width:2px;
+    class A,B input;
+    class C,D,E,F,G,I,J,K phase;
+    class H,T gate;
+    class Q,L done;
+```
+
+| Цель | Команда | Где остановится |
+|---|---|---|
+| Создать или исправить спецификацию | `$build new …` / `$build refine BUILD.md` | `Ready` |
+| Реализовать принятую спецификацию | `$build run BUILD.md` | `Complete` |
+| Выполнить полный lifecycle | `$build full …` | `Complete` |
+| Продолжить по evidence репозитория | `$build …` / `$build auto …` | Первое корректное конечное состояние |
+| Настроить optional model routes | `$build setup-models` | Проверенные profiles и инструкция по reload |
 
 ## Требования
 
@@ -216,6 +259,51 @@ Legacy-спецификация со статусом `Ready` не приним�
 
 ## Как работает usage-aware routing моделей
 
+```mermaid
+flowchart TB
+    R{"Этап задачи и evidence"}
+
+    subgraph SEARCH["Поиск · только чтение"]
+        S0["Короткий search plan"] --> S1{"Separate route подтверждён?"}
+        S1 -->|да| S2["Separate-usage search profile"]
+        S1 -->|недоступен или исчерпана quota| S3["Экономный main-pool fallback"]
+        S3 --> S4["Explorer → generic worker → root"]
+    end
+
+    subgraph WRITE["Реализация · ровно один writer"]
+        W0{"Риск milestone"}
+        W0 -->|low| W1["Fast writer"]
+        W0 -->|medium| W2["Balanced writer"]
+        W0 -->|high / critical| W3["Strong / strongest writer"]
+        W1 --> W4["Одинаковые Ready, TDD, minimality, lease и validation gates"]
+        W2 --> W4
+        W3 --> W4
+    end
+
+    subgraph REVIEW["Review · только чтение"]
+        V0{"Риск diff и evidence"} --> V1["Fast → balanced → strong → strongest"]
+        V1 --> V2{"Принято с достаточной уверенностью?"}
+    end
+
+    R --> S0
+    S2 --> W0
+    S4 --> W0
+    W4 --> V0
+    V2 -->|finding| W0
+    V2 -->|да| Z["Проверенное завершение"]
+
+    classDef decision fill:#422006,color:#fffbeb,stroke:#f59e0b,stroke-width:2px;
+    classDef search fill:#083344,color:#ecfeff,stroke:#22d3ee,stroke-width:1.5px;
+    classDef write fill:#172554,color:#eff6ff,stroke:#60a5fa,stroke-width:1.5px;
+    classDef review fill:#3b0764,color:#faf5ff,stroke:#c084fc,stroke-width:1.5px;
+    classDef done fill:#052e16,color:#ecfdf5,stroke:#34d399,stroke-width:2px;
+    class R,S1,W0,V0,V2 decision;
+    class S0,S2,S3,S4 search;
+    class W1,W2,W3,W4 write;
+    class V1 review;
+    class Z done;
+```
+
 Поиск всегда сначала пытается использовать подтверждённый separate-usage route — обычно `openbuild-search-separate` или эквивалентный native selector. Текущий Spark preview является официальным примером отдельно лимитируемой near-instant text-модели, когда account/runtime его предоставляет, но OpenBuild не закрепляет этот пример как универсальный model ID. При quota exhaustion или недоступности model/profile Build включает circuit breaker на текущий run и один раз переходит к `openbuild-search-fallback`: минимальной доказанно подходящей main-pool search-модели с low/minimal поддерживаемым reasoning. Затем идут explorer, generic read-only subagent и минимальный root search. OpenBuild не скрейпит приватную usage page, не угадывает остаток quota и не повторяет неудачный separate route перед каждым grep.
 
 Code edits выполняет risk-matched writer при сохранении одинаковых Ready, TDD, minimality, single-writer, validation и review gates на каждом tier. `openbuild-implementation-fast` предназначен для low-risk Direct documentation, cosmetic или mechanical work; `openbuild-implementation-balanced` — для medium-risk contained behavior с ясными тестами; `openbuild-implementation-strongest` — для high или critical contracts, security, persistence, concurrency, permissions, privacy и sensitive state. Отсутствие model metadata само по себе не блокирует настроенный low или medium route, но Build записывает его как `unknown` и не заявляет наблюдаемое переключение или экономию. High и critical work по-прежнему требуют своего strong/strongest floor.
@@ -243,6 +331,37 @@ Codex официально поддерживает per-agent `model`, `model_re
 Reviewers остаются read-only. Они проверяют red signal, owning layer, focused green result и покрытие по риску. Подтверждённые behavioral findings возвращаются главному агенту, который проводит remediation через тот же TDD-first workflow и только затем запускает следующий review.
 
 ## Как работает адаптивная делегация реализации
+
+```mermaid
+flowchart LR
+    A["Root классифицирует milestone и risk"] --> B{"Ready и required tier доказаны?"}
+    B -->|нет| X["Остановиться и записать точный blocker"]
+    B -->|да| C["Выдать одну bounded writer lease"]
+
+    subgraph LEASE["Эксклюзивная writer lease · root не редактирует"]
+        C --> D["Red или primary signal"]
+        D --> E["Минимальная owner-layer правка"]
+        E --> F["Focused green validation"]
+        F --> G["Handoff diff, evidence и assumptions"]
+    end
+
+    G --> H["Root закрывает lease и перечитывает весь diff"]
+    H --> I["Независимая risk-based validation"]
+    I --> J["Progressive read-only review"]
+    J -->|confirmed finding| A
+    J -->|принято| K["Version, changelog и scoped Git action"]
+
+    classDef root fill:#0f172a,color:#f8fafc,stroke:#38bdf8,stroke-width:2px;
+    classDef gate fill:#422006,color:#fffbeb,stroke:#f59e0b,stroke-width:2px;
+    classDef worker fill:#172554,color:#eff6ff,stroke:#60a5fa,stroke-width:1.5px;
+    classDef stop fill:#450a0a,color:#fef2f2,stroke:#f87171,stroke-width:2px;
+    classDef done fill:#052e16,color:#ecfdf5,stroke:#34d399,stroke-width:2px;
+    class A,H,I,J root;
+    class B gate;
+    class C,D,E,F,G worker;
+    class X stop;
+    class K done;
+```
 
 После `Ready` каждый milestone выбирает `root-only`, `bounded-worker` или `sequential-workers`, а затем minimum sufficient proven writer tier по риску milestone. Reasoning effort масштабируется от low/minimal для механических правок до самого глубокого поддерживаемого для critical-задач. Worker используется только когда понятны owning files, acceptance criteria, red или primary signal и stop conditions; `root-only` требует, чтобы root удовлетворял выбранному tier. Недоступный required tier блокирует milestone, а не разрешает снижение risk floor.
 

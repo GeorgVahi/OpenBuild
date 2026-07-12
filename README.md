@@ -17,7 +17,50 @@ OpenBuild is self-contained. It does not require separate discovery, TDD, or rev
 
 > OpenBuild `0.4.0` is the current release. The immutable release tag is `v0.4.0`; pin it for reproducible installation or use `main` intentionally for unreleased changes.
 
-The manifest development version on `main` is `1.0.0`; the latest immutable release tag and GitHub Release remain synchronized at `0.4.0` until separately authorized publication.
+The manifest development version on `main` is `1.0.1`; the latest immutable release tag and GitHub Release remain synchronized at `0.4.0` until separately authorized publication.
+
+## Workflow at a glance
+
+```mermaid
+flowchart LR
+    A["Idea or existing specification"] --> B{"Explicit mode or auto evidence"}
+    B -->|new / full| C["Repository discovery"]
+    B -->|refine| D["Specification reconciliation"]
+    B -->|run| E["Readiness audit"]
+    B -->|auto| F["First incomplete phase"]
+    C --> D
+    F --> C
+    F --> D
+    F --> E
+    D --> G["Blind-spot coverage and decisions"]
+    G --> H{"Ready gate"}
+    H -->|gaps| D
+    H -->|covered| T{"Workflow target"}
+    E --> H
+    T -->|specification only| Q["Ready specification"]
+    T -->|implementation| I["Risk-matched implementation"]
+    I --> J["Focused and risk-based validation"]
+    J --> K["Progressive read-only review"]
+    K -->|actionable finding| I
+    K -->|accepted| L["Complete record and scoped Git handoff"]
+
+    classDef input fill:#0f172a,color:#f8fafc,stroke:#38bdf8,stroke-width:2px;
+    classDef phase fill:#172554,color:#eff6ff,stroke:#60a5fa,stroke-width:1.5px;
+    classDef gate fill:#422006,color:#fffbeb,stroke:#f59e0b,stroke-width:2px;
+    classDef done fill:#052e16,color:#ecfdf5,stroke:#34d399,stroke-width:2px;
+    class A,B input;
+    class C,D,E,F,G,I,J,K phase;
+    class H,T gate;
+    class Q,L done;
+```
+
+| Goal | Command | Stops at |
+|---|---|---|
+| Create or repair a specification | `$build new …` / `$build refine BUILD.md` | `Ready` |
+| Implement an accepted specification | `$build run BUILD.md` | `Complete` |
+| Run the whole lifecycle | `$build full …` | `Complete` |
+| Resume from repository evidence | `$build …` / `$build auto …` | First valid terminal state |
+| Configure optional model routes | `$build setup-models` | Validated profiles plus reload instructions |
 
 ## Requirements
 
@@ -216,6 +259,51 @@ The root agent remains the orchestrator: it deduplicates evidence, verifies alre
 
 ## How usage-aware model routing works
 
+```mermaid
+flowchart TB
+    R{"Task phase and evidence"}
+
+    subgraph SEARCH["Search · read-only"]
+        S0["Compact search plan"] --> S1{"Confirmed separate route?"}
+        S1 -->|yes| S2["Separate-usage search profile"]
+        S1 -->|unavailable or quota failed| S3["Efficient main-pool fallback"]
+        S3 --> S4["Explorer → generic worker → root"]
+    end
+
+    subgraph WRITE["Implementation · exactly one writer"]
+        W0{"Milestone risk"}
+        W0 -->|low| W1["Fast writer"]
+        W0 -->|medium| W2["Balanced writer"]
+        W0 -->|high / critical| W3["Strong / strongest writer"]
+        W1 --> W4["Same Ready, TDD, minimality, lease and validation gates"]
+        W2 --> W4
+        W3 --> W4
+    end
+
+    subgraph REVIEW["Review · read-only"]
+        V0{"Diff risk and evidence"} --> V1["Fast → balanced → strong → strongest"]
+        V1 --> V2{"Accepted with sufficient confidence?"}
+    end
+
+    R --> S0
+    S2 --> W0
+    S4 --> W0
+    W4 --> V0
+    V2 -->|finding| W0
+    V2 -->|yes| Z["Verified completion"]
+
+    classDef decision fill:#422006,color:#fffbeb,stroke:#f59e0b,stroke-width:2px;
+    classDef search fill:#083344,color:#ecfeff,stroke:#22d3ee,stroke-width:1.5px;
+    classDef write fill:#172554,color:#eff6ff,stroke:#60a5fa,stroke-width:1.5px;
+    classDef review fill:#3b0764,color:#faf5ff,stroke:#c084fc,stroke-width:1.5px;
+    classDef done fill:#052e16,color:#ecfdf5,stroke:#34d399,stroke-width:2px;
+    class R,S1,W0,V0,V2 decision;
+    class S0,S2,S3,S4 search;
+    class W1,W2,W3,W4 write;
+    class V1 review;
+    class Z done;
+```
+
 Search always attempts a confirmed separate-usage route first, normally `openbuild-search-separate` or an equivalent native selector. The current Spark preview is an official example of a separately limited, near-instant text model when the account and runtime expose it, but OpenBuild never pins that example universally. If the runtime reports quota exhaustion or model/profile unavailability, Build opens a circuit breaker for the current run and falls back once to `openbuild-search-fallback`: the minimum proven suitable main-pool search model at low/minimal supported reasoning. It then uses explorer, generic read-only subagent, and finally minimum root search. It does not scrape the private usage dashboard, guess remaining quota, or retry a failed separate route for every grep.
 
 Code edits use a risk-matched writer while preserving the same Ready, TDD, minimality, single-writer, validation, and review gates at every tier. `openbuild-implementation-fast` handles low-risk Direct documentation, cosmetic, or mechanical work; `openbuild-implementation-balanced` handles medium-risk contained behavior with clear tests; and `openbuild-implementation-strongest` handles high or critical contracts, security, persistence, concurrency, permissions, privacy, and sensitive state. Missing model metadata alone does not block a configured low or medium route, but Build records it as `unknown` and never claims an observed switch or saving. High and critical work still require their strong/strongest floor.
@@ -243,6 +331,37 @@ Direct documentation or cosmetic work does not get ceremonial failing tests. Inv
 Reviewers stay read-only. They audit the red signal, owning layer, focused green result, and risk-based coverage. Confirmed behavioral findings go back to the root agent, which runs remediation through the same TDD-first workflow before requesting another review.
 
 ## How adaptive implementation delegation works
+
+```mermaid
+flowchart LR
+    A["Root classifies milestone and risk"] --> B{"Ready and required tier proven?"}
+    B -->|no| X["Stop and record the exact blocker"]
+    B -->|yes| C["Issue one bounded writer lease"]
+
+    subgraph LEASE["Exclusive writer lease · root pauses edits"]
+        C --> D["Red or primary signal"]
+        D --> E["Minimum owner-layer change"]
+        E --> F["Focused green validation"]
+        F --> G["Diff, evidence and assumptions handoff"]
+    end
+
+    G --> H["Root releases lease and rereads full diff"]
+    H --> I["Independent risk-based validation"]
+    I --> J["Progressive read-only review"]
+    J -->|confirmed finding| A
+    J -->|accepted| K["Version, changelog and scoped Git action"]
+
+    classDef root fill:#0f172a,color:#f8fafc,stroke:#38bdf8,stroke-width:2px;
+    classDef gate fill:#422006,color:#fffbeb,stroke:#f59e0b,stroke-width:2px;
+    classDef worker fill:#172554,color:#eff6ff,stroke:#60a5fa,stroke-width:1.5px;
+    classDef stop fill:#450a0a,color:#fef2f2,stroke:#f87171,stroke-width:2px;
+    classDef done fill:#052e16,color:#ecfdf5,stroke:#34d399,stroke-width:2px;
+    class A,H,I,J root;
+    class B gate;
+    class C,D,E,F,G worker;
+    class X stop;
+    class K done;
+```
 
 After `Ready`, each milestone selects `root-only`, `bounded-worker`, or `sequential-workers`, and then selects the minimum sufficient proven writer tier from the milestone risk. Reasoning effort scales from low/minimal for mechanical changes to the deepest supported effort for critical work. A worker is used only when the owning files, acceptance criteria, red or primary signal, and stop conditions are clear; `root-only` requires the root to satisfy the selected tier. An unavailable required tier blocks that milestone instead of authorizing a risk-floor downgrade.
 

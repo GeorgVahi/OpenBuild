@@ -6,10 +6,12 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-Target development version: `1.0.0`.
+Target development version: `1.0.1`.
 
 ### Changed
 
+- Reworked the GitHub-facing English and Russian documentation with native Mermaid diagrams for the end-to-end lifecycle, risk-matched model routing, and the single-writer TDD/handoff safety loop.
+- Added a compact command-to-outcome map so new users can choose `new`, `refine`, `run`, `full`, `auto`, or `setup-models` without reading the complete workflow reference first.
 - Risk-matched-model coding now selects fast, balanced, or strong/strongest writers from milestone risk while preserving the existing blind-spot Ready gate, `auto` routing, TDD red/green workflow, evidence-gated minimality, single-writer lease, root handoff, validation, versioning, and progressive review methods.
 - Low and medium implementation may continue through an exact configured named profile when runtime model metadata is `unknown` or `unobservable`; high and critical work still require their strong/strongest floor, and no route may claim model switching or savings without evidence.
 - Escalation now requires scope/risk growth, insufficient worker confidence, a deeper red/green signal, task-scoped validation failure, or a confirmed review finding instead of launching a stronger model merely because it exists.

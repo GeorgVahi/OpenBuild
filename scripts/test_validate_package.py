@@ -231,10 +231,10 @@ class ChangelogContractTests(unittest.TestCase):
     def test_development_manifest_version_and_latest_release_are_documented(self) -> None:
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
         self.assertIn("## [0.4.0] - 2026-07-12", changelog)
-        self.assertEqual(validate_changelog_contract(changelog, "1.0.0"), [])
+        self.assertEqual(validate_changelog_contract(changelog, "1.0.1"), [])
 
-        mutated = changelog.replace("Target development version: `1.0.0`.", "Target development version: `next`.")
-        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "1.0.0")))
+        mutated = changelog.replace("Target development version: `1.0.1`.", "Target development version: `next`.")
+        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "1.0.1")))
 
     def test_released_version_is_pinned_in_both_install_channels(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
