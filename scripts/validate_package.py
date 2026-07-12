@@ -28,6 +28,7 @@ REQUIRED = [
     SKILL / "agents" / "openai.yaml",
     SKILL / "references" / "spec-template.md",
     SKILL / "references" / "code-discovery.md",
+    SKILL / "references" / "minimality-protocol.md",
     SKILL / "references" / "model-routing.md",
     SKILL / "references" / "review-protocol.md",
     SKILL / "references" / "tdd-workflow.md",
@@ -328,6 +329,7 @@ def main() -> int:
         fail(errors, "SKILL.md: exceeds the 500-line progressive-disclosure limit")
     required_skill_tokens = [
         "[code discovery](references/code-discovery.md)",
+        "[the minimality protocol](references/minimality-protocol.md)",
         "[the TDD workflow](references/tdd-workflow.md)",
         "[versioning](references/versioning.md)",
         "openbuild-discovery",
@@ -338,6 +340,18 @@ def main() -> int:
     for token in required_skill_tokens:
         if token not in skill_text:
             fail(errors, f"SKILL.md: missing orchestration contract {token}")
+
+    minimality_text = read_text(SKILL / "references" / "minimality-protocol.md", errors)
+    for token in ["## Decision ladder", "## Non-negotiable safeguards", "Minimality decision:"]:
+        if token not in minimality_text:
+            fail(errors, f"minimality-protocol.md: missing contract {token}")
+    for path, token in [
+        (SKILL / "references" / "tdd-workflow.md", "Minimality decision:"),
+        (SKILL / "references" / "review-protocol.md", "Minimality assessment:"),
+        (SKILL / "references" / "spec-template.md", "Minimality decision:"),
+    ]:
+        if token not in read_text(path, errors):
+            fail(errors, f"{path.name}: missing minimality contract {token}")
 
     metadata_text = read_text(SKILL / "agents" / "openai.yaml", errors)
     if 'allow_implicit_invocation: false' not in metadata_text:
@@ -371,6 +385,7 @@ def main() -> int:
     required_doc_sections = [
         ("## How automatic code discovery works", "## Как работает автоматический поиск по коду"),
         ("## How TDD-first implementation works", "## Как работает TDD-first реализация"),
+        ("## How evidence-gated minimality works", "## Как работает evidence-gated minimality"),
         ("## How progressive review works", "## Как работает progressive review"),
         ("## Git and safety policy", "## Git и безопасность"),
     ]
@@ -385,7 +400,7 @@ def main() -> int:
     if "## [0.1.0] - 2026-07-10" not in read_text(ROOT / "CHANGELOG.md", errors):
         fail(errors, "CHANGELOG.md: missing 0.1.0 release entry")
     changelog = read_text(ROOT / "CHANGELOG.md", errors)
-    for token in ["openbuild-discovery", "TDD-first", "version impact"]:
+    for token in ["openbuild-discovery", "TDD-first", "minimality", "version impact"]:
         if token not in changelog:
             fail(errors, f"CHANGELOG.md: missing Unreleased contract {token}")
     if isinstance(version, str) and not contains_exact_version(changelog, version):

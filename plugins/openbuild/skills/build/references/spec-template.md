@@ -104,6 +104,7 @@ Use this as a flexible structure. Remove irrelevant sections and keep the docume
 
 - Primary signal: <main proof>.
 - Red signal: <failing test/reproduction and intended reason, or why not applicable/practical>.
+- Minimality decision: <omitted as unneeded | reused existing | standard library | native platform | installed dependency | custom owner-layer | not applicable — evidence>.
 - Focused green: `<exact command or scenario>` -> <result>.
 - Targeted checks: `<command or scenario>`.
 - Wider checks: `<risk-based command or scenario>`.
@@ -121,6 +122,7 @@ Use this as a flexible structure. Remove irrelevant sections and keep the docume
 - Excludes: <excluded work>
 - Implementation mode: Direct | Investigation | TDD-first
 - Red signal: <test/reproduction and expected failure, or not applicable with reason>
+- Minimality decision: <selected rung, skipped complexity, and any ceiling/upgrade trigger>
 - Focused green: `<command or scenario>` -> <result>
 - Validation: `<commands or scenarios>`
 - Acceptance: AC-01, AC-02
@@ -151,6 +153,7 @@ Non-blocking assumptions:
 - Changed: <summary>.
 - Primary signal: met | not met | partially validated.
 - Validation: `<command>` -> <result>.
+- Minimality decision: <selected rung and evidence>.
 - Review: <mode, tier, verdict, confidence, and material decisions>.
 - Version: <impact, previous/next value, synchronized files, or not applicable>.
 - Commit: `<sha>` | not created.
@@ -166,6 +169,7 @@ Non-blocking assumptions:
 - Version impact follows repository policy; required manifest, changelog, and documentation updates stay in the same commit.
 - Broad code discovery records delegation or an honest root fallback, with critical findings verified by the root.
 - TDD-first milestones record an intended red signal, owner-layer implementation, and focused green evidence, or explain why an automated red signal was impractical.
+- Implementation milestones record an evidence-backed minimality decision without weakening acceptance criteria or safeguards.
 - Milestones deliver coherent outcomes rather than arbitrary file groups.
 - Validation commands exist or are explicitly marked as proposed.
 - Blocking questions are empty before implementation starts.

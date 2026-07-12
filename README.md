@@ -2,7 +2,7 @@
 
 [Русская версия](README.ru.md)
 
-OpenBuild is a Codex workflow for turning a plain-language idea or an existing specification into a repository-grounded plan and, when requested, a tested implementation with delegated code discovery, TDD-first milestones, and progressive review.
+OpenBuild is a Codex workflow for turning a plain-language idea or an existing specification into a repository-grounded plan and, when requested, a tested implementation with delegated code discovery, evidence-gated minimality, TDD-first milestones, and progressive review.
 
 It packages one explicit skill, **Build**, with five modes:
 
@@ -16,7 +16,7 @@ OpenBuild is self-contained. It does not require separate discovery, TDD, or rev
 
 > OpenBuild `v0.1.0` is a preview release. Install a version tag for reproducibility; use `main` only when you intentionally want the latest preview.
 
-The current `main` preview reports plugin version `0.2.0-dev.2`; the immutable release tag remains `v0.1.0` until a new release is published.
+The current `main` preview reports plugin version `0.2.0-dev.3`; the immutable release tag remains `v0.1.0` until a new release is published.
 
 ## Requirements
 
@@ -206,6 +206,14 @@ Direct documentation or cosmetic work does not get ceremonial failing tests. Inv
 
 Reviewers stay read-only. They audit the red signal, owning layer, focused green result, and risk-based coverage. Confirmed behavioral findings go back to the root agent, which runs remediation through the same TDD-first workflow before requesting another review.
 
+## How evidence-gated minimality works
+
+After the Ready gate and before code changes, Build evaluates every proposed file, dependency, abstraction, configuration surface, and compatibility layer through an evidence-gated ladder: is it needed now; does the repository already solve it; does the standard library or native platform cover it; does an installed dependency fit; and only then, what is the minimum coherent custom change in the owning layer. Build stops at the first option that satisfies the complete acceptance criteria, invariants, repository conventions, and risk constraints.
+
+Minimality governs technical means, not accepted product scope. It never trades away supported tests, trust-boundary validation, security, privacy, accessibility, data-loss handling, error handling, observability, compatibility, migration or rollback safety, concurrency correctness, or required performance. A deliberate simplification with a known ceiling records that ceiling and an observable upgrade trigger instead of building the speculative upgrade immediately.
+
+Reviewers audit the completed diff for duplicated sources of truth, avoidable dependencies, custom code covered by standard or native capabilities, speculative abstractions or configuration, and downstream symptom patches. Line count and code golf are not success metrics; a finding is actionable only when the smaller path preserves accepted behavior and risk coverage.
+
 ## How progressive review works
 
 Build classifies each task as `low`, `medium`, `high`, or `critical`. It starts at the minimum sufficient review tier rather than always wasting a strongest-model pass:
@@ -282,7 +290,7 @@ From the repository root:
 python scripts/validate_package.py
 ```
 
-The release process also runs the official Codex skill and plugin validators, clean plugin installation, standalone installation from the tagged GitHub path, forward-tests for `new`, `refine`, `run`, delegated discovery, TDD-first remediation, and model-routing fallbacks, and a fresh full-diff review.
+The release process also runs the official Codex skill and plugin validators, clean plugin installation, standalone installation from the tagged GitHub path, forward-tests for `new`, `refine`, `run`, delegated discovery, evidence-gated minimality, TDD-first remediation, and model-routing fallbacks, and a fresh full-diff review.
 
 Useful official references:
 

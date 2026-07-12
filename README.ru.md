@@ -2,7 +2,7 @@
 
 [English version](README.md)
 
-OpenBuild — workflow для Codex, который превращает идею простыми словами или существующее ТЗ в проверенную по репозиторию спецификацию и, когда это запрошено, в протестированную реализацию с делегированным поиском кода, TDD-first milestones и прогрессивным review.
+OpenBuild — workflow для Codex, который превращает идею простыми словами или существующее ТЗ в проверенную по репозиторию спецификацию и, когда это запрошено, в протестированную реализацию с делегированным поиском кода, evidence-gated minimality, TDD-first milestones и прогрессивным review.
 
 В plugin входит один явно вызываемый skill **Build** с пятью режимами:
 
@@ -16,7 +16,7 @@ OpenBuild самодостаточен. Ему не нужны отдельны�
 
 > OpenBuild `v0.1.0` — preview-релиз. Для воспроизводимости устанавливайте tag версии; используйте `main` только если осознанно хотите последнюю preview-версию.
 
-Текущая preview-версия в `main` имеет plugin version `0.2.0-dev.2`; immutable release tag остаётся `v0.1.0` до публикации нового релиза.
+Текущая preview-версия в `main` имеет plugin version `0.2.0-dev.3`; immutable release tag остаётся `v0.1.0` до публикации нового релиза.
 
 ## Требования
 
@@ -206,6 +206,14 @@ Build сначала проверит возможности текущего Co
 
 Reviewers остаются read-only. Они проверяют red signal, owning layer, focused green result и покрытие по риску. Подтверждённые behavioral findings возвращаются главному агенту, который проводит remediation через тот же TDD-first workflow и только затем запускает следующий review.
 
+## Как работает evidence-gated minimality
+
+После Ready-gate и до изменений кода Build проверяет каждый предлагаемый файл, dependency, abstraction, configuration surface и compatibility layer по evidence-gated лестнице: нужен ли он сейчас; нет ли уже решения в репозитории; не покрывает ли задачу стандартная библиотека или нативная возможность платформы; не подходит ли установленная зависимость; и только затем — каким будет минимальное когерентное custom-изменение во владеющем слое. Build останавливается на первом варианте, который полностью сохраняет acceptance criteria, invariants, соглашения репозитория и ограничения по риску.
+
+Minimality определяет технический способ, а не пересматривает принятый продуктовый scope. Она никогда не убирает поддерживаемые tests, validation на trust boundaries, security, privacy, accessibility, защиту от потери данных, error handling, observability, compatibility, безопасность migration/rollback, корректность concurrency или требуемую performance. Для сознательного упрощения с известным пределом Build записывает этот предел и наблюдаемый trigger для улучшения, но не строит speculative upgrade заранее.
+
+Reviewers проверяют готовый diff на дублирование source of truth, избегаемые dependencies, custom-код вместо стандартных или нативных возможностей, speculative abstractions/configuration и исправления симптома ниже owning layer. Количество строк и code golf не считаются успехом; finding actionable только тогда, когда более простой путь сохраняет принятое поведение и покрытие рисков.
+
 ## Как работает progressive review
 
 Build классифицирует задачу как `low`, `medium`, `high` или `critical` и начинает с минимально достаточного reviewer tier:
@@ -282,7 +290,7 @@ Build сохранит initial status, исключит чужие измене�
 python scripts/validate_package.py
 ```
 
-Release-процесс также запускает официальные Codex validators для skill/plugin, чистую установку plugin, standalone-установку по tagged GitHub path, forward-tests режимов `new`, `refine`, `run`, delegated discovery, TDD-first remediation и routing fallbacks, а также свежий review полного diff.
+Release-процесс также запускает официальные Codex validators для skill/plugin, чистую установку plugin, standalone-установку по tagged GitHub path, forward-tests режимов `new`, `refine`, `run`, delegated discovery, evidence-gated minimality, TDD-first remediation и routing fallbacks, а также свежий review полного diff.
 
 Официальные материалы:
 

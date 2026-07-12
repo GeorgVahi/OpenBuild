@@ -1,6 +1,6 @@
 ---
 name: build
-description: "Turn a plain-language idea or an existing BUILD.md, SPEC.md, or TZ.md into a repository-grounded specification, refine it, or execute it through delegated code discovery, TDD-first milestones, version-aware commits, capability-aware subagents, and progressive review. Use only when explicitly invoked as $build for new, refine, run, full, or setup-models workflows; do not invoke for ordinary build commands."
+description: "Turn a plain-language idea or an existing BUILD.md, SPEC.md, or TZ.md into a repository-grounded specification, refine it, or execute it through delegated code discovery, evidence-gated minimal implementation, TDD-first milestones, version-aware commits, capability-aware subagents, and progressive review. Use only when explicitly invoked as $build for new, refine, run, full, or setup-models workflows; do not invoke for ordinary build commands."
 ---
 
 # Build
@@ -148,16 +148,17 @@ In `new` or `refine`, set the specification to `Ready`, summarize it, and stop. 
 For each milestone:
 
 1. Reconfirm its acceptance criteria, implementation mode, complexity floor, and owning files.
-2. For TDD-first work, follow [the TDD workflow](references/tdd-workflow.md): establish the owner and primary signal, run the smallest meaningful red test when practical, then implement the minimum coherent owner-layer change.
-3. For Direct or Investigation work, use the narrow signal appropriate to that mode and reclassify before changing behavior.
-4. Require focused green validation, refactor only after green when it removes current complexity, then run wider checks according to risk.
-5. Review the task diff against the saved baseline and remove unrelated changes.
-6. Apply [versioning](references/versioning.md): classify the version impact, update required version/changelog/documentation surfaces in the same commit, and validate their agreement. Use `none` when policy does not require a bump.
-7. Run the built-in progressive review described in [the review protocol](references/review-protocol.md) against the complete diff, including versioning changes.
-8. Adjudicate every finding. Fix confirmed actionable issues, rerun affected validation, and repeat review whenever remediation or version synchronization changes the reviewed diff.
-9. Close the milestone only when its primary signal is met, validation is green, acceptance coverage is complete, and no actionable finding remains.
-10. Update milestone status, evidence, review mode/tier, and validation log in the specification.
-11. Create a scoped milestone commit when allowed and safe. Do not include unrelated changes and do not push without explicit authorization.
+2. Read and apply [the minimality protocol](references/minimality-protocol.md) before the first code change. Record which rung is selected, what complexity is skipped, and any known ceiling with its observable upgrade trigger.
+3. For TDD-first work, follow [the TDD workflow](references/tdd-workflow.md): establish the owner and primary signal, run the smallest meaningful red test when practical, then implement the minimum coherent owner-layer change.
+4. For Direct or Investigation work, use the narrow signal appropriate to that mode and reclassify before changing behavior.
+5. Require focused green validation, refactor only after green when it removes current complexity, then run wider checks according to risk.
+6. Review the task diff against the saved baseline and remove unrelated changes.
+7. Apply [versioning](references/versioning.md): classify the version impact, update required version/changelog/documentation surfaces in the same commit, and validate their agreement. Use `none` when policy does not require a bump.
+8. Run the built-in progressive review described in [the review protocol](references/review-protocol.md) against the complete diff, including versioning changes.
+9. Adjudicate every finding. Fix confirmed actionable issues, rerun affected validation, and repeat review whenever remediation or version synchronization changes the reviewed diff.
+10. Close the milestone only when its primary signal is met, validation is green, acceptance coverage is complete, and no actionable finding remains.
+11. Update milestone status, evidence, review mode/tier, and validation log in the specification.
+12. Create a scoped milestone commit when allowed and safe. Do not include unrelated changes and do not push without explicit authorization.
 
 ## Run progressive review
 
@@ -197,4 +198,4 @@ After all milestones:
 6. Set `Complete` only when every requirement is proven. Otherwise preserve the exact status and continue or request missing authority.
 7. Update the final specification log and create the final scoped commit when allowed. Push only when explicitly authorized.
 
-Report the outcome, closed milestones, discovery routing/fallback, implementation mode and red/green evidence, version impact and before/after version, acceptance evidence, validation, review mode/tier, commits, documentation status, migration implications, and real remaining risks.
+Report the outcome, closed milestones, discovery routing/fallback, implementation mode and red/green evidence, minimality decisions, version impact and before/after version, acceptance evidence, validation, review mode/tier, commits, documentation status, migration implications, and real remaining risks.

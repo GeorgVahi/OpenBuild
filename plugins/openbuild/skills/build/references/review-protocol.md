@@ -11,6 +11,7 @@ Provide the reviewer with:
 - the exact task diff, including committed milestone changes and relevant uncommitted work;
 - validation commands and current results;
 - the implementation mode and, for TDD-first work, the owning layer plus red/green evidence;
+- the recorded minimality decision, skipped complexity, and any ceiling/upgrade trigger;
 - the version impact, authoritative version source, and synchronized version/changelog/documentation evidence;
 - the requested review tier and the evidence supporting that tier;
 - the repository path and explicit read-only boundary.
@@ -45,6 +46,9 @@ Validation assessment:
 TDD assessment:
 - <met | not met | not applicable — red signal, owner layer, focused green, and risk coverage>
 
+Minimality assessment:
+- <met | not met — selected rung, repository evidence, avoidable complexity, and preserved safeguards>
+
 Version assessment:
 - <met | not met | not applicable — impact, version source, synchronized files, and release evidence>
 
@@ -71,8 +75,9 @@ For every finding, the root agent must:
 1. Reproduce or verify the evidence.
 2. Decide whether it is task-scoped and actionable.
 3. For a confirmed behavioral finding, establish or reproduce the failing signal and fix it in the owning layer through [the TDD workflow](tdd-workflow.md).
-4. Reject hypothetical, duplicate, style-only, or pre-existing out-of-scope findings with a recorded reason.
-5. Rerun affected validation.
+4. For a confirmed minimality finding, verify that the smaller path preserves acceptance criteria and safeguards, then fix it through [the minimality protocol](minimality-protocol.md); route any behavior change through TDD-first.
+5. Reject hypothetical, duplicate, line-count-only, style-only, or pre-existing out-of-scope findings with a recorded reason.
+6. Rerun affected validation.
 
 Reviewers do not edit tests or implementation, run write-capable remediation, commit, push, expand scope, or make product decisions. They audit TDD evidence when applicable; the root owns the remediation cycle.
 
@@ -107,6 +112,7 @@ Accept a milestone only when all are true:
 - its primary signal is met;
 - relevant validation is green;
 - TDD-first work has a meaningful red signal and focused green evidence, or a documented reason why an automated red signal was impractical;
+- the minimality decision is evidence-backed and no confirmed avoidable dependency, duplicate implementation, speculative abstraction, or downstream symptom patch remains;
 - required version, changelog, and documentation surfaces agree with the reviewed diff and no published tag was rewritten;
 - every acceptance criterion is covered by authoritative evidence;
 - no confirmed actionable finding remains;
