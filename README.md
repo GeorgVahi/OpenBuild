@@ -2,7 +2,7 @@
 
 [Русская версия](README.ru.md)
 
-OpenBuild is a Codex workflow for turning a plain-language idea or an existing specification into a repository-grounded plan and, when requested, a tested implementation with automatic phase routing, iterative blind-spot critique, separate-usage-pool-first code search, strongest-proven-model coding, bounded writers, evidence-gated minimality, TDD-first milestones, and progressive review.
+OpenBuild is a Codex workflow for turning a plain-language idea or an existing specification into a repository-grounded plan and, when requested, a tested implementation with automatic phase routing, iterative blind-spot critique, separate-usage-pool-first code search, risk-matched-model coding, bounded writers, evidence-gated minimality, TDD-first milestones, and progressive review.
 
 It packages one explicit skill, **Build**, with six modes:
 
@@ -11,13 +11,13 @@ It packages one explicit skill, **Build**, with six modes:
 - `run` — execute a ready or refinable specification;
 - `full` — go from an idea through specification, implementation, validation, and review;
 - `auto` — infer the target and resume at the first incomplete phase;
-- `setup-models` — optionally configure permission-gated search-pool, strongest-writer, and read-only review profiles.
+- `setup-models` — optionally configure permission-gated search-pool, fast/balanced/strong writer, and read-only review profiles.
 
 OpenBuild is self-contained. It does not require separate discovery, TDD, or review skills, telemetry, a hosted service, or background network access.
 
 > OpenBuild `0.4.0` is the current release. The immutable release tag is `v0.4.0`; pin it for reproducible installation or use `main` intentionally for unreleased changes.
 
-The manifest, release tag, and GitHub Release are synchronized at `0.4.0`.
+The manifest development version on `main` is `1.0.0`; the latest immutable release tag and GitHub Release remain synchronized at `0.4.0` until separately authorized publication.
 
 ## Requirements
 
@@ -191,7 +191,7 @@ Explicit `new`, `refine`, `run`, or `full` remains authoritative. `auto` and a b
 $build setup-models
 ```
 
-Build first checks the capabilities exposed by the current Codex runtime. If native selection already proves every route, no files are needed. Otherwise it may propose read-only `openbuild-search-separate` and `openbuild-search-fallback`, write-capable `openbuild-implementation-strongest`, and read-only `openbuild-review-fast`, `balanced`, `strong`, and `strongest` profiles. Existing `openbuild-discovery` remains a legacy route and is treated as separate-pool search only when its mapping is proven.
+Build first checks the capabilities exposed by the current Codex runtime. If native selection already provides every route, no files are needed. Otherwise it may propose read-only `openbuild-search-separate` and `openbuild-search-fallback`; write-capable `openbuild-implementation-fast`, `openbuild-implementation-balanced`, and `openbuild-implementation-strongest`; and read-only `openbuild-review-fast`, `balanced`, `strong`, and `strongest` profiles. Existing `openbuild-discovery` remains a legacy route and is treated as separate-pool search only when its mapping is proven.
 
 Before writing anything, Build must show:
 
@@ -200,7 +200,7 @@ Before writing anything, Build must show:
 - user scope (`~/.codex/agents`) or project scope (`.codex/agents`);
 - exact target files and exact diff.
 
-It writes only after separate permission, shows the `workspace-write` implementation profile separately, never overwrites an existing profile, validates TOML, and requires a reload or new session plus observed profile selection before claiming routing works. Declining setup leaves search, specification, and read-only review operational with honest fallbacks; implementation stops before code edits unless the root is already the strongest proven coding route.
+It writes only after separate permission, shows every `workspace-write` implementation profile separately, never overwrites an existing profile, validates TOML, and requires a reload or new session before use. Configured profile evidence is recorded separately from observed runtime metadata. Declining setup leaves search, specification, and read-only review operational with honest fallbacks; implementation proceeds only when the selected low, medium, high, or critical risk tier is satisfied.
 
 ## How automatic phase routing works
 
@@ -212,13 +212,15 @@ A legacy specification marked `Ready` is not trusted blindly. If it lacks the cu
 
 Before any `rg`, `rg --files`, file/symbol lookup, repository grep, dependency trace, route/test/config/schema search, or log scan, the root agent creates a compact search plan and routes it through the usage-pool order below. Workers return only an evidence map with `path:line`, symbol or route, a confirmed fact, relevance, negative results, and confidence.
 
-The root agent remains the orchestrator: it deduplicates evidence, verifies already-known critical files and lines with targeted reads, makes product and architecture decisions, owns durable specification/version edits, validates, owns Git, and writes the final answer. A new grep or lookup returns to the search worker. Search workers never edit or decide architecture; implementation edits use the separate strongest-writer lease described below.
+The root agent remains the orchestrator: it deduplicates evidence, verifies already-known critical files and lines with targeted reads, makes product and architecture decisions, owns durable specification/version edits, validates, owns Git, and writes the final answer. A new grep or lookup returns to the search worker. Search workers never edit or decide architecture; implementation edits use the separate risk-matched single-writer lease described below.
 
 ## How usage-aware model routing works
 
 Search always attempts a confirmed separate-usage route first, normally `openbuild-search-separate` or an equivalent native selector. The current Spark preview is an official example of a separately limited, near-instant text model when the account and runtime expose it, but OpenBuild never pins that example universally. If the runtime reports quota exhaustion or model/profile unavailability, Build opens a circuit breaker for the current run and falls back once to `openbuild-search-fallback`: the minimum proven suitable main-pool search model at low/minimal supported reasoning. It then uses explorer, generic read-only subagent, and finally minimum root search. It does not scrape the private usage dashboard, guess remaining quota, or retry a failed separate route for every grep.
 
-Code edits take the opposite path: Build selects the strongest coding model proven by current official guidance, runtime tier metadata, a documented upgrade, or user-confirmed configuration. It uses that model for every test and production code change and scales reasoning effort by complexity rather than downgrading the coding model. The route is preferably `openbuild-implementation-strongest` or a native selector; `root-only` is compliant only when the root is itself the strongest proven route. If no such route can be proven or selected, Build runs the permission-gated setup flow once and then stops before code edits instead of silently downgrading. Critics and reviewers keep their independent risk-based ladder.
+Code edits use a risk-matched writer while preserving the same Ready, TDD, minimality, single-writer, validation, and review gates at every tier. `openbuild-implementation-fast` handles low-risk Direct documentation, cosmetic, or mechanical work; `openbuild-implementation-balanced` handles medium-risk contained behavior with clear tests; and `openbuild-implementation-strongest` handles high or critical contracts, security, persistence, concurrency, permissions, privacy, and sensitive state. Missing model metadata alone does not block a configured low or medium route, but Build records it as `unknown` and never claims an observed switch or saving. High and critical work still require their strong/strongest floor.
+
+Escalation is evidence-driven: Build moves to the next writer tier only when scope or risk increases, the current worker reports insufficient confidence, the red/green signal exposes a deeper owner-layer problem, validation fails for a task-scoped reason, or review confirms an actionable finding. It never launches stronger writers merely to demonstrate model switching. Exact `model` and `model_reasoning_effort` values stay in user- or project-scoped custom-agent files rather than the portable plugin.
 
 Codex officially supports per-agent `model`, `model_reasoning_effort`, and sandbox settings, and documents the Spark preview as separately limited. Because availability changes, `$build setup-models` must verify the current account/runtime mapping before writing profiles: [Codex pricing and usage limits](https://learn.chatgpt.com/docs/pricing#what-are-the-usage-limits-for-my-plan), [Codex subagents and model choice](https://learn.chatgpt.com/docs/agent-configuration/subagents#choosing-models-and-reasoning).
 
@@ -242,7 +244,7 @@ Reviewers stay read-only. They audit the red signal, owning layer, focused green
 
 ## How adaptive implementation delegation works
 
-After `Ready`, each milestone selects `root-only`, `bounded-worker`, or `sequential-workers`, but every test and production code edit stays on the strongest proven coding model. Reasoning effort scales from low/minimal for mechanical changes to the deepest supported effort for critical work. A worker is used only when the owning files, acceptance criteria, red or primary signal, and stop conditions are clear; `root-only` requires the root to be the strongest proven route. An unavailable or unverified strongest route blocks implementation instead of authorizing a downgrade.
+After `Ready`, each milestone selects `root-only`, `bounded-worker`, or `sequential-workers`, and then selects the minimum sufficient proven writer tier from the milestone risk. Reasoning effort scales from low/minimal for mechanical changes to the deepest supported effort for critical work. A worker is used only when the owning files, acceptance criteria, red or primary signal, and stop conditions are clear; `root-only` requires the root to satisfy the selected tier. An unavailable required tier blocks that milestone instead of authorizing a risk-floor downgrade.
 
 The shared checkout has one active writer. A worker receives a baseline and exact allowed files, cannot edit the specification, version, changelog, or unrelated files, cannot make product or architecture decisions, and cannot stage, commit, push, publish, or deploy. The root does not edit while the lease is active. After handoff, the root rechecks the complete diff, rereads changed code, reruns focused and risk-based validation, updates durable records and versioning, and only then starts progressive review or Git actions. Multiple worker milestones run strictly sequentially.
 
@@ -310,7 +312,7 @@ You installed both channels. They use the same source but are separate local ins
 
 ### Model switching is reported as unavailable or unverified
 
-Run `$build setup-models`. Without a native selector or configured `openbuild-search-separate` / `openbuild-implementation-strongest` profiles, OpenBuild cannot prove that search used a separate quota or that the strongest model would write code. If the runtime exposes neither per-spawn selection nor custom agents, search continues through the documented efficient fallback, while implementation stops before test or production code edits unless the root is independently proven to be the strongest coding route.
+Run `$build setup-models`. Without a native selector or configured custom-agent profiles, OpenBuild cannot prove that search used a separate quota or that an observed model switch occurred. It can still use honest read-only fallbacks. For implementation, configured fast or balanced named profiles may proceed with runtime metadata recorded as `unknown`; high and critical milestones stop unless their required strong/strongest route can be selected.
 
 ### Build refuses to overwrite a specification
 
@@ -331,7 +333,7 @@ python -m unittest discover -s scripts -p "test_*.py" -v
 python scripts/validate_package.py
 ```
 
-The release process also runs the official Codex skill and plugin validators, clean plugin installation, standalone installation from the tagged GitHub path, forward-tests for `new`, `refine`, `run`, `auto`, duplicate-decision suppression, evidence-backed reopening, risk-adaptive critic closure, separate-pool search-first/circuit-breaker fallback, strongest-model single-writer handoff, evidence-gated minimality, TDD-first remediation, and model-routing fallbacks, and a fresh full-diff review.
+The release process also runs the official Codex skill and plugin validators, clean plugin installation, standalone installation from the tagged GitHub path, forward-tests for `new`, `refine`, `run`, `auto`, duplicate-decision suppression, evidence-backed reopening, risk-adaptive critic closure, separate-pool search-first/circuit-breaker fallback, risk-matched writer selection and escalation, single-writer handoff, evidence-gated minimality, TDD-first remediation, and model-routing fallbacks, and a fresh full-diff review.
 
 Useful official references:
 

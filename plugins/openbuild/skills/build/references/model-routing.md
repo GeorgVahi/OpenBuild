@@ -11,7 +11,7 @@ Use this reference whenever Build delegates repository discovery, specification 
 5. Never rank a model by parsing its name. A model catalog may expose IDs, supported reasoning efforts, a default, or an upgrade path without exposing cost or a complete strength ordering.
 6. Never claim that a model changed unless the spawn result, selected profile, or runtime evidence proves it.
 7. Preserve functional read-only and root-orchestration fallbacks; do not use an unproven model for code edits.
-8. Keep search workers, specification critics, and reviewers read-only. Route all code edits to the strongest proven coding model available, either as the root or one Implementation worker under the single-writer lease in [adaptive implementation delegation](implementation-delegation.md).
+8. Keep search workers, specification critics, and reviewers read-only. Route code edits to a risk-matched Implementation worker under the same Ready, TDD, minimality, single-writer, validation, and review gates in [adaptive implementation delegation](implementation-delegation.md).
 
 ## Search usage-pool order
 
@@ -60,15 +60,21 @@ For broad repository search, use the full search-plan, evidence-map, fallback, a
 
 ## Implementation worker routing
 
-Choose an Implementation worker only after the current specification revision passes the Ready gate. Select the strongest coding model proven by current official guidance, runtime tier metadata, a documented upgrade path, or user-confirmed configuration. Use that strongest model for every code edit; scale its supported reasoning effort by milestone complexity instead of downgrading the coding model merely to save usage.
+Choose an Implementation worker only after the current specification revision passes the Ready gate. Classify the milestone before every lease and select the minimum sufficient proven coding tier:
 
-Prefer a native per-spawn selector or a configured `openbuild-implementation-strongest` profile. The root may use `root-only` only when its current model is itself the strongest proven coding route. A built-in worker or generic subagent may edit only when its effective model is proven strongest. An unavailable stronger route does not turn an unknown or weaker route into the strongest proven route.
+- `openbuild-implementation-fast` for low-risk Direct documentation, cosmetic, or mechanical work with no behavior change;
+- `openbuild-implementation-balanced` for medium-risk contained logic or refactoring with clear contracts and supported tests;
+- `openbuild-implementation-strongest` for high-risk cross-layer behavior, public contracts, persistence, concurrency, auth, permissions, privacy, or sensitive state, and for critical work at the deepest supported effort.
+
+Prefer exact native custom-agent selection or the configured profile for the selected tier. The root may use `root-only` only when its effective model satisfies that tier. A built-in worker or generic bounded subagent may edit only when configuration or runtime evidence supports the same tier. Never infer suitability, strength, cost, or pool from a model slug.
 
 Never use `openbuild-search-separate`, `openbuild-search-fallback`, legacy `openbuild-discovery`, or `openbuild-review-*` profiles for code edits. Select `root-only`, `bounded-worker`, or `sequential-workers` from milestone ownership, overlap, dirty-state safety, risk, and validation evidence; never run concurrent writers in one checkout.
 
 Pass only the milestone, baseline, allowed files, acceptance criteria, red or primary signal, focused green command, and stop conditions defined in [adaptive implementation delegation](implementation-delegation.md). The root independently verifies the returned diff and validation before review or Git actions.
 
-If no strongest route can be proven, offer the permission-gated `$build setup-models` flow once before implementation. If setup is declined, unavailable, or still unverified, stop before every test or production code edit, keep the specification `Ready`, and record `implementation blocked: strongest coding route unproven`. Search, specification, and read-only review may continue through their documented fallbacks; implementation may not silently downgrade.
+**Escalate only on evidence.** Move from fast to balanced or balanced to strong/strongest when scope or risk increases, the selected agent reports insufficient confidence, the red/green signal exposes a deeper owner-layer problem, validation fails for a task-scoped reason, or review confirms an actionable gap. Do not fan out or escalate merely because a stronger model exists, and never repeat an unchanged task at the same tier.
+
+Missing model/tier metadata alone does not block low or medium implementation when the exact named profile is configured, the requested selection and sandbox are recorded, and no runtime evidence contradicts it. Record observed fields as `unknown` or `unobservable`; do not claim a model switch or savings. High work still requires a confirmed strong route, and critical work requires the strongest proven route plus applicable approvals. When the required tier cannot be selected, stop before every test or production code edit and record the exact limitation rather than silently lowering the risk floor.
 
 ## `$build setup-models`
 
@@ -76,18 +82,20 @@ If no strongest route can be proven, offer the permission-gated `$build setup-mo
 
 1. Inspect the native spawn schema, discoverable agent roles/profiles, and model catalog when exposed.
 2. Identify whether current official guidance, runtime metadata, or the user confirms a separate-usage search model for this account/surface. Do not infer pool membership from a model slug alone.
-3. Identify the strongest proven coding model and the minimum efficient main-pool search fallback.
+3. Identify proven fast, balanced, and strong/strongest coding tiers plus the minimum efficient main-pool search fallback.
 4. If native selection already provides every proven route, explain it and avoid creating redundant files.
 5. If only catalog IDs are available, do not invent usage-pool membership or strength ordering. Use official product guidance, documented `upgrade`, supported reasoning-effort descriptions, runtime tier metadata, or a user-confirmed mapping.
 6. Deduplicate roles that resolve to the same effective model, effort, sandbox, and usage pool.
 
 ### Proposal
 
-Propose up to seven roles, collapsing duplicates when fewer distinct routes exist:
+Propose up to nine roles, collapsing duplicates when fewer distinct routes exist:
 
 - `openbuild-search-separate`: all repository search and evidence gathering on a confirmed separate usage pool, read-only;
 - `openbuild-search-fallback`: the minimum proven suitable main-pool search model with low/minimal supported reasoning, read-only;
-- `openbuild-implementation-strongest`: the strongest proven coding model, write-capable only inside the parent-approved workspace and a single-writer lease;
+- `openbuild-implementation-fast`: a proven efficient coding route for low-risk Direct work, write-capable only inside the parent-approved workspace and a single-writer lease;
+- `openbuild-implementation-balanced`: a proven balanced coding route for medium-risk contained behavior, write-capable only inside the parent-approved workspace and a single-writer lease;
+- `openbuild-implementation-strongest`: a proven strong/strongest coding route for high or critical work, write-capable only inside the parent-approved workspace and a single-writer lease;
 - `openbuild-review-fast`: low-risk documentation and mechanical-change review;
 - `openbuild-review-balanced`: normal contained changes;
 - `openbuild-review-strong`: high-risk or escalated review;
@@ -125,10 +133,10 @@ Do not edit, decide architecture/product behavior, commit, push, or answer the u
 ```
 
 ```toml
-name = "openbuild-implementation-strongest"
-description = "Strongest proven OpenBuild coding worker for one bounded single-writer lease."
-model = "<confirmed-strongest-coding-model-id>"
-model_reasoning_effort = "<risk-matched-supported-effort>"
+name = "openbuild-implementation-<fast|balanced|strongest>"
+description = "Risk-matched OpenBuild coding worker for one bounded single-writer lease."
+model = "<confirmed-model-id-for-the-tier>"
+model_reasoning_effort = "<tier-appropriate-supported-effort>"
 sandbox_mode = "workspace-write"
 developer_instructions = """
 Edit only the files leased by the root for one Ready milestone.
@@ -147,7 +155,7 @@ Do not ship placeholders as active configuration.
 - Require explicit permission for durable configuration writes.
 - Never overwrite or silently merge an existing file.
 - On collision, propose a unique suffix or an explicit reviewed update.
-- Keep search and review profiles read-only. Create `openbuild-implementation-strongest` with `workspace-write` only after separately showing its exact scope and receiving permission.
+- Keep search and review profiles read-only. Create each `openbuild-implementation-fast`, `openbuild-implementation-balanced`, and `openbuild-implementation-strongest` profile with `workspace-write` only after separately showing its exact scope and receiving permission.
 - Validate TOML after writing.
 - Ask for reload or a new session, then verify the roles are discoverable.
 - Until verification succeeds, report setup as configured but unverified.
@@ -166,8 +174,8 @@ Search model/tier: <observed value or unknown>
 Separate-pool attempt: <used|unavailable|not configured; evidence and circuit-breaker state>
 Discovery branches: <objectives and worker count>
 Readiness critic depth: <perspectives, tiers, closure revision, and fallback>
-Implementation delegation: <root-only|bounded-worker|sequential-workers|blocked; verified worker role/tier or exact blocker>
-Strongest-writer evidence: <official/runtime/config/user mapping or implementation blocked>
+Implementation delegation: <root-only|bounded-worker|sequential-workers|blocked; requested writer profile/tier, observed value or unknown, escalation, and exact blocker if any>
+Writer-route evidence: <official/runtime/config/user mapping, exact requested profile, selection evidence, and limitations>
 Starting review tier: <observed tier or unknown>
 Required final tier: <tier based on risk>
 Actual escalation: <tier sequence or none>

@@ -199,7 +199,7 @@ class ImplementationDelegationContractTests(unittest.TestCase):
         tdd_workflow = self.tdd_workflow.replace("bounded implementation worker", "implementation helper")
         self.assertTrue(any("tdd-workflow.md" in error for error in self.validate(tdd_workflow=tdd_workflow)))
 
-        route = "Select the strongest proven root or bounded implementation worker"
+        route = "Select the risk-matched root or bounded implementation worker"
         edit = "Under that lease, add or modify the test"
         tdd_workflow = self.tdd_workflow.replace(route, "__EDIT_ORDER__").replace(edit, route).replace("__EDIT_ORDER__", edit)
         self.assertTrue(any("must precede every test code edit" in error for error in self.validate(tdd_workflow=tdd_workflow)))
@@ -228,13 +228,13 @@ class ImplementationDelegationContractTests(unittest.TestCase):
 
 
 class ChangelogContractTests(unittest.TestCase):
-    def test_released_manifest_version_has_dated_section(self) -> None:
+    def test_development_manifest_version_and_latest_release_are_documented(self) -> None:
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
         self.assertIn("## [0.4.0] - 2026-07-12", changelog)
-        self.assertEqual(validate_changelog_contract(changelog, "0.4.0"), [])
+        self.assertEqual(validate_changelog_contract(changelog, "1.0.0"), [])
 
-        mutated = changelog.replace("## [0.4.0] - 2026-07-12", "## [next] - 2026-07-12")
-        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "0.4.0")))
+        mutated = changelog.replace("Target development version: `1.0.0`.", "Target development version: `next`.")
+        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "1.0.0")))
 
     def test_released_version_is_pinned_in_both_install_channels(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -288,21 +288,58 @@ class UsageRoutingContractTests(unittest.TestCase):
         discovery = self.code_discovery.replace("do not pay for repeated failed attempts", "retry later")
         self.assertTrue(any("code-discovery.md" in error for error in self.validate(code_discovery=discovery)))
 
-    def test_every_code_edit_uses_strongest_proven_route(self) -> None:
-        implementation = self.implementation.replace("strongest proven coding model for every complexity class", "suitable coding model")
+    def test_code_edits_use_risk_matched_writer_tiers(self) -> None:
+        implementation = self.implementation.replace(
+            "risk-matched coding model for every complexity class",
+            "suitable coding model",
+        )
         self.assertTrue(any("implementation-delegation.md" in error for error in self.validate(implementation=implementation)))
 
-        injected = self.model_routing.replace(
-            "## `$build setup-models`",
-            "An unknown worker is a disclosed fallback.\n\n## `$build setup-models`",
+        for profile in [
+            "openbuild-implementation-fast",
+            "openbuild-implementation-balanced",
+            "openbuild-implementation-strongest",
+        ]:
+            model_routing = self.model_routing.replace(profile, "missing-writer-profile")
+            self.assertTrue(any("implementation routing" in error for error in self.validate(model_routing=model_routing)))
+
+    def test_writer_escalation_preserves_tdd_and_single_writer_controls(self) -> None:
+        model_routing = self.model_routing.replace(
+            "Escalate only on evidence",
+            "Escalate whenever a stronger model exists",
         )
-        self.assertTrue(any("forbidden unproven writer fallback" in error for error in self.validate(model_routing=injected)))
+        self.assertTrue(any("implementation routing" in error for error in self.validate(model_routing=model_routing)))
 
         implementation = self.implementation.replace(
-            "only when its effective coding model is proven strongest",
-            "when all stronger routes returned an observed failure",
+            "Missing model/tier metadata alone does not block low or medium implementation",
+            "Missing model/tier metadata blocks implementation",
         )
-        self.assertTrue(any("forbidden downgrade" in error for error in self.validate(implementation=implementation)))
+        self.assertTrue(any("implementation-delegation.md" in error for error in self.validate(implementation=implementation)))
+
+    def test_high_and_critical_writer_floors_cannot_be_relaxed(self) -> None:
+        model_routing = self.model_routing.replace(
+            "High work still requires a confirmed strong route",
+            "High work may use any configured route",
+        )
+        self.assertTrue(any("implementation routing" in error for error in self.validate(model_routing=model_routing)))
+
+        model_routing = self.model_routing.replace(
+            "critical work requires the strongest proven route",
+            "critical work may use a merely configured route",
+        )
+        self.assertTrue(any("implementation routing" in error for error in self.validate(model_routing=model_routing)))
+
+        implementation = self.implementation.replace(
+            "For high work require a confirmed strong route",
+            "For high work allow any configured route",
+        )
+        self.assertTrue(any("implementation-delegation.md" in error for error in self.validate(implementation=implementation)))
+
+        implementation = self.implementation.replace(
+            "for critical work require the strongest proven route",
+            "for critical work allow a merely configured route",
+        )
+        self.assertTrue(any("implementation-delegation.md" in error for error in self.validate(implementation=implementation)))
 
     def test_usage_routing_is_explained_in_both_readmes(self) -> None:
         readme = self.readme.replace("Search always attempts a confirmed separate-usage route first", "Search selects a suitable route")

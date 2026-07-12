@@ -19,7 +19,7 @@ Use this as a flexible structure. Remove irrelevant sections and keep the docume
 - Routing mode: native-selector | configured-profiles | reasoning-ladder | role-only | generic-subagent | root-only
 - Discovery mode: delegated | mixed | root-fallback — <observed model/tier or unknown>
 - Search usage route: separate-pool | main-efficient | role-only | generic-subagent | root-fallback — <observed model/pool, first-attempt result, and circuit breaker>
-- Implementation model route: strongest-profile | native-selector | strongest-root | blocked — <verified model/tier and strength evidence, or exact blocker>
+- Implementation model route: fast-profile | balanced-profile | strongest-profile | native-selector | risk-matched-root | blocked — <requested profile/tier, observed model or unknown, escalation, and exact blocker>
 
 ## 1. Outcome
 
@@ -126,7 +126,7 @@ Use this as a flexible structure. Remove irrelevant sections and keep the docume
 - Scope: <included work>
 - Excludes: <excluded work>
 - Implementation mode: Direct | Investigation | TDD-first
-- Delegation: root-only | bounded-worker | sequential-workers | blocked — <lease owner, verified strongest-model evidence and allowed files, or exact blocker>
+- Delegation: root-only | bounded-worker | sequential-workers | blocked — <lease owner, requested risk-matched writer profile/tier, observed model or unknown, allowed files, escalation, or exact blocker>
 - Red signal: <test/reproduction and expected failure, or not applicable with reason>
 - Minimality decision: <selected rung, skipped complexity, and any ceiling/upgrade trigger>
 - Focused green: `<command or scenario>` -> <result>

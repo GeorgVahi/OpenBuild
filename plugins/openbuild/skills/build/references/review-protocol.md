@@ -13,7 +13,7 @@ Provide the reviewer with:
 - validation commands and current results;
 - the implementation mode and, for TDD-first work, the owning layer plus red/green evidence;
 - the implementation delegation mode and, when used, the single-writer lease plus root handoff evidence;
-- the observed search usage route/circuit breaker and strongest-writer model evidence or disclosed fallback;
+- the observed search usage route/circuit breaker and risk-matched writer profile/tier evidence or disclosed limitation;
 - the recorded minimality decision, skipped complexity, and any ceiling/upgrade trigger;
 - the version impact, authoritative version source, and synchronized version/changelog/documentation evidence;
 - the requested review tier and the evidence supporting that tier;
@@ -50,7 +50,7 @@ TDD assessment:
 - <met | not met | not applicable — red signal, owner layer, focused green, and risk coverage>
 
 Delegation assessment:
-- <met | not met | not applicable — strongest-writer evidence, writer lease, allowed files, baseline, root handoff, and Git ownership>
+- <met | not met | not applicable — requested risk-matched writer profile/tier, observed model or unknown, escalation evidence, writer lease, allowed files, baseline, root handoff, and Git ownership>
 
 Minimality assessment:
 - <met | not met — selected rung, repository evidence, avoidable complexity, and preserved safeguards>

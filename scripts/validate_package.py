@@ -317,10 +317,10 @@ def validate_implementation_delegation_contract(
     if "bounded implementation worker" not in tdd_workflow:
         errors.append("tdd-workflow.md: missing bounded implementation worker contract")
     tdd_steps = markdown_section(tdd_workflow, "## Red → green → refactor")
-    route_position = tdd_steps.find("Select the strongest proven root or bounded implementation worker")
+    route_position = tdd_steps.find("Select the risk-matched root or bounded implementation worker")
     edit_position = tdd_steps.find("Under that lease, add or modify the test")
     if route_position < 0 or edit_position < 0 or route_position >= edit_position:
-        errors.append("tdd-workflow.md: strongest-writer route and lease must precede every test code edit")
+        errors.append("tdd-workflow.md: risk-matched writer route and lease must precede every test code edit")
     readme_delegation = markdown_section(readme, "## How adaptive implementation delegation works")
     if not readme_delegation:
         errors.append("README.md: missing adaptive implementation-delegation section")
@@ -368,7 +368,7 @@ def validate_changelog_contract(changelog: str, version: str) -> list[str]:
         "single-writer",
         "`auto`",
         "separate usage pool",
-        "Strongest-proven-model coding",
+        "Risk-matched-model coding",
         "Deterministic contract validation",
     ]:
         if token not in current_section:
@@ -413,9 +413,9 @@ def validate_usage_routing_contract(
         if token not in skill_discovery:
             errors.append(f"SKILL.md usage routing: missing {token}")
     skill_implementation = markdown_section(skill_text, "## Implement milestones")
-    for token in ["strongest proven coding model", "scale reasoning effort by risk"]:
+    for token in ["risk-matched writer tier", "Escalate only on task evidence", "preserve the same TDD/minimality/validation gates"]:
         if token not in skill_implementation:
-            errors.append(f"SKILL.md strongest-writer routing: missing {token}")
+            errors.append(f"SKILL.md risk-matched writer routing: missing {token}")
 
     search_order = markdown_section(model_routing, "## Search usage-pool order")
     for token in [
@@ -443,23 +443,26 @@ def validate_usage_routing_contract(
 
     implementation_route = markdown_section(model_routing, "## Implementation worker routing")
     for token in [
-        "strongest coding model",
-        "every code edit",
+        "minimum sufficient proven coding tier",
+        "openbuild-implementation-fast",
+        "openbuild-implementation-balanced",
         "openbuild-implementation-strongest",
-        "strongest proven coding route",
+        "Escalate only on evidence",
+        "Missing model/tier metadata alone does not block low or medium implementation",
+        "High work still requires a confirmed strong route",
+        "critical work requires the strongest proven route",
         "stop before every test or production code edit",
-        "implementation may not silently downgrade",
+        "rather than silently lowering the risk floor",
     ]:
         if token not in implementation_route:
             errors.append(f"model-routing.md implementation routing: missing {token}")
-    for forbidden in ["unknown worker is a disclosed fallback", "use the strongest available fallback"]:
-        if forbidden in implementation_route:
-            errors.append(f"model-routing.md implementation routing: forbidden unproven writer fallback {forbidden}")
 
     setup = markdown_section(model_routing, "## `$build setup-models`")
     for token in [
         "openbuild-search-separate",
         "openbuild-search-fallback",
+        "openbuild-implementation-fast",
+        "openbuild-implementation-balanced",
         "openbuild-implementation-strongest",
         "confirmed usage pool",
         "workspace-write",
@@ -480,17 +483,18 @@ def validate_usage_routing_contract(
             errors.append(f"code-discovery.md usage routing: missing {token}")
 
     for token in [
-        "strongest proven coding model for every complexity class",
-        "Scale reasoning effort rather than model strength",
+        "risk-matched coding model for every complexity class",
+        "openbuild-implementation-fast",
+        "openbuild-implementation-balanced",
         "openbuild-implementation-strongest",
         "Read-only search/discovery",
+        "Missing model/tier metadata alone does not block low or medium implementation",
+        "For high work require a confirmed strong route",
+        "for critical work require the strongest proven route",
         "stop before all test and production code edits",
     ]:
         if token not in implementation:
-            errors.append(f"implementation-delegation.md strongest-writer routing: missing {token}")
-    for forbidden in ["exact fallback limitation", "all stronger routes returned", "or no stronger route remains available"]:
-        if forbidden in implementation:
-            errors.append(f"implementation-delegation.md strongest-writer routing: forbidden downgrade {forbidden}")
+            errors.append(f"implementation-delegation.md risk-matched writer routing: missing {token}")
 
     readme_usage = markdown_section(readme, "## How usage-aware model routing works")
     if not readme_usage:
@@ -500,9 +504,10 @@ def validate_usage_routing_contract(
             "Search always attempts a confirmed separate-usage route first",
             "circuit breaker for the current run",
             "does not scrape the private usage dashboard",
-            "strongest coding model",
-            "every test and production code change",
-            "stops before code edits instead of silently downgrading",
+            "risk-matched writer",
+            "openbuild-implementation-fast",
+            "openbuild-implementation-balanced",
+            "Escalation",
             "model_reasoning_effort",
         ]:
             if token not in readme_usage:
@@ -516,9 +521,10 @@ def validate_usage_routing_contract(
             "Поиск всегда сначала пытается использовать подтверждённый separate-usage route",
             "circuit breaker на текущий run",
             "не скрейпит приватную usage page",
-            "strongest coding model",
-            "каждое test- и production-изменение кода",
-            "останавливается до code edits, а не молча понижает модель",
+            "risk-matched writer",
+            "openbuild-implementation-fast",
+            "openbuild-implementation-balanced",
+            "Эскалация",
             "model_reasoning_effort",
         ]:
             if token not in readme_ru_usage:
@@ -800,7 +806,7 @@ def main() -> int:
         "attempt budget",
         "version impact",
         "separate-usage",
-        "strongest proven coding model",
+        "risk-matched writer tier",
     ]
     for token in required_skill_tokens:
         if token not in skill_text:
@@ -840,6 +846,8 @@ def main() -> int:
         "openbuild-discovery",
         "openbuild-search-separate",
         "openbuild-search-fallback",
+        "openbuild-implementation-fast",
+        "openbuild-implementation-balanced",
         "openbuild-implementation-strongest",
         "openbuild-review-fast",
         "TDD-first",

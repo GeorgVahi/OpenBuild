@@ -1,12 +1,12 @@
 # Adaptive implementation delegation
 
-Use this protocol after the Ready gate to route every code edit to the strongest proven coding model, either as the root or one bounded implementation worker. Preserve one decision owner and one active writer in the shared workspace.
+Use this protocol after the Ready gate to route every code edit to the minimum sufficient proven coding tier for its risk, either as the root or one bounded implementation worker. Preserve one decision owner, the full TDD and validation contract, and one active writer in the shared workspace.
 
 ## Delegation modes
 
 Select and record one mode per milestone:
 
-- `root-only` — keep edits with the root only when its model is the strongest proven coding route, especially for unclear ownership, overlapping dirty files, critical or destructive scope, sensitive authority boundaries, or a milestone too coupled to isolate safely;
+- `root-only` — keep edits with the root only when its effective model satisfies the selected risk tier, especially for unclear ownership, overlapping dirty files, critical or destructive scope, sensitive authority boundaries, or a milestone too coupled to isolate safely;
 - `bounded-worker` — lease one coherent milestone with known owning files, acceptance criteria, and a reproducible red or primary signal to one implementation worker;
 - `sequential-workers` — use different bounded workers for disjoint milestones, one after another, with a completed root handoff gate between them.
 
@@ -16,12 +16,12 @@ Choose the minimum sufficient implementation depth:
 
 | Complexity | Default implementation mode |
 |---|---|
-| `low` | strongest proven coding route with low/minimal supported reasoning; `root-only` only when the root satisfies that route |
-| `medium` | `bounded-worker` when ownership and tests are clear; otherwise `root-only` |
-| `high` | `bounded-worker` or `sequential-workers` only for isolated milestones; keep sensitive owner-layer and integration decisions with the root |
-| `critical` | strongest proven route with deepest supported reasoning; prefer `root-only` only when the root is that route, and never delegate destructive execution |
+| `low` | `openbuild-implementation-fast` or an equivalent proven fast coding route for Direct, documentation, cosmetic, or mechanical work without behavior changes |
+| `medium` | `openbuild-implementation-balanced` or an equivalent proven balanced coding route for contained logic or refactoring with clear contracts and supported tests |
+| `high` | `openbuild-implementation-strongest` or an equivalent strong coding route for cross-layer behavior, public contracts, persistence, concurrency, auth, permissions, privacy, or sensitive state |
+| `critical` | strongest proven route with deepest supported reasoning; prefer `root-only` only when the root satisfies that route, and never delegate destructive execution |
 
-Use the strongest proven coding model for every complexity class, as defined by [model routing](model-routing.md). Scale reasoning effort rather than model strength: low/minimal when safe for mechanical work, medium for contained behavior, high for cross-layer work, and the deepest supported effort for critical reasoning. Do not infer capability from a model name, and do not claim the strongest route or delegation without runtime/configuration evidence.
+Use a risk-matched coding model for every complexity class, as defined by [model routing](model-routing.md). Select fast for low-risk Direct work, balanced for contained medium-risk behavior, and strong/strongest for high or critical work. Scale supported reasoning effort within the selected tier: low/minimal when safe for mechanical work, medium for contained behavior, high for cross-layer work, and the deepest supported effort for critical reasoning. Escalate only after evidence shows that the current tier is insufficient. Do not infer capability from a model name, and do not claim a route or delegation without runtime/configuration evidence.
 
 ## Single-writer lease
 
@@ -33,8 +33,9 @@ Treat the lease and milestone log as execution metadata, not a semantic specific
 ```text
 Milestone: <ID and outcome>
 Lease owner: <worker role or identifier>
-Observed model/tier: <verified strongest coding value>
-Strongest-writer evidence: <official/runtime/config/user mapping>
+Requested writer profile/tier: <fast|balanced|strong|strongest plus exact profile>
+Observed model/tier: <verified value or unknown>
+Writer-route evidence: <official/runtime/config/user mapping and selection evidence>
 Baseline: <branch@SHA plus task status/diff identity>
 Allowed files: <exact paths or narrow owned directory>
 Forbidden files: <specification, version/changelog, unrelated dirty paths, generated outputs>
@@ -48,7 +49,7 @@ Stop conditions: <new product choice, architecture conflict, scope expansion, de
 Require all of these before granting the lease:
 
 - the root has recorded the current branch, status, task diff, and pre-existing user changes;
-- the selected root or worker is the strongest proven coding route; otherwise no lease is granted and implementation remains blocked;
+- the selected root or worker satisfies the milestone's risk-matched coding tier; otherwise no lease is granted;
 - allowed files have one clear owner and do not overlap active user or agent edits;
 - the specification is `Ready` at its current revision;
 - the worker can complete a coherent outcome without making product or architecture decisions;
@@ -75,7 +76,9 @@ The worker must not:
 - add production dependencies or infrastructure without existing approval;
 - continue after discovering a new product choice, owner-layer conflict, secret, destructive action, or material scope expansion.
 
-Prefer a native strongest-model selector or the configured `openbuild-implementation-strongest` profile. Use a built-in worker, generic bounded subagent, or `root-only` only when its effective coding model is proven strongest. Read-only search/discovery and `openbuild-review-*` profiles are never implementation workers. If the strongest route cannot be proven or selected, stop before all test and production code edits and keep the milestone blocked; do not downgrade after a route failure.
+Prefer an exact native custom-agent selection or the configured `openbuild-implementation-fast`, `openbuild-implementation-balanced`, or `openbuild-implementation-strongest` profile selected from the milestone risk. Read-only search/discovery and `openbuild-review-*` profiles are never implementation workers. A built-in worker, generic bounded subagent, or `root-only` route may write only when its configured or observed capability satisfies the selected tier and the same lease, TDD, minimality, validation, and review controls remain in force.
+
+Missing model/tier metadata alone does not block low or medium implementation when the exact named profile is configured, the requested agent selection is recorded, its sandbox is appropriate, and no runtime evidence contradicts the route. Record the effective model/tier as `unknown` or `unobservable`; never claim a model switch or usage saving from the profile name alone. For high work require a confirmed strong route, and for critical work require the strongest proven route plus any applicable authority checkpoint. If the required tier cannot be selected, stop before all test and production code edits rather than silently lowering the risk floor.
 
 ## Root handoff gate
 
