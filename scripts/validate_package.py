@@ -405,6 +405,8 @@ def main() -> int:
         fail(errors, ".gitignore: local TZ.md must be ignored")
     if "## [0.2.0] - 2026-07-10" not in read_text(ROOT / "CHANGELOG.md", errors):
         fail(errors, "CHANGELOG.md: missing 0.2.0 release entry")
+    if "## [0.3.1] - 2026-07-12" not in read_text(ROOT / "CHANGELOG.md", errors):
+        fail(errors, "CHANGELOG.md: missing 0.3.1 release entry")
     changelog = read_text(ROOT / "CHANGELOG.md", errors)
     for token in ["openbuild-discovery", "TDD-first", "minimality", "version impact"]:
         if token not in changelog:

@@ -14,26 +14,26 @@ OpenBuild — workflow для Codex, который превращает иде�
 
 OpenBuild самодостаточен. Ему не нужны отдельные discovery-, TDD- или review-skills, telemetry, внешний сервис или фоновые сетевые процессы.
 
-> OpenBuild `v0.2.0` — текущий релиз. Для воспроизводимости устанавливайте tag версии; используйте `main` только если осознанно хотите последний development-коммит.
+> OpenBuild `v0.3.1` — текущий релиз. Для воспроизводимости устанавливайте tag версии; используйте `main` только если осознанно хотите последний development-коммит.
 
-Текущий development manifest указывает plugin version `0.3.0`; последний immutable release tag остаётся `v0.2.0`.
+На этой границе релиза текущий manifest указывает plugin version `0.3.1`, синхронизированную с immutable release tag `v0.3.1`.
 
 ## Требования
 
 - Актуальная поверхность Codex с поддержкой skills. Установка plugins доступна в Codex CLI и поддерживаемых plugin-поверхностях.
 - Git, если Build должен создавать milestone-коммиты или проверять task diff.
-- Для `v0.2.0` нативно проверен Windows. Документация для macOS и Linux считается best-effort до отдельных нативных проверок.
+- Для `v0.3.1` нативно проверен Windows. Документация для macOS и Linux считается best-effort до отдельных нативных проверок.
 
-OpenBuild `v0.2.0` поддерживает только Codex. Совместимость с Claude Code, Cursor, Gemini CLI и другими coding agents не заявляется.
+OpenBuild `v0.3.1` поддерживает только Codex. Совместимость с Claude Code, Cursor, Gemini CLI и другими coding agents не заявляется.
 
 ## Установка как plugin — рекомендуется
 
 Plugin — основной канал распространения. Он даёт версионированную установку через marketplace и namespaced-вызов `$openbuild:build`.
 
-### Закреплённый релиз `v0.2.0`
+### Закреплённый релиз `v0.3.1`
 
 ```bash
-codex plugin marketplace add GeorgVahi/OpenBuild --ref v0.2.0
+codex plugin marketplace add GeorgVahi/OpenBuild --ref v0.3.1
 codex plugin add openbuild@openbuild
 ```
 
@@ -70,11 +70,11 @@ Versioned/tag-pinned marketplace закреплён за выбранным tag.
 ```bash
 codex plugin remove openbuild@openbuild
 codex plugin marketplace remove openbuild
-codex plugin marketplace add GeorgVahi/OpenBuild --ref v0.2.0
+codex plugin marketplace add GeorgVahi/OpenBuild --ref v0.3.1
 codex plugin add openbuild@openbuild
 ```
 
-Замените `v0.2.0` на нужный release tag.
+Замените `v0.3.1` на нужный release tag.
 
 ### Удаление plugin
 
@@ -88,7 +88,7 @@ codex plugin marketplace remove openbuild
 Standalone-установка даёт короткий вызов `$build`. Попросите предустановленный системный skill-installer установить canonical папку Build:
 
 ```text
-Используй $skill-installer и установи skill из https://github.com/GeorgVahi/OpenBuild/tree/v0.2.0/plugins/openbuild/skills/build
+Используй $skill-installer и установи skill из https://github.com/GeorgVahi/OpenBuild/tree/v0.3.1/plugins/openbuild/skills/build
 ```
 
 После установки начните новый Codex thread. Откройте `/skills` или введите `$`, убедитесь, что появился `build`, и вызовите:

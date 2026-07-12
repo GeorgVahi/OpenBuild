@@ -6,13 +6,15 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-12
+
 ### Added
 
 - Evidence-gated minimality for implementation and remediation: omit unneeded code, reuse repository solutions, prefer standard-library/native/installed capabilities, and write custom code only as a minimum coherent owner-layer change.
 
 ### Changed
 
-- Main development manifest advanced to `0.3.0`; latest immutable release `v0.2.0` remains unchanged.
+- OpenBuild advanced from release `v0.2.0` to `v0.3.1`; `v0.2.0` remains immutable, and committed development version `0.3.0` was never tagged.
 
 ## [0.2.0] - 2026-07-10
 
@@ -46,6 +48,7 @@ The project follows [Semantic Versioning](https://semver.org/).
 - Codex plugin marketplace distribution and standalone skill installation path.
 - Complete English and Russian documentation.
 
-[Unreleased]: https://github.com/GeorgVahi/OpenBuild/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/GeorgVahi/OpenBuild/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/GeorgVahi/OpenBuild/compare/v0.2.0...v0.3.1
 [0.2.0]: https://github.com/GeorgVahi/OpenBuild/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/GeorgVahi/OpenBuild/releases/tag/v0.1.0

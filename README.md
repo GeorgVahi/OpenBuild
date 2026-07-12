@@ -14,26 +14,26 @@ It packages one explicit skill, **Build**, with five modes:
 
 OpenBuild is self-contained. It does not require separate discovery, TDD, or review skills, telemetry, a hosted service, or background network access.
 
-> OpenBuild `v0.2.0` is the current release. Install a version tag for reproducibility; use `main` only when you intentionally want the latest development commit.
+> OpenBuild `v0.3.1` is the current release. Install a version tag for reproducibility; use `main` only when you intentionally want the latest development commit.
 
-The current development manifest reports plugin version `0.3.0`; the latest immutable release tag remains `v0.2.0`.
+At this release boundary, the current manifest reports plugin version `0.3.1`, synchronized with immutable release tag `v0.3.1`.
 
 ## Requirements
 
 - A current Codex surface that supports skills. Plugin installation is available in Codex CLI and supported plugin surfaces.
 - Git, when Build is expected to create milestone commits or review a task diff.
-- Windows is verified for `v0.2.0`. macOS and Linux are documented as best-effort until native validation is completed.
+- Windows is verified for `v0.3.1`. macOS and Linux are documented as best-effort until native validation is completed.
 
-OpenBuild `v0.2.0` supports Codex only. It does not claim compatibility with Claude Code, Cursor, Gemini CLI, or other coding agents.
+OpenBuild `v0.3.1` supports Codex only. It does not claim compatibility with Claude Code, Cursor, Gemini CLI, or other coding agents.
 
 ## Install as a plugin — recommended
 
 The plugin is the primary distribution channel. It gives you versioned marketplace installation and the namespaced invocation `$openbuild:build`.
 
-### Pinned release `v0.2.0`
+### Pinned release `v0.3.1`
 
 ```bash
-codex plugin marketplace add GeorgVahi/OpenBuild --ref v0.2.0
+codex plugin marketplace add GeorgVahi/OpenBuild --ref v0.3.1
 codex plugin add openbuild@openbuild
 ```
 
@@ -70,11 +70,11 @@ A versioned/tag-pinned marketplace is fixed to its selected tag. To move from on
 ```bash
 codex plugin remove openbuild@openbuild
 codex plugin marketplace remove openbuild
-codex plugin marketplace add GeorgVahi/OpenBuild --ref v0.2.0
+codex plugin marketplace add GeorgVahi/OpenBuild --ref v0.3.1
 codex plugin add openbuild@openbuild
 ```
 
-Replace `v0.2.0` with the target release tag.
+Replace `v0.3.1` with the target release tag.
 
 ### Uninstall the plugin
 
@@ -88,7 +88,7 @@ codex plugin marketplace remove openbuild
 Standalone installation gives you the shorter `$build` invocation. Ask the preinstalled system skill installer to install the canonical Build folder:
 
 ```text
-Use $skill-installer to install the skill from https://github.com/GeorgVahi/OpenBuild/tree/v0.2.0/plugins/openbuild/skills/build
+Use $skill-installer to install the skill from https://github.com/GeorgVahi/OpenBuild/tree/v0.3.1/plugins/openbuild/skills/build
 ```
 
 Start a new Codex thread after installation. Open `/skills` or type `$` and verify that `build` appears, then invoke:
