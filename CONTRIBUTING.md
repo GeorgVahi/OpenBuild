@@ -54,7 +54,7 @@ python scripts/validate_package.py --commit-gate
 
 The unit suite locks the version-gate contract. Before staging, the normal validator checks the working tree, including untracked plugin files. After staging, `--commit-gate` rejects any remaining unstaged public package file, so structural checks match the index content; it then compares every non-empty staged snapshot with `HEAD` and requires a strictly higher manifest version plus CHANGELOG and both READMEs in the same commit.
 
-For Build behavior changes, add a small fixture or realistic prompt and report the observable forward-test result. For documentation-only work, verify every changed command and local link.
+For Build behavior changes, add a small fixture or realistic prompt and report the observable forward-test result. Readiness changes should exercise legacy specs, duplicate decisions, and evidence-backed reopening; routing changes should exercise separate-pool first use, quota/profile circuit-breaker fallback, and strongest-writer evidence; implementation-delegation changes should exercise the single-writer lease and root handoff. For documentation-only work, verify every changed command and local link.
 
 ## Maintainer-only validation
 

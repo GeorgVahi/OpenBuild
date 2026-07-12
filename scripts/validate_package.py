@@ -13,6 +13,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "plugins" / "openbuild"
 SKILL = PLUGIN / "skills" / "build"
+BLINDSPOT_PROTOCOL = SKILL / "references" / "blindspot-protocol.md"
+IMPLEMENTATION_DELEGATION = SKILL / "references" / "implementation-delegation.md"
 
 REQUIRED = [
     ROOT / ".agents" / "plugins" / "marketplace.json",
@@ -27,7 +29,9 @@ REQUIRED = [
     SKILL / "SKILL.md",
     SKILL / "agents" / "openai.yaml",
     SKILL / "references" / "spec-template.md",
+    BLINDSPOT_PROTOCOL,
     SKILL / "references" / "code-discovery.md",
+    IMPLEMENTATION_DELEGATION,
     SKILL / "references" / "minimality-protocol.md",
     SKILL / "references" / "model-routing.md",
     SKILL / "references" / "review-protocol.md",
@@ -68,6 +72,458 @@ def read_text(path: Path, errors: list[str]) -> str:
     except UnicodeDecodeError as exc:
         fail(errors, f"{relative}: not valid UTF-8 ({exc})")
         return ""
+
+
+def markdown_section(text: str, heading: str) -> str:
+    """Return one Markdown section without matching tokens from later sections."""
+
+    lines = text.splitlines()
+    try:
+        start = lines.index(heading)
+    except ValueError:
+        return ""
+
+    level = len(heading) - len(heading.lstrip("#"))
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        match = re.match(r"^(#{1,6})\s+", lines[index])
+        if match and len(match.group(1)) <= level:
+            end = index
+            break
+    return "\n".join(lines[start:end])
+
+
+def validate_auto_routing_contract(
+    skill_text: str,
+    protocol_text: str,
+    metadata_text: str,
+    readme: str,
+    readme_ru: str,
+) -> list[str]:
+    errors: list[str] = []
+    invocation = markdown_section(skill_text, "## Parse the invocation")
+    if "`$build auto <idea-or-path>`" not in invocation:
+        errors.append("SKILL.md invocation contract: missing explicit auto mode")
+    if "`$build <idea-or-path>`: treat as `auto`" not in invocation:
+        errors.append("SKILL.md invocation contract: bare invocation must use auto phase routing")
+    selection = markdown_section(skill_text, "## Select the specification safely")
+    for token in ["workflow target", "first incomplete phase", "legacy `Ready`"]:
+        if token not in selection:
+            errors.append(f"SKILL.md auto-routing contract: missing {token}")
+    lifecycle = markdown_section(protocol_text, "## Lifecycle routing")
+    for token in [
+        "workflow target",
+        "first incomplete phase",
+        "`new` and `refine`",
+        "`run` and `full`",
+        "`auto`",
+        "| `Draft`, `Questions`",
+        "| Legacy `Ready`",
+        "| `In progress` | implementation",
+        "| `Complete` | verification",
+        "full acceptance set",
+        "focused and risk-based signals",
+        "documentation/version",
+        "rollout/rollback",
+    ]:
+        if token not in lifecycle:
+            errors.append(f"blindspot-protocol.md lifecycle routing: missing {token}")
+    if "auto mode" not in metadata_text:
+        errors.append("agents/openai.yaml: default prompt must select auto mode")
+    readme_routing = markdown_section(readme, "## How automatic phase routing works")
+    if not readme_routing:
+        errors.append("README.md: missing automatic phase-routing section")
+    else:
+        for token in ["workflow target", "the first incomplete phase", "Explicit modes and paths", "legacy specification", "complete acceptance evidence"]:
+            if token not in readme_routing:
+                errors.append(f"README.md automatic phase routing: missing {token}")
+    readme_ru_routing = markdown_section(readme_ru, "## Как работает автоматический выбор этапа")
+    if not readme_ru_routing:
+        errors.append("README.ru.md: missing automatic phase-routing section")
+    else:
+        for token in ["цель workflow", "первый незавершённый этап", "Явные режимы и пути", "Legacy-спецификация", "полному acceptance evidence"]:
+            if token not in readme_ru_routing:
+                errors.append(f"README.ru.md automatic phase routing: missing {token}")
+    return errors
+
+
+def validate_blindspot_contract(
+    skill_text: str,
+    protocol_text: str,
+    template_text: str,
+    readme: str,
+    readme_ru: str,
+) -> list[str]:
+    errors: list[str] = []
+    audit = markdown_section(skill_text, "## Audit blind spots")
+    if "[the specification readiness protocol](references/blindspot-protocol.md)" not in audit:
+        errors.append("SKILL.md blind-spot section: missing readiness protocol link")
+
+    for heading, label in [
+        ("## Coverage model", "coverage model"),
+        ("## Decision memory and deduplication", "decision memory"),
+        ("## Adaptive critic loop", "adaptive critic loop"),
+        ("## Critic result", "critic result"),
+        ("## Ready gate", "Ready gate"),
+    ]:
+        if not markdown_section(protocol_text, heading):
+            errors.append(f"blindspot-protocol.md: missing {label} section")
+
+    coverage = markdown_section(protocol_text, "## Coverage model")
+    for token in ["B-###", "gap", "covered", "not applicable", "repository fact", "technical decision", "product decision", "new authority"]:
+        if token not in coverage:
+            errors.append(f"blindspot-protocol.md coverage model: missing {token}")
+
+    decision_memory = markdown_section(protocol_text, "## Decision memory and deduplication")
+    for token in [
+        "D-###",
+        "Decision key",
+        "legacy IDs",
+        "resolved",
+        "reopened",
+        "new evidence",
+        "do not ask it again",
+        "conditional child decision",
+    ]:
+        if token not in decision_memory:
+            errors.append(f"blindspot-protocol.md decision memory: missing {token}")
+
+    critic_loop = markdown_section(protocol_text, "## Adaptive critic loop")
+    for token in [
+        "decision memory",
+        "coverage ledger",
+        "semantic specification inputs",
+        "Do not increment it for audit metadata",
+        "closure verdict remains bound",
+        "low",
+        "medium",
+        "high",
+        "critical",
+        "unchanged tuple",
+        "sequential separated root-perspective passes",
+        "non-trivial low work",
+        "two complementary",
+        "separate closure pass for high",
+        "three complementary",
+        "Missing model/tier metadata alone",
+        "missing required perspective coverage",
+        "self-review, limited",
+    ]:
+        if token not in critic_loop:
+            errors.append(f"blindspot-protocol.md adaptive critic loop: missing {token}")
+
+    ready_gate = markdown_section(protocol_text, "## Ready gate")
+    for token in [
+        "coverage ledger",
+        "gap",
+        "blocking product decisions",
+        "material contradiction",
+        "missing new authority",
+        "critic finding",
+        "acceptance criteria",
+        "current specification revision",
+        "COVERED",
+    ]:
+        if token not in ready_gate:
+            errors.append(f"blindspot-protocol.md Ready gate: missing {token}")
+
+    risks = markdown_section(template_text, "## 9. Risks and blind spots")
+    ledger_header = "ID | Concern | Status | Disposition | Evidence or decision | Next action"
+    if ledger_header not in risks or "B-###" not in risks or "D-###" not in risks:
+        errors.append("spec-template.md coverage ledger: missing durable IDs or required columns")
+
+    critic_result = markdown_section(protocol_text, "## Critic result")
+    for token in [
+        "Specification revision:",
+        "Perspective:",
+        "Verdict: COVERED | GAPS",
+        "Coverage:",
+        "New gaps:",
+        "Reopen requests:",
+        "Duplicate/resolved references:",
+    ]:
+        if token not in critic_result:
+            errors.append(f"blindspot-protocol.md critic result: missing {token}")
+
+    readme_blindspots = markdown_section(readme, "## How blind-spot critique works")
+    if not readme_blindspots:
+        errors.append("README.md: missing blind-spot critique section")
+    else:
+        for token in ["stable `D-###` IDs", "A resolved ID is a locked constraint", "Reopening is allowed only", "same critic perspective/tier", "not a claim of literal omniscience"]:
+            if token not in readme_blindspots:
+                errors.append(f"README.md blind-spot critique: missing {token}")
+    readme_ru_blindspots = markdown_section(readme_ru, "## Как работает критика blind spots")
+    if not readme_ru_blindspots:
+        errors.append("README.ru.md: missing blind-spot critique section")
+    else:
+        for token in ["стабильные IDs `D-###`", "Решённый ID становится зафиксированным ограничением", "Переоткрытие допустимо только", "одна perspective/tier не повторяется", "не заявление о буквальном всеведении"]:
+            if token not in readme_ru_blindspots:
+                errors.append(f"README.ru.md blind-spot critique: missing {token}")
+    return errors
+
+
+def validate_implementation_delegation_contract(
+    skill_text: str,
+    protocol_text: str,
+    model_routing: str,
+    tdd_workflow: str,
+    readme: str,
+    readme_ru: str,
+) -> list[str]:
+    errors: list[str] = []
+    implementation = markdown_section(skill_text, "## Implement milestones")
+    if "[adaptive implementation delegation](references/implementation-delegation.md)" not in implementation:
+        errors.append("SKILL.md implementation section: missing adaptive delegation link")
+
+    for heading, label in [
+        ("## Delegation modes", "delegation modes"),
+        ("## Single-writer lease", "single-writer lease"),
+        ("## Worker contract", "worker contract"),
+        ("## Root handoff gate", "root handoff gate"),
+    ]:
+        if not markdown_section(protocol_text, heading):
+            errors.append(f"implementation-delegation.md: missing {label} section")
+
+    lease = markdown_section(protocol_text, "## Single-writer lease")
+    for token in ["one active writer", "Allowed files", "Forbidden files", "Baseline", "Stop conditions", "otherwise no lease is granted"]:
+        if token not in lease:
+            errors.append(f"implementation-delegation.md single-writer lease: missing {token}")
+
+    modes = markdown_section(protocol_text, "## Delegation modes")
+    for token in ["`root-only`", "`bounded-worker`", "`sequential-workers`", "parallel write-heavy", "`critical`"]:
+        if token not in modes:
+            errors.append(f"implementation-delegation.md delegation modes: missing {token}")
+
+    worker = markdown_section(protocol_text, "## Worker contract")
+    for token in ["specification", "version", "stage, commit, push", "product or architecture decisions", "stop before all test and production code edits"]:
+        if token not in worker:
+            errors.append(f"implementation-delegation.md worker contract: missing {token}")
+
+    handoff = markdown_section(protocol_text, "## Root handoff gate")
+    for token in [
+        "Recheck branch",
+        "allowed",
+        "Reread the implementation",
+        "Rerun the focused green check independently",
+        "version/changelog/documentation",
+        "progressive review",
+        "Git exclusively root-owned",
+    ]:
+        if token not in handoff:
+            errors.append(f"implementation-delegation.md root handoff: missing {token}")
+
+    if "## Implementation worker routing" not in model_routing or "Implementation worker" not in model_routing:
+        errors.append("model-routing.md: missing Implementation worker routing contract")
+    if "bounded implementation worker" not in tdd_workflow:
+        errors.append("tdd-workflow.md: missing bounded implementation worker contract")
+    tdd_steps = markdown_section(tdd_workflow, "## Red → green → refactor")
+    route_position = tdd_steps.find("Select the strongest proven root or bounded implementation worker")
+    edit_position = tdd_steps.find("Under that lease, add or modify the test")
+    if route_position < 0 or edit_position < 0 or route_position >= edit_position:
+        errors.append("tdd-workflow.md: strongest-writer route and lease must precede every test code edit")
+    readme_delegation = markdown_section(readme, "## How adaptive implementation delegation works")
+    if not readme_delegation:
+        errors.append("README.md: missing adaptive implementation-delegation section")
+    else:
+        for token in ["one active writer", "exact allowed files", "The root does not edit", "strictly sequentially"]:
+            if token not in readme_delegation:
+                errors.append(f"README.md adaptive implementation delegation: missing {token}")
+    readme_ru_delegation = markdown_section(readme_ru, "## Как работает адаптивная делегация реализации")
+    if not readme_ru_delegation:
+        errors.append("README.ru.md: missing adaptive implementation-delegation section")
+    else:
+        for token in ["одновременно пишет только один агент", "точный список разрешённых файлов", "root не редактирует", "строго последовательно"]:
+            if token not in readme_ru_delegation:
+                errors.append(f"README.ru.md adaptive implementation delegation: missing {token}")
+    return errors
+
+
+def validate_changelog_contract(changelog: str, version: str) -> list[str]:
+    errors: list[str] = []
+    unreleased = markdown_section(changelog, "## [Unreleased]")
+    if not unreleased:
+        errors.append("CHANGELOG.md: missing Unreleased section")
+        return errors
+
+    release_heading = next(
+        (
+            line
+            for line in changelog.splitlines()
+            if re.fullmatch(rf"## \[{re.escape(version)}\] - \d{{4}}-\d{{2}}-\d{{2}}", line)
+        ),
+        None,
+    )
+    if release_heading:
+        current_section = markdown_section(changelog, release_heading)
+        current_label = release_heading
+    elif contains_exact_version(unreleased, version):
+        current_section = unreleased
+        current_label = "CHANGELOG.md Unreleased"
+    else:
+        errors.append(f"CHANGELOG.md: missing current manifest version {version} in Unreleased or a dated release")
+        return errors
+
+    for token in [
+        "blind-spot",
+        "single-writer",
+        "`auto`",
+        "separate usage pool",
+        "Strongest-proven-model coding",
+        "Deterministic contract validation",
+    ]:
+        if token not in current_section:
+            errors.append(f"{current_label}: missing current workflow note {token}")
+    return errors
+
+
+def validate_release_docs_contract(readme: str, readme_ru: str, version: str) -> list[str]:
+    errors: list[str] = []
+    for label, text in [("README.md", readme), ("README.ru.md", readme_ru)]:
+        for token in [
+            f"--ref v{version}",
+            f"/tree/v{version}/plugins/openbuild/skills/build",
+        ]:
+            if token not in text:
+                errors.append(f"{label}: released version {version} is not pinned by {token}")
+    return errors
+
+
+def validate_usage_routing_contract(
+    skill_text: str,
+    model_routing: str,
+    code_discovery: str,
+    implementation: str,
+    readme: str,
+    readme_ru: str,
+) -> list[str]:
+    errors: list[str] = []
+
+    search_preflight = markdown_section(skill_text, "## Initialize search routing")
+    for token in ["Before locating a specification", "separate-pool circuit-breaker", "every repository lookup", "any new file/symbol/grep lookup"]:
+        if token not in search_preflight:
+            errors.append(f"SKILL.md search preflight: missing {token}")
+    preflight_position = skill_text.find("## Initialize search routing")
+    selection_position = skill_text.find("## Select the specification safely")
+    baseline_position = skill_text.find("## Establish the baseline")
+    if preflight_position < 0 or selection_position < 0 or baseline_position < 0 or not (preflight_position < selection_position < baseline_position):
+        errors.append("SKILL.md search preflight: must precede specification selection and baseline discovery")
+
+    skill_discovery = markdown_section(skill_text, "## Discover repository evidence")
+    for token in ["before any repository grep", "separate-usage search profile first", "main-pool model", "root search only"]:
+        if token not in skill_discovery:
+            errors.append(f"SKILL.md usage routing: missing {token}")
+    skill_implementation = markdown_section(skill_text, "## Implement milestones")
+    for token in ["strongest proven coding model", "scale reasoning effort by risk"]:
+        if token not in skill_implementation:
+            errors.append(f"SKILL.md strongest-writer routing: missing {token}")
+
+    search_order = markdown_section(model_routing, "## Search usage-pool order")
+    for token in [
+        "**Separate usage pool:**",
+        "openbuild-search-separate",
+        "**Efficient main-pool fallback:**",
+        "openbuild-search-fallback",
+        "open a circuit breaker",
+        "without retrying the same failed route for every grep",
+        "Do not scrape or infer remaining quota",
+        "Do not silently skip it",
+    ]:
+        if token not in search_order:
+            errors.append(f"model-routing.md search usage-pool order: missing {token}")
+    ordered_search_tokens = [
+        "**Separate usage pool:**",
+        "**Efficient main-pool fallback:**",
+        "**Role-only fallback:**",
+        "**Generic subagent fallback:**",
+        "**Root fallback:**",
+    ]
+    search_positions = [search_order.find(token) for token in ordered_search_tokens]
+    if any(position < 0 for position in search_positions) or search_positions != sorted(search_positions):
+        errors.append("model-routing.md search usage-pool order: separate pool must precede every fallback branch")
+
+    implementation_route = markdown_section(model_routing, "## Implementation worker routing")
+    for token in [
+        "strongest coding model",
+        "every code edit",
+        "openbuild-implementation-strongest",
+        "strongest proven coding route",
+        "stop before every test or production code edit",
+        "implementation may not silently downgrade",
+    ]:
+        if token not in implementation_route:
+            errors.append(f"model-routing.md implementation routing: missing {token}")
+    for forbidden in ["unknown worker is a disclosed fallback", "use the strongest available fallback"]:
+        if forbidden in implementation_route:
+            errors.append(f"model-routing.md implementation routing: forbidden unproven writer fallback {forbidden}")
+
+    setup = markdown_section(model_routing, "## `$build setup-models`")
+    for token in [
+        "openbuild-search-separate",
+        "openbuild-search-fallback",
+        "openbuild-implementation-strongest",
+        "confirmed usage pool",
+        "workspace-write",
+    ]:
+        if token not in setup:
+            errors.append(f"model-routing.md setup-models: missing {token}")
+
+    mandatory_search = markdown_section(code_discovery, "## Mandatory routing rule")
+    for token in [
+        "`rg --files`",
+        "openbuild-search-separate",
+        "openbuild-search-fallback",
+        "new grep or lookup",
+        "circuit breaker",
+        "do not pay for repeated failed attempts",
+    ]:
+        if token not in mandatory_search:
+            errors.append(f"code-discovery.md usage routing: missing {token}")
+
+    for token in [
+        "strongest proven coding model for every complexity class",
+        "Scale reasoning effort rather than model strength",
+        "openbuild-implementation-strongest",
+        "Read-only search/discovery",
+        "stop before all test and production code edits",
+    ]:
+        if token not in implementation:
+            errors.append(f"implementation-delegation.md strongest-writer routing: missing {token}")
+    for forbidden in ["exact fallback limitation", "all stronger routes returned", "or no stronger route remains available"]:
+        if forbidden in implementation:
+            errors.append(f"implementation-delegation.md strongest-writer routing: forbidden downgrade {forbidden}")
+
+    readme_usage = markdown_section(readme, "## How usage-aware model routing works")
+    if not readme_usage:
+        errors.append("README.md: missing usage-aware model-routing section")
+    else:
+        for token in [
+            "Search always attempts a confirmed separate-usage route first",
+            "circuit breaker for the current run",
+            "does not scrape the private usage dashboard",
+            "strongest coding model",
+            "every test and production code change",
+            "stops before code edits instead of silently downgrading",
+            "model_reasoning_effort",
+        ]:
+            if token not in readme_usage:
+                errors.append(f"README.md usage-aware model routing: missing {token}")
+
+    readme_ru_usage = markdown_section(readme_ru, "## Как работает usage-aware routing моделей")
+    if not readme_ru_usage:
+        errors.append("README.ru.md: missing usage-aware model-routing section")
+    else:
+        for token in [
+            "Поиск всегда сначала пытается использовать подтверждённый separate-usage route",
+            "circuit breaker на текущий run",
+            "не скрейпит приватную usage page",
+            "strongest coding model",
+            "каждое test- и production-изменение кода",
+            "останавливается до code edits, а не молча понижает модель",
+            "model_reasoning_effort",
+        ]:
+            if token not in readme_ru_usage:
+                errors.append(f"README.ru.md usage-aware model routing: missing {token}")
+    return errors
 
 
 def validate_json(path: Path, errors: list[str]) -> dict:
@@ -337,11 +793,14 @@ def main() -> int:
         "[code discovery](references/code-discovery.md)",
         "[the minimality protocol](references/minimality-protocol.md)",
         "[the TDD workflow](references/tdd-workflow.md)",
+        "[the specification readiness protocol](references/blindspot-protocol.md)",
+        "[adaptive implementation delegation](references/implementation-delegation.md)",
         "[versioning](references/versioning.md)",
-        "openbuild-discovery",
         "TDD-first",
         "attempt budget",
         "version impact",
+        "separate-usage",
+        "strongest proven coding model",
     ]
     for token in required_skill_tokens:
         if token not in skill_text:
@@ -362,8 +821,8 @@ def main() -> int:
     metadata_text = read_text(SKILL / "agents" / "openai.yaml", errors)
     if 'allow_implicit_invocation: false' not in metadata_text:
         fail(errors, "agents/openai.yaml: implicit invocation must be disabled")
-    if "this Build skill" not in metadata_text or "full mode" not in metadata_text:
-        fail(errors, "agents/openai.yaml: default prompt must be invocation-neutral and select full mode")
+    if "this Build skill" not in metadata_text or "auto mode" not in metadata_text:
+        fail(errors, "agents/openai.yaml: default prompt must be invocation-neutral and select auto mode")
 
     readme = read_text(ROOT / "README.md", errors)
     readme_ru = read_text(ROOT / "README.ru.md", errors)
@@ -375,9 +834,13 @@ def main() -> int:
         "$build refine",
         "$build run",
         "$build full",
+        "$build auto",
         "$build setup-models",
         "$skill-installer",
         "openbuild-discovery",
+        "openbuild-search-separate",
+        "openbuild-search-fallback",
+        "openbuild-implementation-strongest",
         "openbuild-review-fast",
         "TDD-first",
         "CONTRIBUTING.md",
@@ -389,8 +852,12 @@ def main() -> int:
             fail(errors, f"README.ru.md: missing documented token {token}")
 
     required_doc_sections = [
+        ("## How automatic phase routing works", "## Как работает автоматический выбор этапа"),
         ("## How automatic code discovery works", "## Как работает автоматический поиск по коду"),
+        ("## How usage-aware model routing works", "## Как работает usage-aware routing моделей"),
+        ("## How blind-spot critique works", "## Как работает критика blind spots"),
         ("## How TDD-first implementation works", "## Как работает TDD-first реализация"),
+        ("## How adaptive implementation delegation works", "## Как работает адаптивная делегация реализации"),
         ("## How evidence-gated minimality works", "## Как работает evidence-gated minimality"),
         ("## How progressive review works", "## Как работает progressive review"),
         ("## Git and safety policy", "## Git и безопасность"),
@@ -401,18 +868,53 @@ def main() -> int:
         if russian not in readme_ru:
             fail(errors, f"README.ru.md: missing required section {russian}")
 
+    template_text = read_text(SKILL / "references" / "spec-template.md", errors)
+    blindspot_text = read_text(BLINDSPOT_PROTOCOL, errors)
+    implementation_delegation_text = read_text(IMPLEMENTATION_DELEGATION, errors)
+    code_discovery_text = read_text(SKILL / "references" / "code-discovery.md", errors)
+    model_routing_text = read_text(SKILL / "references" / "model-routing.md", errors)
+    tdd_workflow_text = read_text(SKILL / "references" / "tdd-workflow.md", errors)
+    errors.extend(validate_auto_routing_contract(skill_text, blindspot_text, metadata_text, readme, readme_ru))
+    errors.extend(validate_blindspot_contract(skill_text, blindspot_text, template_text, readme, readme_ru))
+    errors.extend(
+        validate_implementation_delegation_contract(
+            skill_text,
+            implementation_delegation_text,
+            model_routing_text,
+            tdd_workflow_text,
+            readme,
+            readme_ru,
+        )
+    )
+    errors.extend(
+        validate_usage_routing_contract(
+            skill_text,
+            model_routing_text,
+            code_discovery_text,
+            implementation_delegation_text,
+            readme,
+            readme_ru,
+        )
+    )
+
     if "TZ.md" not in read_text(ROOT / ".gitignore", errors).splitlines():
         fail(errors, ".gitignore: local TZ.md must be ignored")
     if "## [0.2.0] - 2026-07-10" not in read_text(ROOT / "CHANGELOG.md", errors):
         fail(errors, "CHANGELOG.md: missing 0.2.0 release entry")
     if "## [0.3.1] - 2026-07-12" not in read_text(ROOT / "CHANGELOG.md", errors):
         fail(errors, "CHANGELOG.md: missing 0.3.1 release entry")
+    if "## [0.4.0] - 2026-07-12" not in read_text(ROOT / "CHANGELOG.md", errors):
+        fail(errors, "CHANGELOG.md: missing 0.4.0 release entry")
     changelog = read_text(ROOT / "CHANGELOG.md", errors)
     for token in ["openbuild-discovery", "TDD-first", "minimality", "version impact"]:
         if token not in changelog:
-            fail(errors, f"CHANGELOG.md: missing Unreleased contract {token}")
+            fail(errors, f"CHANGELOG.md: missing historical contract {token}")
     if isinstance(version, str) and not contains_exact_version(changelog, version):
         fail(errors, f"CHANGELOG.md: current plugin version {version} is not documented")
+    if isinstance(version, str):
+        errors.extend(validate_changelog_contract(changelog, version))
+        if re.search(rf"^## \[{re.escape(version)}\] - \d{{4}}-\d{{2}}-\d{{2}}$", changelog, re.MULTILINE):
+            errors.extend(validate_release_docs_contract(readme, readme_ru, version))
 
     contributing = read_text(ROOT / "CONTRIBUTING.md", errors)
     for token in [

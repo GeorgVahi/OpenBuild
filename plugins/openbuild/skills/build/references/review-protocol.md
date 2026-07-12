@@ -1,16 +1,19 @@
 # Progressive review protocol
 
-Use this protocol for every `run` and `full` milestone and for the final task diff.
+Use this protocol for every `run`, `full`, and implementation-targeted `auto` milestone and for the final task diff.
 
 ## Inputs
 
 Provide the reviewer with:
 
 - the current specification and acceptance criteria;
+- the current specification revision, coverage-ledger closure, and readiness-critic evidence;
 - the saved review baseline;
 - the exact task diff, including committed milestone changes and relevant uncommitted work;
 - validation commands and current results;
 - the implementation mode and, for TDD-first work, the owning layer plus red/green evidence;
+- the implementation delegation mode and, when used, the single-writer lease plus root handoff evidence;
+- the observed search usage route/circuit breaker and strongest-writer model evidence or disclosed fallback;
 - the recorded minimality decision, skipped complexity, and any ceiling/upgrade trigger;
 - the version impact, authoritative version source, and synchronized version/changelog/documentation evidence;
 - the requested review tier and the evidence supporting that tier;
@@ -45,6 +48,9 @@ Validation assessment:
 
 TDD assessment:
 - <met | not met | not applicable — red signal, owner layer, focused green, and risk coverage>
+
+Delegation assessment:
+- <met | not met | not applicable — strongest-writer evidence, writer lease, allowed files, baseline, root handoff, and Git ownership>
 
 Minimality assessment:
 - <met | not met — selected rung, repository evidence, avoidable complexity, and preserved safeguards>
@@ -112,6 +118,7 @@ Accept a milestone only when all are true:
 - its primary signal is met;
 - relevant validation is green;
 - TDD-first work has a meaningful red signal and focused green evidence, or a documented reason why an automated red signal was impractical;
+- delegated implementation stayed within one active writer lease and passed independent root diff/validation handoff;
 - the minimality decision is evidence-backed and no confirmed avoidable dependency, duplicate implementation, speculative abstraction, or downstream symptom patch remains;
 - required version, changelog, and documentation surfaces agree with the reviewed diff and no published tag was rewritten;
 - every acceptance criterion is covered by authoritative evidence;

@@ -1,6 +1,6 @@
 interface:
   display_name: "Build"
-  short_description: "Plan, refine, run, and review implementation specs"
-  default_prompt: "Use this Build skill in full mode to turn an idea into a reviewed implementation."
+  short_description: "Plan, harden, implement, and review from one spec"
+  default_prompt: "Use this Build skill in auto mode to start at the first incomplete phase and deliver the requested outcome."
 policy:
   allow_implicit_invocation: false

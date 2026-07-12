@@ -1,6 +1,6 @@
 # TDD-first workflow
 
-Use this protocol for implementation and remediation in `run` and `full`. Keep reviewers read-only; the root agent owns classification, test selection, edits, validation, and finding adjudication.
+Use this protocol for implementation and remediation in `run`, `full`, and implementation-targeted `auto`. Keep reviewers read-only. The root agent owns classification, test selection, validation, and finding adjudication; the strongest proven coding model performs each root-owned or bounded leased owner-layer edit under [adaptive implementation delegation](implementation-delegation.md).
 
 ## Classify the work
 
@@ -16,12 +16,13 @@ For TDD-first work:
 
 1. Identify the owning layer and an observable primary signal.
 2. Find the narrowest existing supported test path before creating a new harness.
-3. Add or select the smallest contract-level or user-visible test that should fail for the missing behavior when practical.
-4. Run it and record the expected failing signal. A failure caused by broken setup, unrelated code, or an invalid assertion is not a useful red signal.
-5. Apply [the minimality protocol](minimality-protocol.md) and implement the smallest coherent owner-layer change supported by repository evidence.
-6. Rerun the focused test and require a successful exit before calling it green.
-7. Refactor only after green and only when it removes current complexity without widening scope.
-8. Run wider validation according to risk, then update durable documentation when behavior, commands, or contracts changed.
+3. Define the smallest contract-level or user-visible failing test, expected failure, minimality decision, and exact test/production file set without editing them.
+4. Select the strongest proven root or bounded implementation worker and acquire the single-writer lease before any test or production code edit. If that route is unproven or unavailable, stop implementation.
+5. Under that lease, add or modify the test when needed, run it, and record the expected failing signal. A failure caused by broken setup, unrelated code, or an invalid assertion is not a useful red signal.
+6. Under the same lease, apply [the minimality protocol](minimality-protocol.md) and implement the smallest coherent owner-layer change supported by repository evidence.
+7. Rerun the focused test and require a successful exit before calling it green.
+8. Refactor only after green and only when it removes current complexity without widening scope.
+9. Release the lease, complete the root handoff gate, run wider validation according to risk, then update durable documentation when behavior, commands, or contracts changed.
 
 When a meaningful automated red signal is impractical, document why and use the best reproducible contract, runtime, or structural signal. Do not invent a test harness merely to perform TDD ceremonially, and never claim a test passed without running it successfully.
 
@@ -52,6 +53,7 @@ For each milestone record:
 
 ```text
 Implementation mode: Direct | Investigation | TDD-first
+Delegation: root-only | bounded-worker | sequential-workers — <strongest-model, lease, fallback, and handoff evidence>
 Owning layer: <path/symbol or contract>
 Red signal: <command/scenario and expected failure, or documented reason not practical>
 Minimality decision: omitted as unneeded | reused existing | standard library | native platform | installed dependency | custom owner-layer | not applicable — <evidence>

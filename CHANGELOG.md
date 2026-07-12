@@ -6,6 +6,23 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-12
+
+### Added
+
+- Evidence-backed blind-spot closure with stable coverage and decision IDs, duplicate-question suppression, evidence-gated reopening, risk-adaptive fresh specification critics, and a current-revision Ready gate.
+- Automatic lifecycle routing that separates the requested workflow target from the first incomplete specification or implementation phase.
+- Adaptive implementation delegation with root-only, bounded-worker, and sequential-worker modes protected by a single-writer lease and root validation handoff.
+- Usage-aware routing that sends every repository search to a confirmed separate usage pool first, applies a per-run circuit breaker on quota/profile failure, then falls back to an efficient main-pool search route.
+- Strongest-proven-model coding for every test and production code edit, with complexity-scaled reasoning, an optional permission-gated `openbuild-implementation-strongest` profile, and an implementation blocker instead of an unproven downgrade.
+- Deterministic contract validation for phase routing, specification readiness, decision memory, critic-loop bounds, implementation delegation, and usage-aware model routing across the skill, template, and both READMEs.
+
+### Changed
+
+- A bare Build invocation now selects `auto`; a new idea still targets completion while existing specifications resume from evidence-backed state.
+- Read-only review profiles may also serve as fresh specification critics, while implementation workers remain bounded, sequential, and isolated in a separately permissioned write profile.
+- `$build setup-models` now proposes separate-pool search, efficient search fallback, strongest implementation, and risk-based review roles from current official/runtime/user-confirmed evidence instead of one generic discovery profile.
+
 ## [0.3.1] - 2026-07-12
 
 ### Added
@@ -48,7 +65,8 @@ The project follows [Semantic Versioning](https://semver.org/).
 - Codex plugin marketplace distribution and standalone skill installation path.
 - Complete English and Russian documentation.
 
-[Unreleased]: https://github.com/GeorgVahi/OpenBuild/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/GeorgVahi/OpenBuild/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/GeorgVahi/OpenBuild/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/GeorgVahi/OpenBuild/compare/v0.2.0...v0.3.1
 [0.2.0]: https://github.com/GeorgVahi/OpenBuild/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/GeorgVahi/OpenBuild/releases/tag/v0.1.0

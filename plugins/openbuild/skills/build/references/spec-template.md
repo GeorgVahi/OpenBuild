@@ -10,11 +10,16 @@ Use this as a flexible structure. Remove irrelevant sections and keep the docume
 - Original request: <one to three sentences in the user's language>
 - Primary signal: <observable proof of success>
 - Review baseline: <Git branch@SHA and initial status, or a non-Git artifact manifest>
+- Workflow target: Ready | Complete
+- Starting phase: discovery | reconciliation | interview | blind-spot critique | implementation | verification
+- Specification revision: R-001
 - Complexity: low | medium | high | critical — <evidence>
 - Implementation mode: Direct | Investigation | TDD-first — <evidence>
 - Version impact: not applicable | prerelease | patch | minor | major — <version source, policy, and evidence>
 - Routing mode: native-selector | configured-profiles | reasoning-ladder | role-only | generic-subagent | root-only
 - Discovery mode: delegated | mixed | root-fallback — <observed model/tier or unknown>
+- Search usage route: separate-pool | main-efficient | role-only | generic-subagent | root-fallback — <observed model/pool, first-attempt result, and circuit breaker>
+- Implementation model route: strongest-profile | native-selector | strongest-root | blocked — <verified model/tier and strength evidence, or exact blocker>
 
 ## 1. Outcome
 
@@ -48,11 +53,11 @@ Use this as a flexible structure. Remove irrelevant sections and keep the docume
 
 <Exact mismatch between the request and current project.>
 
-## 3. Decisions
+## 3. Decision memory
 
-| ID | Decision | Selected option | Consequence |
-|---|---|---|---|
-| D-01 | <question> | <answer> | <what this determines> |
+| ID | Decision key | Owner | Status | Decision | Selected option | Evidence or reopen reason | Consequence |
+|---|---|---|---|---|---|---|---|
+| D-001 | <actor.trigger.behavior> | user | open/resolved/reopened/superseded | <question> | <answer> | <source, revision, or new evidence> | <what this determines> |
 
 ## 4. User scenarios
 
@@ -121,6 +126,7 @@ Use this as a flexible structure. Remove irrelevant sections and keep the docume
 - Scope: <included work>
 - Excludes: <excluded work>
 - Implementation mode: Direct | Investigation | TDD-first
+- Delegation: root-only | bounded-worker | sequential-workers | blocked — <lease owner, verified strongest-model evidence and allowed files, or exact blocker>
 - Red signal: <test/reproduction and expected failure, or not applicable with reason>
 - Minimality decision: <selected rung, skipped complexity, and any ceiling/upgrade trigger>
 - Focused green: `<command or scenario>` -> <result>
@@ -132,15 +138,31 @@ Use this as a flexible structure. Remove irrelevant sections and keep the docume
 
 ## 9. Risks and blind spots
 
+### Coverage ledger
+
+| ID | Concern | Status | Disposition | Evidence or decision | Next action |
+|---|---|---|---|---|---|
+| B-001 | <stable semantic concern/key> | gap/covered/not applicable | repository fact/technical decision/product decision/new authority | <path:line, D-###, or reason> | <owner/action or none> |
+
+Keep stable `B-###` IDs for outcome/scope, actors/permissions, primary and alternate flows, errors/recovery, accessibility/localization/responsive UX, ownership/contracts, data/migration/retention, security/privacy/abuse, compatibility/rollout/rollback, performance/concurrency/idempotency, integrations/partial failure, observability/support, acceptance/testability/minimality, and task-specific concerns.
+
+### Risk register
+
 | Risk | Likelihood/impact | Mitigation | Status |
 |---|---|---|---|
 | <risk> | <assessment> | <action> | Open/Handled/Accepted |
+
+### Readiness critic log
+
+| Revision | Perspective/tier | Verdict | New gaps or reopen requests | Root adjudication |
+|---|---|---|---|---|
+| R-001 | <generalist/product-UX/architecture-data-security/reliability-validation; observed tier> | COVERED/GAPS | <semantic keys, D-###, or none> | <linked B-###/D-### and action> |
 
 ## 10. Open questions
 
 Blocking product questions:
 
-- None.
+- <D-### or None>.
 
 Non-blocking assumptions:
 
@@ -151,6 +173,7 @@ Non-blocking assumptions:
 ### YYYY-MM-DD — <stage>
 
 - Changed: <summary>.
+- Routing: <search usage route/circuit breaker; implementation model/delegation evidence>.
 - Primary signal: met | not met | partially validated.
 - Validation: `<command>` -> <result>.
 - Minimality decision: <selected rung and evidence>.
@@ -165,11 +188,16 @@ Non-blocking assumptions:
 - Every required outcome has an observable acceptance criterion.
 - Repository evidence supports decisions without becoming a raw code dump.
 - Product decisions are separate from autonomous technical choices.
+- Workflow target, starting phase, and specification revision reflect current artifact evidence.
+- Stable decision IDs preserve resolved answers; reopening requires recorded new evidence and history.
+- Every coverage-ledger row is `covered` or `not applicable` with evidence before `Ready`; question count is never a substitute for coverage.
+- The current revision has the risk-appropriate fresh readiness-critic closure and no unadjudicated gaps, contradictions, or missing authority.
 - Complexity and routing claims use actual risk and runtime evidence.
 - Every Build-created commit in a versioned repository receives a unique higher version by default; required manifest, changelog, and documentation updates stay in the same commit.
 - Broad code discovery records delegation or an honest root fallback, with critical findings verified by the root.
 - TDD-first milestones record an intended red signal, owner-layer implementation, and focused green evidence, or explain why an automated red signal was impractical.
 - Implementation milestones record an evidence-backed minimality decision without weakening acceptance criteria or safeguards.
+- Delegated implementation records one active writer lease, allowed files, root handoff validation, and root-only Git ownership.
 - Milestones deliver coherent outcomes rather than arbitrary file groups.
 - Validation commands exist or are explicitly marked as proposed.
 - Blocking questions are empty before implementation starts.

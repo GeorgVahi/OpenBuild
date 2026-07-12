@@ -1,6 +1,6 @@
 ---
 name: build
-description: "Turn a plain-language idea or an existing BUILD.md, SPEC.md, or TZ.md into a repository-grounded specification, refine it, or execute it through delegated code discovery, evidence-gated minimal implementation, TDD-first milestones, version-aware commits, capability-aware subagents, and progressive review. Use only when explicitly invoked as the standalone $build skill or a namespaced plugin skill such as $openbuild:build; do not invoke for ordinary build commands."
+description: "Turn a plain-language idea or an existing BUILD.md, SPEC.md, or TZ.md into a repository-grounded specification, iteratively close product and architecture blind spots without repeating resolved decisions, or execute it through automatic phase routing, separate-usage-pool-first code search, strongest-proven-model implementation, bounded writers, TDD-first milestones, evidence-gated minimality, version-aware commits, and progressive review. Use only when explicitly invoked as the standalone $build skill or a namespaced plugin skill such as $openbuild:build; do not invoke for ordinary build commands."
 ---
 
 # Build
@@ -15,38 +15,48 @@ Support these explicit modes. The examples use standalone `$build`; plugin users
 - `$build refine [path]`: verify and improve an existing specification; stop before implementation.
 - `$build run [path]`: bring an existing specification to `Ready`, then implement it.
 - `$build full <idea-or-path>`: run discovery, specification, implementation, validation, and review.
+- `$build auto <idea-or-path>`: infer the workflow target and start at the first incomplete phase.
 - `$build setup-models`: configure an optional, permission-gated model ladder for future subagents.
-- `$build <idea>`: treat as `full` when no mode is present.
+- `$build <idea-or-path>`: treat as `auto` when no mode is present.
 
 Do not claim that Build registers `/build` or any other slash command. If a user types `/build` in prose, explain the supported explicit skill invocation instead of silently treating it as an installed command.
 
 Reply and write the specification in the user's language. Keep paths, symbols, commands, and code in their native form.
 
+## Initialize search routing
+
+Before locating a specification, repository instructions, validation entry points, files, symbols, tests, routes, schemas, configs, logs, or similar implementations, read [code discovery](references/code-discovery.md) and [model routing](references/model-routing.md) from their already-known skill paths. Inspect the runtime's native selectors and discoverable profiles without searching the repository, select the first available search branch, and initialize the separate-pool circuit-breaker state for this Build run.
+
+Route every repository lookup used by specification selection, baseline discovery, reconciliation, implementation, or review through that order. Direct root reads are allowed only for an explicit user-supplied path, a runtime-provided path, an already-known skill/reference path, or a returned `path:line`; any new file/symbol/grep lookup returns to the search route. Git metadata commands such as branch, status, and `HEAD` inspection remain root-owned and are not code search.
+
 ## Select the specification safely
 
-Use an explicit path when supplied and verify that it exists before `refine` or `run`. Otherwise:
+Use an explicit path when supplied and verify that it exists before `refine`, `run`, or path-based `auto`. Otherwise:
 
 1. Prefer a relevant existing `BUILD.md`.
 2. Then consider a relevant `SPEC.md` or `TZ.md`.
-3. For `new`, or `full` with a new idea, create `<project-root>/BUILD.md` when no relevant file exists.
+3. For `new`, `full`, or `auto` with a new idea, create `<project-root>/BUILD.md` when no relevant file exists.
 
 For `refine` or `run`, stop and request a valid path when no relevant specification exists or a supplied explicit path does not exist. Before changing an existing candidate, read it and confirm that it belongs to the current task. When several candidates are relevant or a file belongs to another task, ask which file to use or propose a descriptive `BUILD-<name>.md`. Never silently replace an unrelated document.
 
 Read [the specification template](references/spec-template.md) before creating or materially restructuring a specification.
 
+Read [the specification readiness protocol](references/blindspot-protocol.md), then record the workflow target and first incomplete phase. Explicit modes and paths override inference. A legacy `Ready` file without the current decision memory, coverage ledger, and closure evidence returns to readiness audit before implementation.
+
 ## Apply non-negotiable boundaries
 
 - Obey all applicable `AGENTS.md`, repository policies, sandbox rules, and approval requirements.
 - Treat current files and user edits as authoritative. Preserve unrelated changes and exclude them from edits, review, commits, and pushes.
-- Keep the root agent as the owner of product questions, architecture, edits, finding adjudication, validation choices, Git, and final synthesis.
-- Delegate repository reading, evidence gathering, log triage, and independent review as read-only work. Do not let explorers or reviewers edit, commit, push, or make product decisions.
-- Route broad repository search through [code discovery](references/code-discovery.md) before the root performs broad search when a suitable worker is available. Keep targeted verification with the root.
+- Keep the root agent as the owner of product questions, architecture, specification and version edits, finding adjudication, validation choices, Git, and final synthesis. Lease implementation edits only through [adaptive implementation delegation](references/implementation-delegation.md).
+- Keep search workers, specification critics, and reviewers read-only. Permit the strongest proven implementation model to edit only its leased file set; it never makes product or architecture decisions, changes the specification/version, or controls Git.
+- Allow only one active writer in the shared workspace. The root does not edit while a worker lease is active, and multiple implementation workers run sequentially with a root handoff gate between them.
+- Route every repository lookup through [code discovery](references/code-discovery.md) and its separate-pool-first order. Keep only direct reads of explicit, runtime-provided, or already-known `path:line` targets with the root.
 - Keep reviewers read-only. Route confirmed behavioral findings through [the TDD workflow](references/tdd-workflow.md) under root ownership instead of asking a reviewer to edit.
 - Before milestone or final commits, follow [versioning](references/versioning.md). In a versioned repository, give every Build-created commit a unique higher version unless an applicable repository policy explicitly defines a different release-only scheme.
 - Never infer a model's cost or capability from its slug. Report a selected model or tier only when the runtime or confirmed configuration exposes it.
 - Never alter user-level or project-level model configuration without showing the exact proposed changes and receiving separate permission.
-- In `new` and `refine`, do not edit implementation files, run destructive commands, or begin milestones.
-- During `run` and `full`, make milestone commits when Git is available, task changes can be isolated, and repository/user instructions do not forbid commits. Never push without explicit authorization.
+- In `new`, `refine`, and specification-targeted `auto`, do not edit implementation files, run destructive commands, or begin milestones.
+- During `run`, `full`, and implementation-targeted `auto`, make milestone commits when Git is available, task changes can be isolated, and repository/user instructions do not forbid commits. Never push without explicit authorization.
 - Never print or commit secret values, tokens, passwords, cookies, private keys, customer data, raw `.env` contents, or credential-bearing remote URLs. Inspect only the metadata needed for the task and redact credentials from durable specifications, logs, reviews, and reports.
 - Stop before destructive or irreversible actions, secrets, purchases, live infrastructure, external publication without existing authorization, or material scope expansion.
 
@@ -71,7 +81,7 @@ Search only areas that can change the decision. Establish:
 - affected users, data, integrations, security boundaries, and rollout concerns;
 - the concrete mismatch between the requested result and the current project.
 
-Read [code discovery](references/code-discovery.md) before file discovery, repository-wide grep, symbol lookup, dependency tracing, route mapping, test/config/schema search, or other broad repository inspection. Create a compact search plan, then use [model routing](references/model-routing.md) to select the first proven capability branch. Prefer a confirmed read-only `openbuild-discovery` profile or minimum sufficient native tier, but never invent the model or savings.
+Read [code discovery](references/code-discovery.md) before any repository grep, file discovery, symbol lookup, dependency tracing, route mapping, test/config/schema search, or log scan. Create a compact search plan, then use [model routing](references/model-routing.md): attempt a confirmed separate-usage search profile first, fall back to the minimum suitable main-pool model at low/minimal supported reasoning, and use root search only when worker routes are unavailable. Never invent pool membership, quota, model switching, strength, or savings.
 
 Delegate independent search branches when useful. Require a compact evidence map with `path:line`, symbol or route, confirmed fact, relevance, negative results, and confidence. Aggregate and deduplicate the map, then let the root perform targeted verification. Give each branch a task-appropriate time and attempt budget. A short parent polling timeout is not a completed worker failure. Fall back when the platform reports unavailability/quota/failure, the declared budget is exceeded, or two completed attempts return unusable evidence; record the actual mode instead of waiting indefinitely.
 
@@ -98,19 +108,11 @@ Authentication, permissions, secrets, persistence, migrations, concurrency, and 
 
 ## Audit blind spots
 
-For non-trivial work, use fresh read-only passes across the relevant concerns:
-
-- architecture, ownership, and module boundaries;
-- user flows, errors, accessibility, and edge cases;
-- tests, observability, regressions, and rollback;
-- security, privacy, permissions, and data migration;
-- performance, concurrency, and external integrations.
-
-Combine related concerns rather than spawning one agent per bullet. Separate confirmed facts, autonomous technical decisions, product choices for the user, and actions requiring new authority.
+Follow [the specification readiness protocol](references/blindspot-protocol.md). Build a durable coverage ledger, decision memory with stable IDs, and a risk-adaptive fresh critic loop for every non-trivial specification. Treat critic findings as candidates: the root verifies evidence, resolves repository and technical gaps, deduplicates semantic matches, and asks only remaining product choices.
 
 ## Ask only product questions
 
-Ask only unresolved choices that materially change product behavior, UX, data, security, compatibility, cost, or scope. Do not ask for facts available in the repository.
+Ask only open or evidence-backed reopened decisions that materially change product behavior, UX, data, security, compatibility, cost, or scope. Do not ask for facts available in the repository or repeat a resolved decision under different wording.
 
 Ask up to five questions per round using simple mutually exclusive options:
 
@@ -124,25 +126,27 @@ Ask up to five questions per round using simple mutually exclusive options:
 Reply with: 1a 2b 3c. A custom answer is also valid.
 ```
 
-Put the recommended safe/default choice first. Update the working specification with evidence, decisions, draft acceptance criteria, and open questions before waiting.
+Show each stable `D-###` ID, put the recommended safe/default choice first, and keep the reply format short. Update the same specification with evidence, decision state, coverage, draft acceptance criteria, and open questions before waiting. Partial answers close only their referenced IDs.
 
 ## Reach the Ready gate
 
 Require the specification to contain:
 
+- workflow target, starting phase, and current specification revision;
 - user outcome, scope, and exclusions;
 - repository evidence and source of truth;
-- user decisions and autonomous technical decisions;
+- durable user decisions and autonomous technical decisions with stable IDs and reopen history;
+- a complete evidence-backed coverage ledger and adjudicated critic log;
 - observable acceptance criteria and invariants;
 - failure modes, edge cases, compatibility, security, data, rollout, and rollback concerns;
 - complexity class and model-routing mode;
 - version source, policy, and expected version impact, or why versioning is not applicable;
 - primary signal, validation strategy, coherent milestones, and review plan;
-- no blocking product questions.
+- no gaps, blocking product decisions, contradictions, or missing authority.
 
-Run a fresh contradiction and unknown-unknown audit. Add repository facts directly; return to the interview only for a new material product choice.
+Require the risk-appropriate critic depth and a fresh `COVERED` closure verdict for the current specification revision. Do not claim literal omniscience; require closure across every defined and task-specific concern with evidence or a justified `not applicable` disposition.
 
-In `new` or `refine`, set the specification to `Ready`, summarize it, and stop. In `run` or `full`, set it to `Ready` and immediately continue without asking for a second approval unless the user requested a checkpoint.
+In `new`, `refine`, or specification-targeted `auto`, set the specification to `Ready`, summarize it, and stop. In `run`, `full`, or implementation-targeted `auto`, set it to `Ready` and immediately continue unless the user requested a checkpoint or the risk/authority policy requires one.
 
 ## Implement milestones
 
@@ -150,20 +154,22 @@ For each milestone:
 
 1. Reconfirm its acceptance criteria, implementation mode, complexity floor, and owning files.
 2. Read and apply [the minimality protocol](references/minimality-protocol.md) before the first code change. Record which rung is selected, what complexity is skipped, and any known ceiling with its observable upgrade trigger.
-3. For TDD-first work, follow [the TDD workflow](references/tdd-workflow.md): establish the owner and primary signal, run the smallest meaningful red test when practical, then implement the minimum coherent owner-layer change.
-4. For Direct or Investigation work, use the narrow signal appropriate to that mode and reclassify before changing behavior.
-5. Require focused green validation, refactor only after green when it removes current complexity, then run wider checks according to risk.
-6. Review the task diff against the saved baseline. Revert only accidental out-of-scope edits made by Build during this task; leave pre-existing or user-owned unrelated changes untouched and exclude them from review and commits.
-7. Apply [versioning](references/versioning.md): classify the version impact, update required version/changelog/documentation surfaces in the same commit, and validate their agreement. Use `not applicable` only when there is no authoritative version source or no commit will be created.
-8. Run the built-in progressive review described in [the review protocol](references/review-protocol.md) against the complete diff, including versioning changes.
-9. Adjudicate every finding. Fix confirmed actionable issues, rerun affected validation, and repeat review whenever remediation or version synchronization changes the reviewed diff.
-10. Close the milestone only when its primary signal is met, validation is green, acceptance coverage is complete, and no actionable finding remains.
-11. Update milestone status, evidence, review mode/tier, and validation log in the specification.
-12. Create a scoped milestone commit when allowed and safe. Do not include unrelated changes and do not push without explicit authorization.
+3. Select `root-only`, `bounded-worker`, or `sequential-workers` through [adaptive implementation delegation](references/implementation-delegation.md). Route every test and production code edit to the strongest proven coding model, use one active writer, scale reasoning effort by risk, and record its evidence and lease. If no strongest route is proven, run the permission-gated setup flow once and then stop implementation rather than downgrade.
+4. For TDD-first work, follow [the TDD workflow](references/tdd-workflow.md): establish the owner and primary signal, run the smallest meaningful red test when practical, then implement the minimum coherent owner-layer change.
+5. For Direct or Investigation work, use the narrow signal appropriate to that mode and reclassify before changing behavior.
+6. After every worker handoff, let the root verify the complete diff and rerun focused validation independently.
+7. Require focused green validation, refactor only after green when it removes current complexity, then run wider checks according to risk.
+8. Review the task diff against the saved baseline. Revert only accidental out-of-scope edits made by Build during this task; leave pre-existing or user-owned unrelated changes untouched and exclude them from review and commits.
+9. Apply [versioning](references/versioning.md): classify the version impact, update required version/changelog/documentation surfaces in the same commit, and validate their agreement. Use `not applicable` only when there is no authoritative version source or no commit will be created.
+10. Run the built-in progressive review described in [the review protocol](references/review-protocol.md) against the complete diff, including versioning changes.
+11. Adjudicate every finding. Fix confirmed actionable issues, rerun affected validation, and repeat review whenever remediation or version synchronization changes the reviewed diff.
+12. Close the milestone only when its primary signal is met, validation is green, acceptance coverage is complete, and no actionable finding remains.
+13. Update milestone status, evidence, delegation, review mode/tier, and validation log in the specification.
+14. Create a scoped milestone commit when allowed and safe. Do not include unrelated changes and do not push without explicit authorization.
 
 ## Run progressive review
 
-Read [the review protocol](references/review-protocol.md) for `run` and `full`.
+Read [the review protocol](references/review-protocol.md) for `run`, `full`, and implementation-targeted `auto`.
 
 Build an ordered ladder only from native per-spawn selectors, confirmed custom agent profiles, or supported reasoning-effort tiers. Choose the minimum sufficient starting tier from the complexity class. A discovery tier may be cheaper than the required final review tier.
 
@@ -181,11 +187,11 @@ If the strongest available reviewer still finds blocking issues, keep the task i
 
 For `$build setup-models`, read [model routing](references/model-routing.md) and follow its setup procedure.
 
-First detect whether a native selector already provides a proven ladder. If configuration is useful, inspect only capabilities actually exposed by the runtime. Propose a deduplicated `fast`, `balanced`, `strong`, and `strongest` mapping; show the model/reasoning evidence, target scope, exact file paths, and exact diff.
+First detect whether native selectors already provide a confirmed separate-usage search route, an efficient main-pool search fallback, the strongest coding route, and a review ladder. If configuration is useful, inspect only capabilities actually exposed by the runtime and current official/user-confirmed pool evidence. Propose deduplicated role mappings; show model, reasoning effort, usage pool, sandbox, target scope, exact file paths, and exact diff.
 
-Ask for separate permission before writing user-level `~/.codex/agents` or project-level `.codex/agents`. Prefer a uniquely named read-only `openbuild-discovery` profile for broad code search plus risk-appropriate `openbuild-review-*` profiles. Never overwrite or silently merge an existing profile. Validate TOML, instruct the user to reload or start a new session, then verify that profiles are actually discoverable before claiming model switching works.
+Ask for separate permission before writing user-level `~/.codex/agents` or project-level `.codex/agents`. Prefer read-only `openbuild-search-separate` and `openbuild-search-fallback`, write-capable `openbuild-implementation-strongest`, and risk-appropriate read-only `openbuild-review-*` profiles. Show the writer's exact `workspace-write` boundary separately. Never overwrite or silently merge an existing profile. Validate TOML, instruct the user to reload or start a new session, then verify that every profile is discoverable and its effective model/pool is observed before claiming routing works.
 
-If setup is declined or unsupported, leave zero-config routing fully functional and report the effective fallback mode.
+If setup is declined or unsupported, leave search, specification, and read-only review operational through honest zero-config fallbacks. When the root is not itself the strongest proven coding route, keep implementation blocked before every test or production code edit and report the exact setup limitation.
 
 ## Complete the workflow
 
@@ -199,4 +205,4 @@ After all milestones:
 6. Set `Complete` only when every requirement is proven. Otherwise preserve the exact status and continue or request missing authority.
 7. Update the final specification log and create the final scoped commit when allowed. Push only when explicitly authorized.
 
-Report the outcome, closed milestones, discovery routing/fallback, implementation mode and red/green evidence, minimality decisions, version impact and before/after version, acceptance evidence, validation, review mode/tier, commits, documentation status, migration implications, and real remaining risks.
+Report the outcome, workflow route, specification revision and critic closure, preserved/reopened decisions, closed milestones, search usage route and circuit breaker, implementation model evidence and delegation, red/green evidence, minimality decisions, version impact and before/after version, acceptance evidence, validation, review mode/tier, commits, documentation status, migration implications, and real remaining risks.

@@ -1,23 +1,23 @@
 # Code discovery protocol
 
-Use this protocol before broad repository search in every Build mode. The root agent remains the orchestrator, decision owner, editor, and final reporter.
+Use this protocol before any repository search in every Build mode. The root agent remains the orchestrator, decision owner, durable specification/version editor, Git owner, and final reporter; implementation edits may be leased separately under [adaptive implementation delegation](implementation-delegation.md).
 
 ## Mandatory routing rule
 
-1. Detect whether the task needs broad discovery: file or symbol lookup, repository-wide search, dependency or route tracing, test/config/schema discovery, similar-pattern search, or cross-file flow mapping.
+1. Treat `rg`, `rg --files`, file or symbol lookup, repository-wide or targeted grep, dependency/route tracing, test/config/schema discovery, similar-pattern search, log scanning, and cross-file flow mapping as search operations covered by this rule.
 2. Write a compact search plan with the objective, likely regions, independent branches, minimum evidence, and a stop condition.
-3. Use the capability order in [model routing](model-routing.md). Prefer a confirmed read-only `openbuild-discovery` profile or the cheapest suitable native tier. Otherwise use an explorer role, a generic subagent, or immediate root fallback.
+3. Use the search usage-pool order in [model routing](model-routing.md). Attempt a confirmed read-only `openbuild-search-separate` profile or equivalent native separate-pool selector first. Then use `openbuild-search-fallback`, an explorer role, a generic read-only subagent, or root fallback in that order.
 4. Delegate independent search branches in parallel when capacity and scope justify it.
 5. Aggregate and deduplicate results, surface contradictions and negative results, then decide whether more discovery is useful.
-6. Let the root agent reread the critical files and perform only targeted follow-up searches before making decisions or edits.
+6. Let the root agent reread already-known critical files and lines before decisions or edits. If verification requires a new grep or lookup, send that search through the same usage-pool order.
 
-Do not ask the user before falling back when a preferred model, profile, subagent slot, quota, or selector is unavailable. Do not block the task solely because delegation is unavailable.
+Do not ask the user before falling back when a preferred model, profile, subagent slot, quota, or selector is unavailable. Open the current-run circuit breaker after a confirmed separate-pool quota/model/profile failure and do not pay for repeated failed attempts on every grep. Do not block the task solely because delegation is unavailable.
 
 Give every worker branch a task-appropriate time and attempt budget. A short parent polling timeout without a final worker result is not by itself a worker failure; keep the user informed while useful work continues. Stop or interrupt a branch when the platform reports failure, quota, or unavailability, when the declared time budget is exceeded, or when two completed attempts return empty or unusable evidence. Record the reason and continue with another worker or targeted root discovery instead of waiting indefinitely.
 
 ## Root-only exceptions
 
-The root may read directly when the relevant file is already known, the lookup is genuinely narrow, it is verifying a returned finding, or subagents are unavailable or repeatedly fail. Record a material fallback, but do not pretend that delegation or model switching occurred.
+The root may read a relevant file directly when its path is already known or verify a returned `path:line` finding without another search. It may search only after the separate-pool and efficient-main worker branches are unavailable or repeatedly fail. Record a material root fallback, but do not pretend that delegation, separate-pool usage, or model switching occurred.
 
 ## Discovery worker contract
 
@@ -52,7 +52,9 @@ Keep raw logs, large file dumps, and repetitive matches out of the root context.
 
 - Never infer suitability, price, speed, or strength from a model name.
 - Report a concrete model only when the runtime or confirmed profile exposes it.
-- If `openbuild-discovery` is explicitly mapped to a lower-cost code-search model, use that mapping; otherwise record the observed model/tier as `unknown`.
+- Prefer `openbuild-search-separate` only when its separate usage pool is confirmed. A legacy `openbuild-discovery` profile follows the same evidence rule.
+- If the separate route is unavailable, prefer `openbuild-search-fallback` with the lowest supported reasoning effort that remains suitable.
+- Do not scrape the user's private usage page or guess remaining quota. Treat runtime quota/unavailability errors or explicit user evidence as authoritative for the current-run circuit breaker.
 - A different role, prompt, or thread is not proof of a different model or reduced token cost.
 
 ## Discovery record
@@ -61,8 +63,9 @@ Record enough evidence in the specification to resume safely:
 
 ```text
 Discovery mode: delegated | mixed | root-fallback
-Routing branch: native-selector | configured-profiles | reasoning-ladder | role-only | generic-subagent | root-only
-Observed discovery model/tier: <verified value or unknown>
+Search usage route: separate-pool | main-efficient | role-only | generic-subagent | root-fallback
+Observed search model/tier: <verified value or unknown>
+Separate-pool attempt: used | unavailable | not configured — <runtime/profile evidence and circuit-breaker state>
 Search branches: <objectives and workers>
 Evidence map: <key path:line findings>
 Fallback or limitations: <quota, selector, profile, failures, or none>

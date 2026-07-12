@@ -1,7 +1,7 @@
 {
   "name": "openbuild",
-  "version": "0.3.1",
-  "description": "Evidence-grounded specifications, delegated code discovery, evidence-gated minimal implementation, TDD-first delivery, and progressive review for Codex.",
+  "version": "0.4.0",
+  "description": "Evidence-grounded specifications with iterative blind-spot closure, separate-usage-pool-first search, strongest-model bounded implementation, TDD-first delivery, and progressive review for Codex.",
   "author": {
     "name": "GeorgVahi",
     "url": "https://github.com/GeorgVahi"
@@ -22,7 +22,7 @@
   "interface": {
     "displayName": "OpenBuild",
     "shortDescription": "Plan, build, and review from one durable specification",
-    "longDescription": "Turn ideas or existing specifications into repository-grounded plans, delegate broad code search, apply an evidence-gated minimality ladder, execute TDD-first milestones, and escalate review across available model tiers.",
+    "longDescription": "Turn ideas or existing specifications into repository-grounded plans, preserve resolved product decisions across risk-adaptive critic loops, resume at the first incomplete phase, route every code search to a confirmed separate usage pool before efficient main-pool fallback, use the strongest proven coding model for one bounded writer, execute TDD-first milestones, and escalate review across available model tiers.",
     "developerName": "GeorgVahi",
     "category": "Productivity",
     "capabilities": [
@@ -31,7 +31,7 @@
     ],
     "websiteURL": "https://github.com/GeorgVahi/OpenBuild",
     "defaultPrompt": [
-      "Use Build to turn this idea into a reviewed implementation.",
+      "Use Build in auto mode to turn this idea into a blind-spot-checked, reviewed implementation.",
       "Refine an existing specification against the current repository.",
       "Execute a ready specification with progressive review."
     ]
