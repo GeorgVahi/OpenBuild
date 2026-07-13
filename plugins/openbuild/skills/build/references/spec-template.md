@@ -52,15 +52,43 @@ Use this as a flexible structure. Remove irrelevant sections and keep the docume
 
 <Owning layer, data, or state.>
 
+### Specification source map
+
+| Source | Authority/owner | Status/revision | Normative scope and decision IDs | Outgoing normative links and discovery evidence | Editable | Reconciliation state |
+|---|---|---|---|---|---|---|
+| `<root-or-linked-spec>` | <user/repository/upstream> | <value> | <requirements, ACs, D-###> | <mapped targets or none; path:line audit evidence> | yes/no/unknown | aligned/conflict/gap |
+
+Include the selected root, every linked or named normative companion, and cited decision records. The graph is complete only when every outgoing edge target is mapped and every source is reachable from the root. A resolved user decision keeps the same authority wherever it is stored, but the owning source must explicitly list its `D-###`; do not assume the root overrides a linked source.
+
+### Source reconciliation receipts
+
+| Source/conflict | Resolution basis | Authority provenance or user decision | Result |
+|---|---|---|---|
+| `<source>` | explicit precedence/explicit supersession/user decision | <mapped authority source + record type + governed target + revision + positive line, or D-### + exact answer source + selected outcome> | aligned/deferred |
+
+Free-text evidence or root preference is not a valid conflict resolution. `Deferred` is allowed only here as a post-map result of a matching user decision, never as an initial source-map assertion.
+
 ### Gap
 
 <Exact mismatch between the request and current project.>
 
 ## 3. Decision memory
 
+### User-owned product decisions
+
 | ID | Decision key | Owner | Status | Decision | Selected option | Evidence or reopen reason | Consequence |
 |---|---|---|---|---|---|---|---|
 | D-001 | <actor.trigger.behavior> | user | open/resolved/reopened/superseded | <question> | <answer> | <source, revision, or new evidence> | <what this determines> |
+
+### Technical decision ledger
+
+| ID | Mechanism choice | Status | Evidence and alternatives | Preservation proof |
+|---|---|---|---|---|
+| T-001 | <outcome-neutral implementation choice> | proposed/selected/superseded | <repository or contract evidence> | <resolved D-###, requirements, ACs, invariants, and observable outcomes preserved> |
+
+### Pending proposals
+
+- <Proposed normative change linked to an open/reopened D-###; not yet applied to approved requirements, acceptance criteria, roadmap, milestones, or linked specifications.>
 
 ## 4. User scenarios
 
@@ -156,6 +184,12 @@ Keep stable `B-###` IDs for outcome/scope, actors/permissions, primary and alter
 |---|---|---|---|
 | <risk> | <assessment> | <action> | Open/Handled/Accepted |
 
+### Decision application receipt
+
+| Decision/version | Selected outcome and exact current answer source | Changed files/sections/ACs/milestones | Preserved decisions/invariants | Remaining open |
+|---|---|---|---|---|
+| D-001/R-### | <answer and provenance captured by each write> | <every target/change tuple, fresh after reopen; no-op only for the repeated outcome and complete prior tuple set> | <D-### and invariants> | <D-### or none> |
+
 ### Readiness critic log
 
 | Revision | Perspective/tier | Verdict | New gaps or reopen requests | Root adjudication |
@@ -192,10 +226,17 @@ Non-blocking assumptions:
 - Every required outcome has an observable acceptance criterion.
 - Repository evidence supports decisions without becoming a raw code dump.
 - Product decisions are separate from autonomous technical choices.
+- The specification source map is a closed root-reachable graph: every outgoing normative edge has discovery evidence and a mapped target, and every locked `D-###` is declared by its provenance source.
+- Every source conflict has a structured reconciliation receipt backed by explicit precedence/supersession authority or a matching user decision; free-text preference cannot align it.
+- `D-###` belongs to the user; each `T-###` is outcome-neutral and proves preservation of locked requirements, acceptance criteria, invariants, and observable behavior.
 - Workflow target, starting phase, and specification revision reflect current artifact evidence.
 - Stable decision IDs preserve resolved answers; reopening requires recorded new evidence and history.
+- A second answer cannot replace a locked outcome without an explicit `decision-reopened` transition; Ready rejects applications from stale decision versions.
+- Reopening invalidates prior write/application authorization for that `D-###`; the new decision version must rebuild and receipt every prior target/change tuple separately, or record a user-confirmed no-op for the repeated outcome and complete tuple set.
 - Every coverage-ledger row is `covered` or `not applicable` with evidence before `Ready`; question count is never a substitute for coverage.
 - The current revision has the risk-appropriate fresh readiness-critic closure and no unadjudicated gaps, contradictions, or missing authority.
+- No unanswered `D-###` has changed normative requirements, scope, product behavior, UX, permissions, data policy, monetization, acceptance criteria, roadmap, milestones, or linked specifications.
+- The decision application receipt maps every Build-made normative change to a resolved user decision or a locked requirement propagated without semantic change.
 - Complexity and routing claims use actual risk and runtime evidence.
 - Every Build-created commit in a versioned repository receives a unique higher version by default; required manifest, changelog, and documentation updates stay in the same commit.
 - Broad code discovery records delegation or an honest root fallback, with critical findings verified by the root.

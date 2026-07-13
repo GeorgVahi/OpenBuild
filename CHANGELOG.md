@@ -6,6 +6,18 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+Development version: `1.1.0`.
+
+### Changed
+
+- Blind-spot closure now requires a root-reachable graph of every linked normative specification, audits every outgoing edge, and preserves only decisions explicitly declared by their provenance source instead of treating the root document as an implicit override.
+- Product-impacting choices now remain user-owned: Build presents viable options, consequences, risks, and a recommendation, then waits before changing requirements, acceptance criteria, roadmaps, milestones, or linked specifications.
+- User `D-###` decisions and outcome-neutral technical `T-###` decisions are separated by a consequence-based authority test; uncertain or mixed choices return to the user.
+- Locked decisions now require an explicit evidence-backed reopen transition before a later answer can change their outcome, and `Ready` rejects applications bound to stale decision versions.
+- Post-answer reconciliation now snapshots the authorizing decision version/source/outcome on every normative write, rebuilds the affected product map, and records a per-target decision application receipt; reopening invalidates prior authorization for every affected tuple, and no-op requires the repeated outcome plus complete tuple coverage, while new product gaps keep the specification in `Questions` rather than being closed as technical cleanup.
+- Deterministic contract and trace tests reject product-to-technical relabeling, incomplete linked-source graphs, free-text conflict resolution, false decision provenance, normative writes before the user answer, and `Ready` without a post-write application receipt.
+- Existing `auto`, separate usage pool, Risk-matched-model coding, single-writer, and review contracts remain unchanged; Deterministic contract validation now covers the new blind-spot authority gate.
+
 ## [1.0.4] - 2026-07-13
 
 ### Changed

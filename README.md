@@ -2,7 +2,7 @@
 
 [Русская версия](README.ru.md)
 
-OpenBuild is a Codex workflow for turning a plain-language idea or an existing specification into a repository-grounded plan and, when requested, a tested implementation with automatic phase routing, iterative blind-spot critique, separate-usage-pool-first code search, risk-matched-model coding, bounded writers, evidence-gated minimality, TDD-first milestones, and progressive review.
+OpenBuild is a Codex workflow for turning a plain-language idea or an existing specification into a repository-grounded plan and, when requested, a tested implementation with user-owned product decisions, automatic phase routing, iterative blind-spot critique, separate-usage-pool-first code search, risk-matched-model coding, bounded writers, evidence-gated minimality, TDD-first milestones, and progressive review.
 
 It packages one explicit skill, **Build**, with six modes:
 
@@ -17,7 +17,9 @@ OpenBuild is self-contained. It does not require separate discovery, TDD, or rev
 
 > OpenBuild `1.0.4` is the current release. The immutable release tag is `v1.0.4`; pin it for reproducible installation or use `main` intentionally for unreleased changes.
 
-The plugin manifest, immutable release tag, and GitHub Release are synchronized at `1.0.4`.
+The manifest packaged in the released artifact, immutable release tag, and GitHub Release are synchronized at `1.0.4`.
+
+The current `main` development version is `1.1.0`; it adds decision-authority gates and is not the immutable `v1.0.4` release.
 
 ## What shipped in 1.0.4
 
@@ -40,11 +42,16 @@ flowchart LR
     F --> C
     F --> D
     F --> E
-    D --> G["Blind-spot coverage and decisions"]
-    G --> H{"Ready gate"}
-    H -->|gaps| D
+    D --> G["Specification source map + blind spots"]
+    E --> G
+    G --> U{"Material product choice?"}
+    U -->|yes| P["Options + consequences + risks + recommendation"]
+    P --> V["User decision"]
+    V --> R["Rebuild product map + application receipt"]
+    R --> H{"Ready gate"}
+    U -->|no| H
+    H -->|gaps| G
     H -->|covered| T{"Workflow target"}
-    E --> H
     T -->|specification only| Q["Ready specification"]
     T -->|implementation| I["Risk-matched implementation"]
     I --> J["Focused and risk-based validation"]
@@ -57,8 +64,8 @@ flowchart LR
     classDef gate fill:#422006,color:#fffbeb,stroke:#f59e0b,stroke-width:2px;
     classDef done fill:#052e16,color:#ecfdf5,stroke:#34d399,stroke-width:2px;
     class A,B input;
-    class C,D,E,F,G,I,J,K phase;
-    class H,T gate;
+    class C,D,E,F,G,P,V,R,I,J,K phase;
+    class U,H,T gate;
     class Q,L done;
 ```
 
@@ -175,18 +182,22 @@ Build will:
 
 1. inspect the current repository and applicable `AGENTS.md` files;
 2. establish a Git or artifact baseline;
-3. delegate broad code search to bounded read-only discovery workers when available, then verify their evidence map;
-4. create stable decision IDs and an evidence-backed blind-spot coverage ledger;
-5. ask only unresolved product questions using short answers such as `1a 2b`;
-6. run fresh risk-matched specification critics, deduplicate their findings, and repeat only for new gaps;
-7. create `BUILD.md` in the user's language and stop before implementation once the current revision is covered.
+3. inventory the root and every linked normative specification before synthesis, then delegate broad code search to bounded read-only discovery workers when available;
+4. create stable user decision IDs, outcome-neutral technical IDs, and an evidence-backed blind-spot coverage ledger;
+5. present every unresolved product choice with options, consequences, risks, and a recommendation using short answers such as `1a 2b`;
+6. wait for the user, then rebuild the affected product map and record where each selected decision was applied;
+7. run fresh risk-matched specification critics, deduplicate their findings, and repeat only for new gaps;
+8. create `BUILD.md` in the user's language and stop before implementation once the current revision is covered.
 
 Example question:
 
 ```text
 1. [D-001] Who can keep a wishlist?
+   Context: the current store has accounts, but the requested guest behavior is unspecified.
    a) Signed-in users only; the list follows the account.
    b) Guests too; the list starts locally and may merge after sign-in.
+   Risks: guest support adds local persistence, merge, privacy, and recovery decisions.
+   Affected product map: onboarding, wishlist storage, privacy, recovery, and acceptance criteria.
    Recommendation: 1a — it avoids an unresolved merge policy in the first version.
 
 Reply with: 1a
@@ -204,7 +215,7 @@ You can also pass `SPEC.md`, `TZ.md`, or another explicit path:
 $build refine docs/checkout-spec.md
 ```
 
-Build compares the document with the current repository, preserves manual edits and stable decisions, bootstraps a coverage ledger for legacy documents, and runs fresh critics until every applicable concern is covered or explicitly not applicable. A resolved decision is never asked again unless verified new evidence reopens the same ID with its history intact. If several specification files are relevant or the selected file belongs to another task, Build asks before changing anything.
+Build first maps the selected root and every linked normative specification, then compares that graph with the current repository. It preserves manual edits and stable decisions wherever they are stored, bootstraps a coverage ledger for legacy documents, and runs fresh critics until every applicable concern is covered or explicitly not applicable. A resolved decision is never asked again unless verified new evidence reopens the same ID with its history intact. A conflict between equally authoritative documents becomes a user decision rather than a silent root-file override. If several specification files are relevant or the selected file belongs to another task, Build asks before changing anything.
 
 ### 3. Execute a specification
 
@@ -263,7 +274,7 @@ A legacy specification marked `Ready` is not trusted blindly. If it lacks the cu
 
 Before any `rg`, `rg --files`, file/symbol lookup, repository grep, dependency trace, route/test/config/schema search, or log scan, the root agent creates a compact search plan and dispatches the exact `openbuild-search-separate` custom agent. A direct per-spawn model selector wins when the runtime exposes one; otherwise Build selects the custom agent by exact name. A generic worker, descriptive task name, or profile mention is not accepted as model selection. Workers return only an evidence map with `path:line`, symbol or route, a confirmed fact, relevance, negative results, and confidence.
 
-The root agent remains the orchestrator: it deduplicates evidence, verifies already-known critical files and lines with targeted reads, makes product and architecture decisions, owns durable specification/version edits, validates, owns Git, and writes the final answer. A new grep or lookup returns to the search worker. Search workers never edit or decide architecture; implementation edits use the separate risk-matched single-writer lease described below.
+The root agent remains the orchestrator: it deduplicates evidence, verifies already-known critical files and lines with targeted reads, turns material product and architecture choices into decision packets, records the user's selections, makes only outcome-neutral technical decisions autonomously, owns post-decision specification/version edits, validates, owns Git, and writes the final answer. A new grep or lookup returns to the search worker. Search workers never edit or decide architecture; implementation edits use the separate risk-matched single-writer lease described below.
 
 ## How usage-aware model routing works
 
@@ -343,11 +354,15 @@ Codex officially supports per-agent `model`, `model_reasoning_effort`, and sandb
 
 ## How blind-spot critique works
 
-Before `Ready`, Build gives every applicable concern a stable coverage ID and a state: `gap`, `covered`, or `not applicable` with evidence. The ledger covers outcomes and non-goals, actors and permissions, primary and failure flows, accessibility and localization, ownership and contracts, data and migrations, security and privacy, performance and concurrency, integrations, observability, rollout/rollback, and acceptance/testability. Task-specific concerns are added rather than forced into a generic row.
+Build is a bridge between user intent and code. Before `Ready`, it maps the root and all linked normative specifications, then gives every applicable concern a stable coverage ID and a state: `gap`, `covered`, or `not applicable` with evidence. The ledger covers outcomes and non-goals, actors and permissions, primary and failure flows, accessibility and localization, ownership and contracts, data and migrations, security and privacy, performance and concurrency, integrations, observability, rollout/rollback, and acceptance/testability. Task-specific concerns are added rather than forced into a generic row.
 
-Product decisions receive stable `D-###` IDs. A resolved ID is a locked constraint even if a later critic rephrases the same question. Reopening is allowed only when verified new repository evidence, a failing signal, an upstream constraint, or an explicit scope change materially breaks the selected outcome; Build preserves the same ID and explains what changed.
+The product-impact test is consequence-based: a choice belongs to the user when it changes behavior, UX, eligibility/audience, platform or geography, permissions, privacy/data lifecycle, monetization/rewards, moderation/legal gates, compatibility, cost, rollout, acceptance criteria, or scope. These product decisions receive stable `D-###` IDs. Outcome-neutral implementation mechanisms receive stable `T-###` IDs only when they preserve every locked user choice, requirement, criterion, invariant, and observable outcome. Uncertain or mixed choices are user-owned.
 
-For every non-trivial revision, a fresh read-only critic receives the current specification, decision memory, coverage ledger, and repository evidence. It reports only new gaps, evidence-backed reopen requests, and duplicates linked to existing IDs. The root verifies and deduplicates findings, resolves repository and technical gaps itself, and asks the user up to five remaining product decisions per round. The loop continues on new revisions until the risk-appropriate fresh closure pass returns `COVERED`; the same critic perspective/tier is never repeated on an unchanged revision.
+A resolved ID is a locked constraint even if a later critic rephrases the same question. Reopening is allowed only when verified new repository evidence, a failing signal, an upstream constraint, or an explicit scope change materially breaks the selected outcome; Build preserves the same ID and explains what changed. Legal, platform, repository, or security evidence may remove an impossible option, but Build still explains the viable options, consequences, risks, and recommendation and waits for the user.
+
+While a `D-###` is open, Build may add evidence, coverage, pending proposals, and questions, but it cannot rewrite the normative specification, acceptance criteria, roadmap, milestones, or linked documents around that choice. After the answer, Build applies exactly the selected IDs across dependent files and records a decision application receipt listing changed sections/criteria, preserved decisions, and any remaining open IDs. New product-impacting findings start another interview round instead of being closed as technical cleanup.
+
+For every non-trivial revision, a fresh read-only critic receives the current specification, decision memory, coverage ledger, and repository evidence. It reports only new gaps, evidence-backed reopen requests, and duplicates linked to existing IDs. The root verifies and deduplicates findings, resolves repository facts and only outcome-neutral technical gaps itself, and asks the user up to five remaining product decisions per round. The loop continues on new revisions until the risk-appropriate fresh closure pass returns `COVERED`; the same critic perspective/tier is never repeated on an unchanged revision.
 
 Depth follows risk: low work gets a structured self-audit and a critic when non-trivial; medium gets a fresh balanced critic and post-answer closure; high gets complementary product/UX and architecture/data/security critics plus a strong closure; critical gets adversarial perspectives, the strongest available closure, and required authority checkpoints. Exhausted critics with an open gap leave the specification out of `Ready`. This is evidence-backed closure of defined and task-specific concerns, not a claim of literal omniscience.
 
@@ -434,7 +449,7 @@ Build uses an explicit path when provided. Otherwise it prefers a relevant `BUIL
 - Milestone commits are created when Git is available, changes can be isolated, and applicable instructions do not forbid commits.
 - Push always requires explicit authorization.
 - Model configuration requires a separate preview and permission.
-- Discovery workers, specification critics, and reviewers are read-only. A bounded implementation worker may edit only one leased file set; writers never overlap, and the root owns decisions, specification/version edits, handoff validation, Git, and final reporting.
+- Discovery workers, specification critics, and reviewers are read-only. A bounded implementation worker may edit only one leased file set; writers never overlap. The user owns material product outcomes; the root owns the interview, recommendations, outcome-neutral technical choices, authorized specification/version edits, handoff validation, Git, and final reporting.
 - No telemetry, daemon, `curl | shell`, hidden auto-update, or background network service is included.
 - Build follows the repository's `AGENTS.md`, sandbox, approval, validation, and security rules.
 

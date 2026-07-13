@@ -15,6 +15,7 @@ from validate_package import (
     validate_auto_routing_contract,
     validate_blindspot_contract,
     validate_changelog_contract,
+    validate_decision_authority_trace,
     validate_implementation_delegation_contract,
     validate_implementation_dispatch_trace,
     validate_release_docs_contract,
@@ -126,6 +127,87 @@ class BlindspotWorkflowContractTests(unittest.TestCase):
         readme_ru = self.readme_ru.replace("## Как работает критика blind spots", "## Проверка спецификации")
         self.assertTrue(any("README.ru.md" in error for error in self.validate(readme_ru=readme_ru)))
 
+    def test_linked_normative_sources_are_mapped_before_synthesis(self) -> None:
+        skill = self.skill_text.replace("every in-scope normative file", "selected files")
+        self.assertTrue(any("source map" in error for error in self.validate(skill_text=skill)))
+
+        skill = self.skill_text.replace("every outgoing normative edge", "some references")
+        self.assertTrue(any("source map" in error for error in self.validate(skill_text=skill)))
+
+        protocol = self.protocol_text.replace(
+            "Do not infer that the root silently overrides",
+            "Assume that the root overrides",
+        )
+        self.assertTrue(any("source map" in error for error in self.validate(protocol_text=protocol)))
+
+        protocol = self.protocol_text.replace(
+            "every mapped source is reachable from the selected root",
+            "the listed source count is accepted",
+        )
+        self.assertTrue(any("source map" in error for error in self.validate(protocol_text=protocol)))
+
+        template = self.template_text.replace("### Specification source map", "### Specification files")
+        self.assertTrue(any("source map" in error for error in self.validate(template_text=template)))
+
+    def test_user_owns_product_impact_and_technical_choices_stay_outcome_neutral(self) -> None:
+        skill = self.skill_text.replace("The user owns any choice", "The root owns any choice")
+        self.assertTrue(any("decision authority" in error for error in self.validate(skill_text=skill)))
+
+        skill = self.skill_text.replace(
+            "Initial source mapping cannot self-declare a user deferral",
+            "The root can defer a source during mapping",
+        )
+        self.assertTrue(any("decision authority" in error for error in self.validate(skill_text=skill)))
+
+        protocol = self.protocol_text.replace(
+            "When classification is mixed or uncertain",
+            "When the category is ambiguous, let the root choose; otherwise",
+        )
+        self.assertTrue(any("decision authority" in error for error in self.validate(protocol_text=protocol)))
+
+        protocol = self.protocol_text.replace("structured reconciliation receipt", "reconciliation note")
+        self.assertTrue(any("decision authority" in error for error in self.validate(protocol_text=protocol)))
+
+        protocol = self.protocol_text.replace(
+            "record type, governed target, source revision, and positive line number",
+            "non-empty authority note",
+        )
+        self.assertTrue(any("decision authority" in error for error in self.validate(protocol_text=protocol)))
+
+        template = self.template_text.replace("### Technical decision ledger", "### Implementation notes")
+        self.assertTrue(any("decision authority" in error for error in self.validate(template_text=template)))
+
+    def test_normative_edits_wait_for_answers_and_emit_application_receipts(self) -> None:
+        protocol = self.protocol_text.replace(
+            "Do not change that dependent normative specification content",
+            "Change dependent normative specification content",
+        )
+        self.assertTrue(any("application gate" in error for error in self.validate(protocol_text=protocol)))
+
+        skill = self.skill_text.replace("decision application receipt", "decision summary")
+        self.assertTrue(any("normative edit gate" in error for error in self.validate(skill_text=skill)))
+
+        skill = self.skill_text.replace(
+            "cannot replace a locked `D-###`",
+            "may replace a locked decision",
+        )
+        self.assertTrue(any("normative edit gate" in error for error in self.validate(skill_text=skill)))
+
+        protocol = self.protocol_text.replace(
+            "invalidates every prior normative write/application authorization",
+            "retains the prior write authorization",
+        )
+        self.assertTrue(any("application gate" in error for error in self.validate(protocol_text=protocol)))
+
+        protocol = self.protocol_text.replace(
+            "complete set of affected `(target, change)` tuples",
+            "decision ID",
+        )
+        self.assertTrue(any("application gate" in error for error in self.validate(protocol_text=protocol)))
+
+        readme = self.readme.replace("decision application receipt", "change summary")
+        self.assertTrue(any("README.md" in error for error in self.validate(readme=readme)))
+
 
 class AutoRoutingContractTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -235,10 +317,10 @@ class ChangelogContractTests(unittest.TestCase):
     def test_development_manifest_version_and_latest_release_are_documented(self) -> None:
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
         self.assertIn("## [0.4.0] - 2026-07-12", changelog)
-        self.assertEqual(validate_changelog_contract(changelog, "1.0.4"), [])
+        self.assertEqual(validate_changelog_contract(changelog, "1.1.0"), [])
 
-        mutated = changelog.replace("## [1.0.4] - 2026-07-13", "## [next] - 2026-07-13")
-        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "1.0.4")))
+        mutated = changelog.replace("Development version: `1.1.0`.", "Development version: `next`.")
+        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "1.1.0")))
 
     def test_released_version_is_pinned_in_both_install_channels(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -247,6 +329,980 @@ class ChangelogContractTests(unittest.TestCase):
 
         mutated = readme.replace("--ref v1.0.4", "--ref main")
         self.assertTrue(any("README.md" in error for error in validate_release_docs_contract(mutated, readme_ru, "1.0.4")))
+
+
+class DecisionAuthorityTraceTests(unittest.TestCase):
+    @staticmethod
+    def source_map(
+        *paths: str,
+        complete: str = "true",
+        root: str = "TZ.md",
+        decisions: dict[str, str] | None = None,
+        links: dict[str, str] | None = None,
+    ) -> list[dict[str, str]]:
+        decisions = decisions or {}
+        links = links or {
+            path: ",".join(candidate for candidate in paths if path == root and candidate != root) or "none"
+            for path in paths
+        }
+        sources = [
+            {
+                "event": "spec-source",
+                "path": path,
+                "authority": "user specification",
+                "revision": "current",
+                "normative_scope": "task product contract",
+                "decision_ids": decisions.get(path, "none"),
+                "normative_links": links.get(path, "none"),
+                "link_evidence": f"{path}: audited normative references",
+                "editable": "yes",
+                "reconciliation": "aligned",
+            }
+            for path in paths
+        ]
+        return [
+            *sources,
+            {
+                "event": "spec-source-map",
+                "root": root,
+                "source_count": str(len(sources)),
+                "complete": complete,
+            },
+        ]
+
+    @staticmethod
+    def application(
+        decision_id: str,
+        target: str,
+        change: str,
+        answer_source: str,
+        selected_outcome: str,
+    ) -> dict[str, str]:
+        return {
+            "event": "decision-application",
+            "decision_id": decision_id,
+            "target": target,
+            "change": change,
+            "answer_source": answer_source,
+            "selected_outcome": selected_outcome,
+            "changed_sections": change,
+            "changed_criteria": "none",
+            "preserved_invariants": "all unrelated locked decisions",
+        }
+
+    def test_user_decision_precedes_normative_spec_rebuild(self) -> None:
+        trace = [
+            *self.source_map(
+                "TZ.md",
+                "TZ/09.md",
+                "TZ/12.md",
+                decisions={"TZ/09.md": "D-006"},
+            ),
+            {
+                "event": "locked-decision",
+                "decision_id": "D-006",
+                "source": "TZ/09.md",
+                "status": "resolved",
+                "selected_outcome": "web-only duels",
+            },
+            {
+                "event": "gap-classified",
+                "gap_id": "B-007",
+                "decision_id": "D-007",
+                "disposition": "product-decision",
+                "impact": "eligibility,platform",
+            },
+            {
+                "event": "question-presented",
+                "decision_id": "D-007",
+                "current_state": "linked specifications disagree on age and platform behavior",
+                "options": "Android contract|web 18+",
+                "consequences": "audience and release gates",
+                "risks": "compliance and fragmented behavior",
+                "recommendation": "separate platform contracts",
+                "affected_scope": "platform matrix,roadmap",
+            },
+            {
+                "event": "user-decision",
+                "decision_id": "D-007",
+                "selection": "separate platform contracts",
+                "source": "user reply 2",
+            },
+            {
+                "event": "normative-spec-write",
+                "decision_id": "D-007",
+                "basis": "user-decision",
+                "target": "TZ.md",
+                "change": "platform matrix and roadmap",
+                "answer_source": "user reply 2",
+                "selected_outcome": "separate platform contracts",
+            },
+            {
+                "event": "normative-spec-write",
+                "decision_id": "D-006",
+                "basis": "locked-decision",
+                "target": "TZ/09.md",
+                "change": "duel platform invariant",
+                "answer_source": "TZ/09.md",
+                "selected_outcome": "web-only duels",
+            },
+            self.application(
+                "D-007",
+                "TZ.md",
+                "platform matrix and roadmap",
+                "user reply 2",
+                "separate platform contracts",
+            ),
+            self.application(
+                "D-006",
+                "TZ/09.md",
+                "duel platform invariant",
+                "TZ/09.md",
+                "web-only duels",
+            ),
+            {
+                "event": "decision-application-receipt",
+                "application_count": "2",
+                "preserved_decisions": "D-006",
+                "remaining_open": "none",
+            },
+            {"event": "ready", "open_decisions": "none"},
+        ]
+
+        self.assertEqual(validate_decision_authority_trace(trace), [])
+
+    def test_normative_rewrite_cannot_happen_while_question_is_open(self) -> None:
+        trace = [
+            *self.source_map("TZ.md", "TZ/11.md"),
+            {
+                "event": "gap-classified",
+                "gap_id": "B-008",
+                "decision_id": "D-008",
+                "disposition": "product-decision",
+                "impact": "monetization,rewards",
+            },
+            {
+                "event": "question-presented",
+                "decision_id": "D-008",
+                "current_state": "Alpha reward sources conflict",
+                "options": "remove|gate|launch",
+                "consequences": "changes Alpha rewards",
+                "risks": "store rejection and legal exposure",
+                "recommendation": "gate",
+                "affected_scope": "rewards specification,acceptance criteria,roadmap",
+            },
+            {
+                "event": "normative-spec-write",
+                "decision_id": "D-008",
+                "basis": "root-adjudication",
+                "target": "TZ/11.md",
+                "change": "Alpha reward policy",
+                "answer_source": "root preference",
+                "selected_outcome": "gate",
+            },
+        ]
+
+        errors = validate_decision_authority_trace(trace)
+        self.assertTrue(any("user decision must precede" in error for error in errors))
+
+    def test_product_impact_cannot_be_relabelled_as_technical(self) -> None:
+        trace = [
+            *self.source_map("TZ.md"),
+            {
+                "event": "gap-classified",
+                "gap_id": "B-004",
+                "decision_id": "T-004",
+                "disposition": "technical-decision",
+                "impact": "pricing",
+            },
+            {
+                "event": "technical-decision",
+                "decision_id": "T-004",
+                "preserves_locked_outcomes": "false",
+                "normative_effect": "true",
+                "preservation_evidence": "none",
+            },
+        ]
+
+        errors = validate_decision_authority_trace(trace)
+        self.assertTrue(any("product-impacting gap" in error for error in errors))
+        self.assertTrue(any("technical decision" in error for error in errors))
+
+    def test_user_answer_does_not_authorize_adjacent_root_adjudication(self) -> None:
+        trace = [
+            *self.source_map("TZ.md", "TZ/12.md"),
+            {
+                "event": "user-decision",
+                "decision_id": "D-014",
+                "selection": "publish after first completed battle",
+                "source": "user reply 4",
+            },
+            {
+                "event": "normative-spec-write",
+                "decision_id": "D-015",
+                "basis": "root-adjudication",
+                "target": "TZ/12.md",
+                "change": "admin MFA policy",
+                "answer_source": "root preference",
+                "selected_outcome": "require MFA",
+            },
+        ]
+
+        errors = validate_decision_authority_trace(trace)
+        self.assertTrue(any("user decision must precede" in error for error in errors))
+
+    def test_ready_requires_complete_source_map_and_application_receipt(self) -> None:
+        trace = [
+            *self.source_map(
+                "TZ.md",
+                "TZ/09.md",
+                complete="false",
+                decisions={"TZ/09.md": "D-006"},
+            ),
+            {
+                "event": "locked-decision",
+                "decision_id": "D-006",
+                "source": "TZ/09.md",
+                "status": "resolved",
+                "selected_outcome": "web-only duels",
+            },
+            {
+                "event": "normative-spec-write",
+                "decision_id": "D-006",
+                "basis": "locked-decision",
+                "target": "TZ.md",
+                "change": "duel platform invariant",
+                "answer_source": "TZ/09.md",
+                "selected_outcome": "web-only duels",
+            },
+            {"event": "ready", "open_decisions": "none"},
+        ]
+
+        errors = validate_decision_authority_trace(trace)
+        self.assertTrue(any("source map" in error for error in errors))
+        self.assertTrue(any("application receipt" in error for error in errors))
+
+    def test_application_receipt_must_cover_every_normative_write(self) -> None:
+        trace = [
+            *self.source_map(
+                "TZ.md",
+                "TZ/09.md",
+                decisions={"TZ/09.md": "D-006"},
+            ),
+            {
+                "event": "locked-decision",
+                "decision_id": "D-006",
+                "source": "TZ/09.md",
+                "status": "resolved",
+                "selected_outcome": "web-only duels",
+            },
+            {
+                "event": "normative-spec-write",
+                "decision_id": "D-006",
+                "basis": "locked-decision",
+                "target": "TZ.md",
+                "change": "duel platform invariant",
+                "answer_source": "TZ/09.md",
+                "selected_outcome": "web-only duels",
+            },
+            {
+                "event": "decision-application-receipt",
+                "application_count": "0",
+                "preserved_decisions": "D-006",
+                "remaining_open": "none",
+            },
+            {"event": "ready", "open_decisions": "none"},
+        ]
+
+        errors = validate_decision_authority_trace(trace)
+        self.assertTrue(any("omits normative writes" in error for error in errors))
+
+    def test_reopening_invalidates_the_old_locked_answer(self) -> None:
+        trace = [
+            *self.source_map("TZ.md", decisions={"TZ.md": "D-001"}),
+            {
+                "event": "locked-decision",
+                "decision_id": "D-001",
+                "source": "TZ.md",
+                "status": "resolved",
+                "selected_outcome": "web-only",
+            },
+            {
+                "event": "decision-reopened",
+                "decision_id": "D-001",
+                "evidence": "new platform contract",
+                "changed_consequence": "web-only now blocks required Android scope",
+            },
+            {
+                "event": "locked-decision",
+                "decision_id": "D-001",
+                "source": "TZ.md",
+                "status": "resolved",
+                "selected_outcome": "web-only",
+            },
+            {
+                "event": "normative-spec-write",
+                "decision_id": "D-001",
+                "basis": "locked-decision",
+                "target": "TZ.md",
+                "change": "platform availability",
+                "answer_source": "TZ.md",
+                "selected_outcome": "web-only",
+            },
+        ]
+
+        errors = validate_decision_authority_trace(trace)
+        self.assertTrue(any("non-reopened resolved" in error for error in errors))
+        self.assertTrue(any("user decision must precede" in error for error in errors))
+
+    def test_complete_source_map_requires_structured_provenance(self) -> None:
+        trace = [
+            {
+                "event": "spec-source-map",
+                "root": "",
+                "source_count": "0",
+                "complete": "true",
+            },
+            {"event": "ready", "open_decisions": "none"},
+        ]
+
+        errors = validate_decision_authority_trace(trace)
+        self.assertTrue(any("structured sources" in error for error in errors))
+        self.assertTrue(any("source map root" in error for error in errors))
+
+    def test_gap_impact_uses_a_closed_schema(self) -> None:
+        trace = [
+            *self.source_map("TZ.md"),
+            {
+                "event": "gap-classified",
+                "gap_id": "B-020",
+                "decision_id": "T-020",
+                "disposition": "technical-decision",
+                "impact": "market-fit",
+            },
+        ]
+
+        errors = validate_decision_authority_trace(trace)
+        self.assertTrue(any("closed canonical schema" in error for error in errors))
+
+    def test_application_mapping_must_match_answer_and_write_provenance(self) -> None:
+        trace = [
+            *self.source_map(
+                "TZ.md",
+                "TZ/09.md",
+                decisions={"TZ/09.md": "D-006"},
+            ),
+            {
+                "event": "locked-decision",
+                "decision_id": "D-006",
+                "source": "TZ/09.md",
+                "status": "resolved",
+                "selected_outcome": "web-only duels",
+            },
+            {
+                "event": "normative-spec-write",
+                "decision_id": "D-006",
+                "basis": "locked-decision",
+                "target": "TZ.md",
+                "change": "duel platform invariant",
+                "answer_source": "TZ/09.md",
+                "selected_outcome": "web-only duels",
+            },
+            self.application(
+                "D-006",
+                "TZ.md",
+                "duel platform invariant",
+                "TZ.md",
+                "global duels",
+            ),
+        ]
+
+        errors = validate_decision_authority_trace(trace)
+        self.assertTrue(any("answer source does not match" in error for error in errors))
+        self.assertTrue(any("outcome does not match" in error for error in errors))
+
+    def test_answered_independent_decision_can_apply_while_another_remains_open(self) -> None:
+        trace = [
+            *self.source_map("TZ.md"),
+            {
+                "event": "question-presented",
+                "decision_id": "D-001",
+                "current_state": "audience unspecified",
+                "options": "13+|18+",
+                "consequences": "changes eligible audience",
+                "risks": "compliance and reach",
+                "recommendation": "18+",
+                "affected_scope": "audience contract",
+            },
+            {
+                "event": "question-presented",
+                "decision_id": "D-002",
+                "current_state": "reward policy unspecified",
+                "options": "deterministic|chance-based",
+                "consequences": "changes rewards",
+                "risks": "platform policy",
+                "recommendation": "deterministic",
+                "affected_scope": "rewards contract",
+            },
+            {
+                "event": "user-decision",
+                "decision_id": "D-001",
+                "selection": "18+",
+                "source": "user reply 1",
+            },
+            {
+                "event": "normative-spec-write",
+                "decision_id": "D-001",
+                "basis": "user-decision",
+                "target": "TZ.md",
+                "change": "audience contract",
+                "answer_source": "user reply 1",
+                "selected_outcome": "18+",
+            },
+            self.application("D-001", "TZ.md", "audience contract", "user reply 1", "18+"),
+            {
+                "event": "decision-application-receipt",
+                "application_count": "1",
+                "preserved_decisions": "none",
+                "remaining_open": "D-002",
+            },
+        ]
+
+        self.assertEqual(validate_decision_authority_trace(trace), [])
+
+    def test_complete_source_map_requires_closed_structured_links(self) -> None:
+        trace = [
+            *self.source_map(
+                "TZ.md",
+                "TZ/known.md",
+                links={
+                    "TZ.md": "TZ/known.md,TZ/missing.md",
+                    "TZ/known.md": "none",
+                },
+            ),
+            {"event": "ready", "open_decisions": "none"},
+        ]
+
+        errors = validate_decision_authority_trace(trace)
+        self.assertTrue(any("unmapped normative links" in error for error in errors))
+        self.assertTrue(any("complete specification source map" in error for error in errors))
+
+        unreachable = [
+            *self.source_map(
+                "TZ.md",
+                "TZ/orphan.md",
+                links={"TZ.md": "none", "TZ/orphan.md": "none"},
+            ),
+            {"event": "ready", "open_decisions": "none"},
+        ]
+        self.assertTrue(
+            any("unreachable specification sources" in error for error in validate_decision_authority_trace(unreachable))
+        )
+
+    def test_conflict_reconciliation_requires_authority_not_free_text(self) -> None:
+        trace = self.source_map("TZ.md", "TZ/09.md")
+        trace[1]["reconciliation"] = "conflict"
+        trace.extend(
+            [
+                {
+                    "event": "spec-source-reconciled",
+                    "path": "TZ/09.md",
+                    "reconciliation": "aligned",
+                    "evidence": "root preference",
+                },
+                {"event": "ready", "open_decisions": "none"},
+            ]
+        )
+
+        errors = validate_decision_authority_trace(trace)
+        self.assertTrue(any("conflict resolution requires" in error for error in errors))
+        self.assertTrue(any("unreconciled specification sources" in error for error in errors))
+
+    def test_initial_defer_and_unstructured_precedence_are_not_authority(self) -> None:
+        deferred = self.source_map("TZ.md")
+        deferred[0]["reconciliation"] = "deferred"
+        deferred[0]["deferred_by"] = "root preference"
+        deferred.append({"event": "ready", "open_decisions": "none"})
+        self.assertTrue(
+            any("post-map user-decision reconciliation" in error for error in validate_decision_authority_trace(deferred))
+        )
+
+        precedence = self.source_map("TZ.md", "TZ/09.md")
+        precedence[1]["reconciliation"] = "conflict"
+        precedence.extend(
+            [
+                {
+                    "event": "spec-source-reconciled",
+                    "path": "TZ/09.md",
+                    "reconciliation": "aligned",
+                    "resolution_basis": "explicit-precedence",
+                    "authority_source": "TZ.md",
+                    "authority_record": "root preference",
+                    "evidence": "root preference",
+                },
+                {"event": "ready", "open_decisions": "none"},
+            ]
+        )
+        precedence_errors = validate_decision_authority_trace(precedence)
+        self.assertTrue(any("structured authority record" in error for error in precedence_errors))
+        self.assertTrue(any("unreconciled specification sources" in error for error in precedence_errors))
+
+    def test_user_answer_can_reconcile_a_mapped_source_conflict(self) -> None:
+        trace = self.source_map("TZ.md", "TZ/09.md")
+        trace[1]["reconciliation"] = "conflict"
+        trace.extend(
+            [
+                {
+                    "event": "gap-classified",
+                    "gap_id": "B-021",
+                    "decision_id": "D-021",
+                    "disposition": "product-decision",
+                    "impact": "platform,scope",
+                },
+                {
+                    "event": "question-presented",
+                    "decision_id": "D-021",
+                    "current_state": "root and linked platform contracts conflict",
+                    "options": "web-only|multiplatform",
+                    "consequences": "changes availability and roadmap",
+                    "risks": "scope expansion or lost reach",
+                    "recommendation": "web-only for Alpha",
+                    "affected_scope": "platform contract,roadmap",
+                },
+                {
+                    "event": "user-decision",
+                    "decision_id": "D-021",
+                    "selection": "web-only",
+                    "source": "user reply 3",
+                },
+                {
+                    "event": "spec-source-reconciled",
+                    "path": "TZ/09.md",
+                    "reconciliation": "aligned",
+                    "resolution_basis": "user-decision",
+                    "decision_id": "D-021",
+                    "answer_source": "user reply 3",
+                    "selected_outcome": "web-only",
+                    "evidence": "user selected web-only",
+                },
+                {"event": "ready", "open_decisions": "none"},
+            ]
+        )
+
+        self.assertEqual(validate_decision_authority_trace(trace), [])
+
+    def test_structured_precedence_record_can_reconcile_a_conflict(self) -> None:
+        trace = self.source_map("TZ.md", "TZ/09.md")
+        trace[1]["reconciliation"] = "conflict"
+        trace.extend(
+            [
+                {
+                    "event": "spec-source-reconciled",
+                    "path": "TZ/09.md",
+                    "reconciliation": "aligned",
+                    "resolution_basis": "explicit-precedence",
+                    "authority_source": "TZ.md",
+                    "authority_record_type": "precedence",
+                    "authority_record_target": "TZ/09.md",
+                    "authority_record_revision": "current",
+                    "authority_record_line": "42",
+                    "evidence": "TZ.md:42 explicitly gives the platform matrix precedence",
+                },
+                {"event": "ready", "open_decisions": "none"},
+            ]
+        )
+
+        self.assertEqual(validate_decision_authority_trace(trace), [])
+
+    def test_locked_decision_must_be_declared_by_provenance_source(self) -> None:
+        trace = [
+            *self.source_map("TZ.md"),
+            {
+                "event": "locked-decision",
+                "decision_id": "D-999",
+                "source": "TZ.md",
+                "status": "resolved",
+                "selected_outcome": "root-selected outcome",
+            },
+            {
+                "event": "normative-spec-write",
+                "decision_id": "D-999",
+                "basis": "locked-decision",
+                "target": "TZ.md",
+                "change": "invented product contract",
+                "answer_source": "TZ.md",
+                "selected_outcome": "root-selected outcome",
+            },
+        ]
+
+        errors = validate_decision_authority_trace(trace)
+        self.assertTrue(any("not declared by provenance source" in error for error in errors))
+        self.assertTrue(any("user decision must precede" in error for error in errors))
+
+    def test_reopened_decision_cannot_attribute_an_old_write_to_the_new_answer(self) -> None:
+        trace = [
+            *self.source_map("TZ.md", decisions={"TZ.md": "D-001"}),
+            {
+                "event": "locked-decision",
+                "decision_id": "D-001",
+                "source": "TZ.md",
+                "status": "resolved",
+                "selected_outcome": "old",
+            },
+            {
+                "event": "normative-spec-write",
+                "decision_id": "D-001",
+                "basis": "locked-decision",
+                "target": "TZ.md",
+                "change": "platform contract",
+                "answer_source": "TZ.md",
+                "selected_outcome": "old",
+            },
+            {
+                "event": "decision-reopened",
+                "decision_id": "D-001",
+                "evidence": "new platform policy",
+                "changed_consequence": "the old choice is no longer viable",
+            },
+            {
+                "event": "question-presented",
+                "decision_id": "D-001",
+                "current_state": "old platform contract is invalid",
+                "options": "new-a|new-b",
+                "consequences": "changes availability",
+                "risks": "migration and reach",
+                "recommendation": "new-a",
+                "affected_scope": "platform contract",
+            },
+            {
+                "event": "user-decision",
+                "decision_id": "D-001",
+                "selection": "new-a",
+                "source": "user reply 5",
+            },
+            self.application("D-001", "TZ.md", "platform contract", "user reply 5", "new-a"),
+            {
+                "event": "decision-application-receipt",
+                "application_count": "1",
+                "preserved_decisions": "none",
+                "remaining_open": "none",
+            },
+            {"event": "ready", "open_decisions": "none"},
+        ]
+
+        errors = validate_decision_authority_trace(trace)
+        self.assertTrue(any("reopened decision requires current normative reapplication" in error for error in errors))
+        self.assertTrue(any("earlier normative write" in error for error in errors))
+
+    def test_reopened_decision_can_rebuild_and_receipt_the_current_product_map(self) -> None:
+        trace = [
+            *self.source_map("TZ.md", decisions={"TZ.md": "D-001"}),
+            {
+                "event": "locked-decision",
+                "decision_id": "D-001",
+                "source": "TZ.md",
+                "status": "resolved",
+                "selected_outcome": "old",
+            },
+            {
+                "event": "normative-spec-write",
+                "decision_id": "D-001",
+                "basis": "locked-decision",
+                "target": "TZ.md",
+                "change": "platform contract",
+                "answer_source": "TZ.md",
+                "selected_outcome": "old",
+            },
+            {
+                "event": "decision-reopened",
+                "decision_id": "D-001",
+                "evidence": "new platform policy",
+                "changed_consequence": "the old choice is no longer viable",
+            },
+            {
+                "event": "question-presented",
+                "decision_id": "D-001",
+                "current_state": "old platform contract is invalid",
+                "options": "new-a|new-b",
+                "consequences": "changes availability",
+                "risks": "migration and reach",
+                "recommendation": "new-a",
+                "affected_scope": "platform contract",
+            },
+            {
+                "event": "user-decision",
+                "decision_id": "D-001",
+                "selection": "new-a",
+                "source": "user reply 5",
+            },
+            {
+                "event": "normative-spec-write",
+                "decision_id": "D-001",
+                "basis": "user-decision",
+                "target": "TZ.md",
+                "change": "platform contract",
+                "answer_source": "user reply 5",
+                "selected_outcome": "new-a",
+            },
+            self.application("D-001", "TZ.md", "platform contract", "user reply 5", "new-a"),
+            {
+                "event": "decision-application-receipt",
+                "application_count": "1",
+                "preserved_decisions": "none",
+                "remaining_open": "none",
+            },
+            {"event": "ready", "open_decisions": "none"},
+        ]
+
+        self.assertEqual(validate_decision_authority_trace(trace), [])
+
+    def test_reopened_decision_can_record_a_user_confirmed_noop(self) -> None:
+        trace = [
+            *self.source_map("TZ.md", decisions={"TZ.md": "D-001"}),
+            {
+                "event": "locked-decision",
+                "decision_id": "D-001",
+                "source": "TZ.md",
+                "status": "resolved",
+                "selected_outcome": "web-only",
+            },
+            {
+                "event": "normative-spec-write",
+                "decision_id": "D-001",
+                "basis": "locked-decision",
+                "target": "TZ.md",
+                "change": "platform contract",
+                "answer_source": "TZ.md",
+                "selected_outcome": "web-only",
+            },
+            {
+                "event": "decision-reopened",
+                "decision_id": "D-001",
+                "evidence": "new platform policy",
+                "changed_consequence": "web-only must be reconfirmed",
+            },
+            {
+                "event": "question-presented",
+                "decision_id": "D-001",
+                "current_state": "web-only needs confirmation",
+                "options": "web-only|multiplatform",
+                "consequences": "changes availability",
+                "risks": "reach or scope expansion",
+                "recommendation": "web-only",
+                "affected_scope": "platform contract",
+            },
+            {
+                "event": "user-decision",
+                "decision_id": "D-001",
+                "selection": "web-only",
+                "source": "user reply 6",
+            },
+            {
+                "event": "decision-noop-application",
+                "decision_id": "D-001",
+                "answer_source": "user reply 6",
+                "selected_outcome": "web-only",
+                "confirmed_no_change": "true",
+                "affected_targets": "TZ.md::platform contract",
+                "reason": "the current product map already matches the reconfirmed outcome",
+            },
+            {
+                "event": "decision-application-receipt",
+                "application_count": "1",
+                "preserved_decisions": "D-001",
+                "remaining_open": "none",
+            },
+            {"event": "ready", "open_decisions": "none"},
+        ]
+
+        self.assertEqual(validate_decision_authority_trace(trace), [])
+
+    def test_reopened_decision_cannot_noop_a_different_outcome(self) -> None:
+        trace = [
+            *self.source_map("TZ.md", decisions={"TZ.md": "D-001"}),
+            {
+                "event": "locked-decision",
+                "decision_id": "D-001",
+                "source": "TZ.md",
+                "status": "resolved",
+                "selected_outcome": "old",
+            },
+            {
+                "event": "normative-spec-write",
+                "decision_id": "D-001",
+                "basis": "locked-decision",
+                "target": "TZ.md",
+                "change": "platform contract",
+                "answer_source": "TZ.md",
+                "selected_outcome": "old",
+            },
+            {
+                "event": "decision-reopened",
+                "decision_id": "D-001",
+                "evidence": "new platform policy",
+                "changed_consequence": "old is no longer viable",
+            },
+            {
+                "event": "question-presented",
+                "decision_id": "D-001",
+                "current_state": "old platform contract is invalid",
+                "options": "new|remove",
+                "consequences": "changes availability",
+                "risks": "migration and reach",
+                "recommendation": "new",
+                "affected_scope": "platform contract",
+            },
+            {
+                "event": "user-decision",
+                "decision_id": "D-001",
+                "selection": "new",
+                "source": "user reply 7",
+            },
+            {
+                "event": "decision-noop-application",
+                "decision_id": "D-001",
+                "answer_source": "user reply 7",
+                "selected_outcome": "new",
+                "confirmed_no_change": "true",
+                "affected_targets": "TZ.md::platform contract",
+                "reason": "claimed no change",
+            },
+            {
+                "event": "decision-application-receipt",
+                "application_count": "1",
+                "preserved_decisions": "none",
+                "remaining_open": "none",
+            },
+            {"event": "ready", "open_decisions": "none"},
+        ]
+
+        errors = validate_decision_authority_trace(trace)
+        self.assertTrue(any("repeat the pre-reopen outcome" in error for error in errors))
+        self.assertTrue(any("reopened decision requires current normative reapplication" in error for error in errors))
+
+    def test_reopened_decision_reapplies_every_previously_affected_target(self) -> None:
+        trace = [
+            *self.source_map(
+                "TZ.md",
+                "TZ/09.md",
+                decisions={"TZ.md": "D-001"},
+            ),
+            {
+                "event": "locked-decision",
+                "decision_id": "D-001",
+                "source": "TZ.md",
+                "status": "resolved",
+                "selected_outcome": "old",
+            },
+            {
+                "event": "normative-spec-write",
+                "decision_id": "D-001",
+                "basis": "locked-decision",
+                "target": "TZ.md",
+                "change": "platform contract",
+                "answer_source": "TZ.md",
+                "selected_outcome": "old",
+            },
+            {
+                "event": "normative-spec-write",
+                "decision_id": "D-001",
+                "basis": "locked-decision",
+                "target": "TZ/09.md",
+                "change": "duel availability",
+                "answer_source": "TZ.md",
+                "selected_outcome": "old",
+            },
+            {
+                "event": "decision-reopened",
+                "decision_id": "D-001",
+                "evidence": "new platform policy",
+                "changed_consequence": "all platform contracts must be rebuilt",
+            },
+            {
+                "event": "question-presented",
+                "decision_id": "D-001",
+                "current_state": "old platform contract is invalid",
+                "options": "new|remove",
+                "consequences": "changes availability",
+                "risks": "migration and reach",
+                "recommendation": "new",
+                "affected_scope": "root and duel platform contracts",
+            },
+            {
+                "event": "user-decision",
+                "decision_id": "D-001",
+                "selection": "new",
+                "source": "user reply 8",
+            },
+            {
+                "event": "normative-spec-write",
+                "decision_id": "D-001",
+                "basis": "user-decision",
+                "target": "TZ.md",
+                "change": "platform contract",
+                "answer_source": "user reply 8",
+                "selected_outcome": "new",
+            },
+            self.application("D-001", "TZ.md", "platform contract", "user reply 8", "new"),
+            {
+                "event": "decision-application-receipt",
+                "application_count": "1",
+                "preserved_decisions": "none",
+                "remaining_open": "none",
+            },
+            {"event": "ready", "open_decisions": "none"},
+        ]
+
+        errors = validate_decision_authority_trace(trace)
+        self.assertTrue(any("TZ/09.md" in error and "duel availability" in error for error in errors))
+
+    def test_second_user_answer_cannot_replace_a_locked_decision_without_reopen(self) -> None:
+        trace = [
+            *self.source_map("TZ.md"),
+            {
+                "event": "question-presented",
+                "decision_id": "D-001",
+                "current_state": "platform unspecified",
+                "options": "a|b",
+                "consequences": "changes availability",
+                "risks": "reach and scope",
+                "recommendation": "a",
+                "affected_scope": "platform contract",
+            },
+            {
+                "event": "user-decision",
+                "decision_id": "D-001",
+                "selection": "a",
+                "source": "user reply 1",
+            },
+            {
+                "event": "normative-spec-write",
+                "decision_id": "D-001",
+                "basis": "user-decision",
+                "target": "TZ.md",
+                "change": "platform contract",
+                "answer_source": "user reply 1",
+                "selected_outcome": "a",
+            },
+            self.application("D-001", "TZ.md", "platform contract", "user reply 1", "a"),
+            {
+                "event": "decision-application-receipt",
+                "application_count": "1",
+                "preserved_decisions": "none",
+                "remaining_open": "none",
+            },
+            {
+                "event": "user-decision",
+                "decision_id": "D-001",
+                "selection": "b",
+                "source": "user reply 2",
+            },
+            {"event": "ready", "open_decisions": "none"},
+        ]
+
+        errors = validate_decision_authority_trace(trace)
+        self.assertTrue(any("cannot replace a locked decision without decision-reopened" in error for error in errors))
+        self.assertTrue(any("stale decision versions" in error for error in errors))
 
 
 class UsageRoutingContractTests(unittest.TestCase):

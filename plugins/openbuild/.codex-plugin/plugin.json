@@ -1,7 +1,7 @@
 {
   "name": "openbuild",
-  "version": "1.0.4",
-  "description": "Evidence-grounded specifications with iterative blind-spot closure, separate-usage-pool-first search, risk-matched bounded implementation, TDD-first delivery, and progressive review for Codex.",
+  "version": "1.1.0",
+  "description": "Evidence-grounded specifications with user-owned product decisions, iterative blind-spot closure, bounded implementation, TDD-first delivery, and progressive review for Codex.",
   "author": {
     "name": "GeorgVahi",
     "url": "https://github.com/GeorgVahi"
@@ -22,7 +22,7 @@
   "interface": {
     "displayName": "OpenBuild",
     "shortDescription": "Plan, build, and review from one durable specification",
-    "longDescription": "Turn ideas or existing specifications into repository-grounded plans, preserve resolved product decisions across risk-adaptive critic loops, resume at the first incomplete phase, route every code search to a confirmed separate usage pool, exact-dispatch a risk-matched bounded writer, execute TDD-first milestones, and review through an evidence-gated sequential model ladder.",
+    "longDescription": "Turn ideas or existing specifications into repository-grounded plans, map linked normative sources, let users choose every product-impacting outcome from explained options, apply approved decisions across the product map, route code search to a confirmed separate usage pool, exact-dispatch a risk-matched bounded writer, execute TDD-first milestones, and review through an evidence-gated sequential model ladder.",
     "developerName": "GeorgVahi",
     "category": "Productivity",
     "capabilities": [

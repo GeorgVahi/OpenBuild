@@ -1,6 +1,6 @@
 ---
 name: build
-description: "Turn a plain-language idea or an existing BUILD.md, SPEC.md, or TZ.md into a repository-grounded specification, iteratively close product and architecture blind spots without repeating resolved decisions, or execute it through automatic phase routing, separate-usage-pool-first code search, risk-matched model implementation, bounded writers, TDD-first milestones, evidence-gated minimality, version-aware commits, and progressive review. Use only when explicitly invoked as the standalone $build skill or a namespaced plugin skill such as $openbuild:build; do not invoke for ordinary build commands."
+description: "Turn a plain-language idea or an existing BUILD.md, SPEC.md, or TZ.md into a repository-grounded specification, map linked normative sources, close blind spots through user-owned product decisions without repeating resolved choices, or execute it through automatic phase routing, separate-usage-pool-first code search, risk-matched model implementation, bounded writers, TDD-first milestones, evidence-gated minimality, version-aware commits, and progressive review. Use only when explicitly invoked as the standalone $build skill or a namespaced plugin skill such as $openbuild:build; do not invoke for ordinary build commands."
 ---
 
 # Build
@@ -45,11 +45,13 @@ Read [the specification template](references/spec-template.md) before creating o
 
 Read [the specification readiness protocol](references/blindspot-protocol.md), then record the workflow target and first incomplete phase. Explicit modes and paths override inference. A legacy `Ready` file without the current decision memory, coverage ledger, and closure evidence returns to readiness audit before implementation.
 
+Before the first product question or material restructuring, build the specification source map required by the readiness protocol. Inventory the selected root document and every in-scope normative file it links to, includes, or names as a companion; read those sources, record every outgoing normative edge with discovery evidence, record their authority and decision provenance, and preserve resolved choices found anywhere in that graph. The map is complete only when every edge target is mapped and every source is reachable from the root. Do not assume that the root file overrides a linked specification. An unreadable, ambiguous, or conflicting normative source remains a gap.
+
 ## Apply non-negotiable boundaries
 
 - Obey all applicable `AGENTS.md`, repository policies, sandbox rules, and approval requirements.
 - Treat current files and user edits as authoritative. Preserve unrelated changes and exclude them from edits, review, commits, and pushes.
-- Keep the root agent as the owner of product questions, architecture, specification and version edits, finding adjudication, validation choices, Git, and final synthesis. Lease implementation edits only through [adaptive implementation delegation](references/implementation-delegation.md).
+- Keep the root agent as the owner of the interview, recommendations, evidence verification, outcome-neutral technical decisions, specification and version edits after the applicable decision gate, finding adjudication, validation choices, Git, and final synthesis. The user owns material product decisions and architecture/provider choices that cross the product-impact boundary. Lease implementation edits only through [adaptive implementation delegation](references/implementation-delegation.md).
 - Keep search workers, specification critics, and reviewers read-only. Permit only the selected risk-matched implementation worker to edit its leased file set; it never makes product or architecture decisions, changes the specification/version, or controls Git.
 - Allow only one active writer in the shared workspace. The root does not edit while a worker lease is active, and multiple implementation workers run sequentially with a root handoff gate between them.
 - Route every repository lookup through [code discovery](references/code-discovery.md) and its separate-pool-first order. Keep only direct reads of explicit, runtime-provided, or already-known `path:line` targets with the root.
@@ -110,25 +112,38 @@ Authentication, permissions, secrets, persistence, migrations, concurrency, and 
 
 ## Audit blind spots
 
-Follow [the specification readiness protocol](references/blindspot-protocol.md). Build a durable coverage ledger, decision memory with stable IDs, and a risk-adaptive fresh critic loop for every non-trivial specification. Treat critic findings as candidates: the root verifies evidence, resolves repository and technical gaps, deduplicates semantic matches, and asks only remaining product choices.
+Follow [the specification readiness protocol](references/blindspot-protocol.md). Build a complete specification source map, durable coverage ledger, user decision memory with stable `D-###` IDs, outcome-neutral technical decision ledger with stable `T-###` IDs, and a risk-adaptive fresh critic loop for every non-trivial specification. Treat critic findings and their labels only as candidates: the root verifies evidence, applies the product-impact test, resolves repository facts and only outcome-neutral technical gaps, deduplicates semantic matches, and asks the user about every remaining material choice.
 
-## Ask only product questions
+## Protect user decision authority
 
-Ask only open or evidence-backed reopened decisions that materially change product behavior, UX, data, security, compatibility, cost, or scope. Do not ask for facts available in the repository or repeat a resolved decision under different wording.
+The user owns any choice that crosses the product-impact boundary by changing observable product behavior, UX, eligibility or audience, age/platform/geography availability, permissions, privacy or data lifecycle, monetization/economy/rewards, safety/moderation/legal gates, compatibility, cost, rollout, acceptance criteria, or scope. The same rule applies to an architecture or provider choice when it changes those outcomes or creates material lock-in. Repository, legal, security, and platform evidence may rule out an impossible option or change the recommendation, but it does not authorize the root to choose a remaining product outcome.
+
+Classify a decision as autonomous technical work only when it selects an implementation mechanism that preserves every resolved `D-###`, user-authored requirement, acceptance criterion, invariant, and observable outcome. Record it as `T-###` with that preservation evidence. If the classification is mixed or uncertain, treat it as a user-owned `D-###`. A critic's `technical decision` label is never sufficient authority by itself.
+
+When normative sources conflict, preserve each source and its provenance, link the conflict to an existing `D-###` or create a new open one, and ask the user. Never silently prefer the root document, the critic recommendation, the safer default, or the easiest implementation. A conflict may close without a new question only when an already-mapped authority record explicitly names the precedence/supersession relation, target, revision, and line. Initial source mapping cannot self-declare a user deferral. A resolved decision may be propagated to inconsistent dependent documents only when the edit preserves that exact decision; changing it requires evidence-backed reopening and a new user answer.
+
+## Ask product questions before normative edits
+
+Ask only open or evidence-backed reopened decisions that cross the product-impact boundary. Do not ask for facts available in the repository or repeat a resolved decision under different wording. A later answer cannot replace a locked `D-###` until the same ID has an explicit `decision-reopened` transition with evidence.
 
 Ask up to five questions per round using simple mutually exclusive options:
 
 ```text
-1. <question in plain language>
+1. [D-###] <question in plain language>
+   Context: <current requirement or conflict and its source>
    a) <option and user-visible consequence>
    b) <option and user-visible consequence>
    c) <option and user-visible consequence>
+   Risks: <material risk or trade-off for the options>
+   Affected product map: <requirements, specifications, acceptance criteria, or milestones likely to change>
    Recommendation: 1a — <short reason>.
 
 Reply with: 1a 2b 3c. A custom answer is also valid.
 ```
 
-Show each stable `D-###` ID, put the recommended safe/default choice first, and keep the reply format short. Update the same specification with evidence, decision state, coverage, draft acceptance criteria, and open questions before waiting. Partial answers close only their referenced IDs.
+Show each stable `D-###` ID, the current decision or conflict provenance, mutually exclusive options, user-visible consequences, material risks, the affected product-map areas, and a reasoned recommendation; put the recommended choice first and keep the reply format short. Before waiting, update only the specification source map, evidence, coverage, open/reopened decision records, pending proposals, risk register, and question log. Do not change normative specification content—requirements, scope, non-goals, product behavior, UX, permissions, data policy, monetization, acceptance criteria, roadmap, milestones, or linked normative files—on the basis of an open or reopened decision. Partial answers close only their referenced IDs.
+
+After the user answers, apply exactly the resolved `D-###` choices across the root and dependent specifications, then rebuild the affected product map, requirements, acceptance criteria, and milestones. Record a decision application receipt mapping each applied ID to its exact current answer source and selected outcome, changed files/sections/criteria, preserved decisions, and remaining open IDs. A reopened decision invalidates the prior write/application authorization for that ID and requires fresh application of every previously affected target/change tuple. A user-confirmed no-op is valid only when the user repeats the pre-reopen outcome and the receipt covers that entire tuple set. If application or a later critic exposes another product-impacting choice, start another interview round and keep the status at `Questions`; do not silently resolve it or advance to `Ready`.
 
 ## Reach the Ready gate
 
@@ -136,19 +151,20 @@ Require the specification to contain:
 
 - workflow target, starting phase, and current specification revision;
 - user outcome, scope, and exclusions;
-- repository evidence and source of truth;
-- durable user decisions and autonomous technical decisions with stable IDs and reopen history;
+- repository evidence, a complete specification source map, and source of truth;
+- durable user-owned `D-###` decisions and outcome-neutral `T-###` technical decisions with provenance and reopen history;
 - a complete evidence-backed coverage ledger and adjudicated critic log;
 - observable acceptance criteria and invariants;
 - failure modes, edge cases, compatibility, security, data, rollout, and rollback concerns;
 - complexity class and model-routing mode;
 - version source, policy, and expected version impact, or why versioning is not applicable;
 - primary signal, validation strategy, coherent milestones, and review plan;
-- no gaps, blocking product decisions, contradictions, or missing authority.
+- a current decision application receipt for every Build-made normative change after the latest answer;
+- no gaps, blocking product decisions, contradictions, missing authority, or unapproved normative changes.
 
 Require the risk-appropriate critic depth and a fresh `COVERED` closure verdict for the current specification revision. Do not claim literal omniscience; require closure across every defined and task-specific concern with evidence or a justified `not applicable` disposition.
 
-In `new`, `refine`, or specification-targeted `auto`, set the specification to `Ready`, summarize it, and stop. In `run`, `full`, or implementation-targeted `auto`, set it to `Ready` and immediately continue unless the user requested a checkpoint or the risk/authority policy requires one.
+In `new`, `refine`, or specification-targeted `auto`, set the specification to `Ready`, summarize the applied and preserved decisions, and stop. In `run`, `full`, or implementation-targeted `auto`, set it to `Ready` and immediately continue only after the decision authority and application gates pass, unless the user requested a checkpoint or the risk/authority policy requires one.
 
 ## Implement milestones
 
@@ -209,4 +225,4 @@ After all milestones:
 6. Set `Complete` only when every requirement is proven. Otherwise preserve the exact status and continue or request missing authority.
 7. Update the final specification log and create the final scoped commit when allowed. Push only when explicitly authorized.
 
-Report the outcome, workflow route, specification revision and critic closure, preserved/reopened decisions, closed milestones, search usage route and circuit breaker, requested implementation profile/tier, observed model metadata or `unknown`, escalation and delegation, red/green evidence, minimality decisions, version impact and before/after version, acceptance evidence, validation, review mode/tier, commits, documentation status, migration implications, and real remaining risks.
+Report the outcome, workflow route, specification revision and critic closure, specification source map, asked/resolved/preserved/reopened decisions, decision application receipt, closed milestones, search usage route and circuit breaker, requested implementation profile/tier, observed model metadata or `unknown`, escalation and delegation, red/green evidence, minimality decisions, version impact and before/after version, acceptance evidence, validation, review mode/tier, commits, documentation status, migration implications, and real remaining risks.

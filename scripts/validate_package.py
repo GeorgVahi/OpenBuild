@@ -202,6 +202,654 @@ def validate_search_dispatch_trace(events: list[dict[str, str]]) -> list[str]:
     return errors
 
 
+def validate_decision_authority_trace(events: list[dict[str, str]]) -> list[str]:
+    """Validate that product-impacting specification edits remain user-authorized."""
+
+    errors: list[str] = []
+    product_impact_axes = {
+        "acceptance",
+        "accessibility",
+        "age",
+        "audience",
+        "availability",
+        "behavior",
+        "billing",
+        "capacity",
+        "compatibility",
+        "compliance",
+        "cost",
+        "data",
+        "economy",
+        "eligibility",
+        "geography",
+        "legal",
+        "localization",
+        "lock-in",
+        "migration",
+        "moderation",
+        "monetization",
+        "non-goal",
+        "offline",
+        "operations",
+        "performance",
+        "permissions",
+        "platform",
+        "pricing",
+        "priority",
+        "privacy",
+        "product-behavior",
+        "reliability",
+        "responsive",
+        "retention",
+        "rewards",
+        "rollout",
+        "safety",
+        "scope",
+        "security",
+        "support",
+        "user-flow",
+        "ux",
+    }
+    non_product_impacts = {"authority", "outcome-neutral", "repository-fact"}
+    canonical_impacts = product_impact_axes | non_product_impacts
+    dispositions = {"new-authority", "product-decision", "repository-fact", "technical-decision"}
+
+    sources: dict[str, dict[str, str]] = {}
+    source_links: dict[str, set[str]] = {}
+    source_decision_ids: dict[str, set[str]] = {}
+    invalid_sources: set[str] = set()
+    source_map_seen = False
+    source_map_complete = False
+    unreconciled_sources: set[str] = set()
+    locked_decisions: set[str] = set()
+    decision_sources: dict[str, str] = {}
+    selected_outcomes: dict[str, str] = {}
+    product_decisions: set[str] = set()
+    reopened_decisions: set[str] = set()
+    presented_questions: set[str] = set()
+    user_decision_index: dict[str, int] = {}
+    technical_gap_ids: set[str] = set()
+    technical_decision_ids: set[str] = set()
+    decision_versions: dict[str, int] = {}
+    decision_target_history: dict[str, set[tuple[str, str]]] = {}
+    pre_reopen_outcomes: dict[str, str] = {}
+    reapplications_required: dict[str, set[tuple[str, str]]] = {}
+    normative_writes: list[tuple[str, str, str, int, str, str, int]] = []
+    applications: dict[tuple[str, str, str], int] = {}
+    application_versions: dict[tuple[str, str, str], int] = {}
+    last_application_receipt: int | None = None
+    final_receipt: dict[str, str] | None = None
+
+    for index, event in enumerate(events):
+        kind = event.get("event")
+        if kind == "spec-source":
+            required = {
+                "path",
+                "authority",
+                "revision",
+                "normative_scope",
+                "decision_ids",
+                "normative_links",
+                "link_evidence",
+                "editable",
+                "reconciliation",
+            }
+            missing = sorted(field for field in required if not event.get(field))
+            if missing:
+                errors.append(f"decision authority trace: specification source missing fields {missing}")
+            path = event.get("path", "")
+            source_invalid = bool(missing)
+            if path in sources:
+                errors.append(f"decision authority trace: duplicate specification source {path}")
+                source_invalid = True
+            if event.get("editable") not in {"yes", "no", "unknown"}:
+                errors.append("decision authority trace: source editability must be yes, no, or unknown")
+                source_invalid = True
+            reconciliation = event.get("reconciliation", "")
+            if reconciliation not in {"aligned", "conflict", "deferred", "gap"}:
+                errors.append("decision authority trace: source reconciliation has an invalid state")
+                source_invalid = True
+            if reconciliation == "deferred":
+                errors.append(
+                    "decision authority trace: an initial deferred source requires post-map user-decision reconciliation"
+                )
+                source_invalid = True
+            raw_decision_ids = event.get("decision_ids", "")
+            declared_decisions = (
+                set()
+                if raw_decision_ids == "none"
+                else {value.strip() for value in raw_decision_ids.split(",") if value.strip()}
+            )
+            if not raw_decision_ids or "none" in declared_decisions or any(
+                not value.startswith(("D-", "T-")) for value in declared_decisions
+            ):
+                errors.append("decision authority trace: source decision IDs must be stable D-###/T-### IDs or none")
+                source_invalid = True
+            raw_links = event.get("normative_links", "")
+            links = (
+                set()
+                if raw_links == "none"
+                else {value.strip() for value in raw_links.split(",") if value.strip()}
+            )
+            if not raw_links or "none" in links:
+                errors.append("decision authority trace: source normative links must be mapped paths or none")
+                source_invalid = True
+            if path:
+                sources[path] = event
+                source_links[path] = links
+                source_decision_ids[path] = declared_decisions
+                if source_invalid:
+                    invalid_sources.add(path)
+                if reconciliation in {"conflict", "gap", "deferred"}:
+                    unreconciled_sources.add(path)
+            if source_map_seen:
+                source_map_complete = False
+
+        elif kind == "spec-source-map":
+            source_map_seen = True
+            required = {"root", "source_count", "complete"}
+            missing = sorted(field for field in required if not event.get(field))
+            if missing:
+                errors.append(f"decision authority trace: source map missing fields {missing}")
+            try:
+                source_count = int(event.get("source_count", ""))
+            except ValueError:
+                source_count = -1
+                errors.append("decision authority trace: source map count must be an integer")
+            if not sources:
+                errors.append("decision authority trace: source map cannot be complete without structured sources")
+            if event.get("root") not in sources:
+                errors.append("decision authority trace: source map root must reference a structured source")
+            if source_count != len(sources):
+                errors.append("decision authority trace: source map count does not match structured sources")
+            if event.get("complete") not in {"true", "false"}:
+                errors.append("decision authority trace: source map complete must be true or false")
+            declared_links = set().union(*source_links.values()) if source_links else set()
+            unmapped_links = sorted(declared_links - set(sources))
+            if unmapped_links:
+                errors.append(f"decision authority trace: source graph has unmapped normative links {unmapped_links}")
+            root = event.get("root", "")
+            reachable: set[str] = set()
+            pending = [root] if root in sources else []
+            while pending:
+                current = pending.pop()
+                if current in reachable:
+                    continue
+                reachable.add(current)
+                pending.extend(link for link in source_links.get(current, set()) if link in sources)
+            unreachable_sources = sorted(set(sources) - reachable)
+            if unreachable_sources:
+                errors.append(
+                    f"decision authority trace: source graph has unreachable specification sources {unreachable_sources}"
+                )
+            source_map_complete = (
+                event.get("complete") == "true"
+                and not missing
+                and bool(sources)
+                and event.get("root") in sources
+                and source_count == len(sources)
+                and not invalid_sources
+                and not unmapped_links
+                and not unreachable_sources
+            )
+
+        elif kind == "spec-source-reconciled":
+            path = event.get("path", "")
+            state = event.get("reconciliation", "")
+            original_state = sources.get(path, {}).get("reconciliation")
+            if (
+                path not in sources
+                or original_state not in {"conflict", "gap"}
+                or state not in {"aligned", "deferred"}
+                or not event.get("evidence")
+            ):
+                errors.append("decision authority trace: source reconciliation requires a mapped source and evidence")
+            else:
+                resolution_basis = event.get("resolution_basis", "")
+                decision_id = event.get("decision_id", "")
+                user_resolved = (
+                    resolution_basis == "user-decision"
+                    and decision_id.startswith("D-")
+                    and decision_id in locked_decisions
+                    and decision_id not in reopened_decisions
+                    and user_decision_index.get(decision_id, len(events)) < index
+                    and event.get("answer_source") == decision_sources.get(decision_id)
+                    and event.get("selected_outcome") == selected_outcomes.get(decision_id)
+                )
+                expected_record_type = {
+                    "explicit-precedence": "precedence",
+                    "explicit-supersession": "supersession",
+                }.get(resolution_basis)
+                authority_source = event.get("authority_source", "")
+                authority_line = event.get("authority_record_line", "")
+                explicit_authority = bool(
+                    expected_record_type
+                    and authority_source in sources
+                    and event.get("authority_record_type") == expected_record_type
+                    and event.get("authority_record_target") == path
+                    and event.get("authority_record_revision") == sources.get(authority_source, {}).get("revision")
+                    and authority_line.isdigit()
+                    and int(authority_line) > 0
+                    and event.get("evidence", "").startswith(f"{authority_source}:{authority_line}")
+                )
+                if expected_record_type and not explicit_authority:
+                    errors.append(
+                        "decision authority trace: explicit precedence/supersession requires a structured authority record"
+                    )
+                verified_gap = (
+                    original_state == "gap"
+                    and resolution_basis == "verified-evidence"
+                    and authority_source in sources
+                    and event.get("authority_record_target") == path
+                    and event.get("authority_record_revision") == sources.get(authority_source, {}).get("revision")
+                    and authority_line.isdigit()
+                    and int(authority_line) > 0
+                )
+                valid_resolution = user_resolved or explicit_authority or verified_gap
+                if original_state == "conflict" and not (user_resolved or explicit_authority):
+                    errors.append(
+                        "decision authority trace: conflict resolution requires a user decision or explicit precedence/supersession record"
+                    )
+                    valid_resolution = False
+                if state == "deferred" and not user_resolved:
+                    errors.append("decision authority trace: deferred source requires a matching user decision")
+                    valid_resolution = False
+                if not valid_resolution:
+                    if original_state != "conflict":
+                        errors.append(
+                            "decision authority trace: source reconciliation requires structured authority provenance"
+                        )
+                else:
+                    sources[path]["reconciliation"] = state
+                    unreconciled_sources.discard(path)
+
+        elif kind == "locked-decision":
+            decision_id = event.get("decision_id", "")
+            source = event.get("source", "")
+            if (
+                event.get("status") == "resolved"
+                and decision_id.startswith("D-")
+                and decision_id not in reopened_decisions
+                and source in sources
+                and decision_id in source_decision_ids.get(source, set())
+                and event.get("selected_outcome")
+            ):
+                locked_decisions.add(decision_id)
+                decision_sources[decision_id] = source
+                selected_outcomes[decision_id] = event["selected_outcome"]
+                decision_versions[decision_id] = decision_versions.get(decision_id, 0) + 1
+            else:
+                if source in sources and decision_id.startswith("D-") and decision_id not in source_decision_ids.get(source, set()):
+                    errors.append(
+                        f"decision authority trace: {decision_id} is not declared by provenance source {source}"
+                    )
+                errors.append(
+                    "decision authority trace: locked decision must be a non-reopened resolved D-### with mapped provenance and outcome"
+                )
+
+        elif kind == "gap-classified":
+            gap_id = event.get("gap_id", "")
+            decision_id = event.get("decision_id", "")
+            disposition = event.get("disposition", "")
+            impacts = {value.strip() for value in event.get("impact", "").split(",") if value.strip()}
+            if not gap_id.startswith("B-"):
+                errors.append("decision authority trace: every classified gap requires a stable B-###")
+            if disposition not in dispositions:
+                errors.append("decision authority trace: gap disposition is invalid")
+            unknown_impacts = sorted(impacts - canonical_impacts)
+            if not impacts or unknown_impacts:
+                errors.append(
+                    f"decision authority trace: gap impact must use the closed canonical schema; unknown {unknown_impacts}"
+                )
+            has_product_impact = bool(impacts & product_impact_axes)
+            if has_product_impact:
+                product_decisions.add(decision_id)
+                if disposition not in {"product-decision", "new-authority"}:
+                    errors.append(
+                        "decision authority trace: product-impacting gap cannot be relabelled as a technical decision"
+                    )
+                if not decision_id.startswith("D-"):
+                    errors.append("decision authority trace: product-impacting gap requires a stable D-###")
+            elif disposition == "technical-decision":
+                if impacts != {"outcome-neutral"} or not decision_id.startswith("T-"):
+                    errors.append(
+                        "decision authority trace: technical gap requires T-### and outcome-neutral impact"
+                    )
+                technical_gap_ids.add(decision_id)
+            elif disposition == "product-decision":
+                errors.append("decision authority trace: product decision requires a canonical product impact")
+            elif disposition == "repository-fact" and impacts != {"repository-fact"}:
+                errors.append("decision authority trace: repository fact requires repository-fact impact")
+            elif disposition == "new-authority":
+                if impacts != {"authority"} and not has_product_impact:
+                    errors.append("decision authority trace: new authority requires authority or product impact")
+                if not decision_id.startswith("D-"):
+                    errors.append("decision authority trace: new authority requires a stable D-###")
+                product_decisions.add(decision_id)
+
+        elif kind == "decision-reopened":
+            decision_id = event.get("decision_id", "")
+            if (
+                decision_id not in locked_decisions
+                and decision_id not in user_decision_index
+            ) or not event.get("evidence") or not event.get("changed_consequence"):
+                errors.append("decision authority trace: reopening requires a resolved D-### and changed evidence")
+            pre_reopen_outcomes[decision_id] = selected_outcomes.get(decision_id, "")
+            prior_targets = decision_target_history.get(decision_id, set())
+            if prior_targets:
+                reapplications_required[decision_id] = set(prior_targets)
+            locked_decisions.discard(decision_id)
+            user_decision_index.pop(decision_id, None)
+            decision_sources.pop(decision_id, None)
+            selected_outcomes.pop(decision_id, None)
+            decision_versions[decision_id] = decision_versions.get(decision_id, 0) + 1
+            presented_questions.discard(decision_id)
+            product_decisions.add(decision_id)
+            reopened_decisions.add(decision_id)
+            if any(write[0] == decision_id for write in normative_writes):
+                normative_writes = [write for write in normative_writes if write[0] != decision_id]
+                applications = {key: value for key, value in applications.items() if key[0] != decision_id}
+                application_versions = {
+                    key: value for key, value in application_versions.items() if key[0] != decision_id
+                }
+                last_application_receipt = None
+                final_receipt = None
+
+        elif kind == "technical-decision":
+            decision_id = event.get("decision_id", "")
+            if not decision_id.startswith("T-"):
+                errors.append("decision authority trace: technical decision requires a stable T-###")
+            if (
+                event.get("preserves_locked_outcomes") != "true"
+                or event.get("normative_effect") != "false"
+                or not event.get("preservation_evidence")
+            ):
+                errors.append(
+                    "decision authority trace: technical decision must preserve locked outcomes and have no normative effect"
+                )
+            technical_decision_ids.add(decision_id)
+
+        elif kind == "question-presented":
+            if not source_map_complete:
+                errors.append("decision authority trace: complete source map must precede a decision packet")
+            required = {
+                "decision_id",
+                "current_state",
+                "options",
+                "consequences",
+                "risks",
+                "recommendation",
+                "affected_scope",
+            }
+            missing = sorted(field for field in required if not event.get(field))
+            if missing:
+                errors.append(f"decision authority trace: decision packet missing fields {missing}")
+            decision_id = event.get("decision_id", "")
+            if not decision_id.startswith("D-"):
+                errors.append("decision authority trace: decision packet requires a stable D-###")
+            else:
+                presented_questions.add(decision_id)
+                product_decisions.add(decision_id)
+
+        elif kind == "user-decision":
+            decision_id = event.get("decision_id", "")
+            if (
+                not decision_id.startswith("D-")
+                or not event.get("selection")
+                or not event.get("source")
+            ):
+                errors.append("decision authority trace: user decision requires D-###, selection, and answer source")
+            else:
+                if decision_id in locked_decisions and decision_id not in reopened_decisions:
+                    errors.append(
+                        "decision authority trace: a user answer cannot replace a locked decision without decision-reopened"
+                    )
+                user_decision_index[decision_id] = index
+                locked_decisions.add(decision_id)
+                reopened_decisions.discard(decision_id)
+                product_decisions.add(decision_id)
+                decision_sources[decision_id] = event["source"]
+                selected_outcomes[decision_id] = event["selection"]
+                decision_versions[decision_id] = decision_versions.get(decision_id, 0) + 1
+
+        elif kind == "normative-spec-write":
+            decision_id = event.get("decision_id", "")
+            target = event.get("target", "")
+            change = event.get("change", "")
+            answer_source = event.get("answer_source", "")
+            selected_outcome = event.get("selected_outcome", "")
+            if not source_map_complete:
+                errors.append("decision authority trace: complete source map must precede a normative spec write")
+            if target not in sources or sources.get(target, {}).get("editable") != "yes":
+                errors.append("decision authority trace: normative spec write target must be a mapped editable source")
+            if not change:
+                errors.append("decision authority trace: normative spec write requires a stable change description")
+            authority_matches = (
+                bool(answer_source)
+                and bool(selected_outcome)
+                and answer_source == decision_sources.get(decision_id)
+                and selected_outcome == selected_outcomes.get(decision_id)
+            )
+            if not authority_matches:
+                errors.append(
+                    "decision authority trace: normative spec write requires the current answer source and selected outcome"
+                )
+            basis = event.get("basis", "")
+            preserves_locked = (
+                basis == "locked-decision"
+                and decision_id in locked_decisions
+                and decision_id not in reopened_decisions
+                and authority_matches
+                and event.get("changes_decision", "false") != "true"
+            )
+            follows_user_answer = (
+                basis == "user-decision"
+                and decision_id in locked_decisions
+                and decision_id not in reopened_decisions
+                and authority_matches
+                and user_decision_index.get(decision_id, len(events)) < index
+            )
+            if not preserves_locked and not follows_user_answer:
+                errors.append(
+                    f"decision authority trace: user decision must precede normative spec write for {decision_id or 'unknown'}"
+                )
+            write_key = (decision_id, target, change)
+            if any(write[:3] == write_key for write in normative_writes):
+                errors.append("decision authority trace: duplicate normative write mapping")
+            normative_writes.append(
+                (
+                    *write_key,
+                    index,
+                    answer_source,
+                    selected_outcome,
+                    decision_versions.get(decision_id, 0),
+                )
+            )
+            if preserves_locked or follows_user_answer:
+                decision_target_history.setdefault(decision_id, set()).add((target, change))
+
+        elif kind == "decision-application":
+            required = {
+                "decision_id",
+                "target",
+                "change",
+                "answer_source",
+                "selected_outcome",
+                "changed_sections",
+                "changed_criteria",
+                "preserved_invariants",
+            }
+            missing = sorted(field for field in required if not event.get(field))
+            if missing:
+                errors.append(f"decision authority trace: decision application missing fields {missing}")
+            key = (event.get("decision_id", ""), event.get("target", ""), event.get("change", ""))
+            matching_writes = [write for write in normative_writes if write[:3] == key and write[3] < index]
+            if not matching_writes:
+                errors.append("decision authority trace: decision application must map an earlier normative write")
+            decision_id = event.get("decision_id", "")
+            matching_write = matching_writes[-1] if matching_writes else None
+            expected_answer_source = matching_write[4] if matching_write else decision_sources.get(decision_id)
+            expected_outcome = matching_write[5] if matching_write else selected_outcomes.get(decision_id)
+            expected_version = matching_write[6] if matching_write else -1
+            if event.get("answer_source") != expected_answer_source:
+                errors.append("decision authority trace: decision application answer source does not match provenance")
+            if event.get("selected_outcome") != expected_outcome:
+                errors.append("decision authority trace: decision application outcome does not match the decision")
+            if matching_write and expected_version != decision_versions.get(decision_id):
+                errors.append("decision authority trace: decision application maps a stale decision version")
+            if key in applications:
+                errors.append("decision authority trace: duplicate decision application mapping")
+            applications[key] = index
+            application_versions[key] = expected_version
+            if (
+                matching_write
+                and expected_version == decision_versions.get(decision_id)
+                and event.get("answer_source") == expected_answer_source
+                and event.get("selected_outcome") == expected_outcome
+            ):
+                required_targets = reapplications_required.get(decision_id)
+                if required_targets is not None:
+                    required_targets.discard((event.get("target", ""), event.get("change", "")))
+                    if not required_targets:
+                        reapplications_required.pop(decision_id, None)
+
+        elif kind == "decision-noop-application":
+            required = {
+                "decision_id",
+                "answer_source",
+                "selected_outcome",
+                "confirmed_no_change",
+                "affected_targets",
+                "reason",
+            }
+            missing = sorted(field for field in required if not event.get(field))
+            if missing:
+                errors.append(f"decision authority trace: no-op application missing fields {missing}")
+            decision_id = event.get("decision_id", "")
+            raw_targets = event.get("affected_targets", "")
+            covered_targets: set[tuple[str, str]] = set()
+            malformed_targets = False
+            for value in raw_targets.split("|"):
+                if "::" not in value:
+                    malformed_targets = True
+                    continue
+                target, change = (part.strip() for part in value.split("::", 1))
+                if not target or not change:
+                    malformed_targets = True
+                    continue
+                covered_targets.add((target, change))
+            required_targets = reapplications_required.get(decision_id, set())
+            repeats_previous_outcome = (
+                bool(pre_reopen_outcomes.get(decision_id))
+                and event.get("selected_outcome") == pre_reopen_outcomes.get(decision_id)
+            )
+            covers_every_target = bool(required_targets) and covered_targets == required_targets and not malformed_targets
+            if not repeats_previous_outcome:
+                errors.append("decision authority trace: no-op application must repeat the pre-reopen outcome")
+            if not covers_every_target:
+                errors.append(
+                    "decision authority trace: no-op application must cover every pre-reopen target/change"
+                )
+            valid_noop = (
+                decision_id in reapplications_required
+                and decision_id in locked_decisions
+                and decision_id not in reopened_decisions
+                and event.get("confirmed_no_change") == "true"
+                and event.get("answer_source") == decision_sources.get(decision_id)
+                and event.get("selected_outcome") == selected_outcomes.get(decision_id)
+                and user_decision_index.get(decision_id, len(events)) < index
+                and not missing
+                and repeats_previous_outcome
+                and covers_every_target
+            )
+            if not valid_noop:
+                errors.append(
+                    "decision authority trace: no-op application requires a matching post-reopen user confirmation"
+                )
+            key = (decision_id, "<no-op>", event.get("affected_targets", ""))
+            if key in applications:
+                errors.append("decision authority trace: duplicate decision application mapping")
+            applications[key] = index
+            application_versions[key] = decision_versions.get(decision_id, -1)
+            if valid_noop:
+                reapplications_required.pop(decision_id, None)
+
+        elif kind == "decision-application-receipt":
+            required = {"application_count", "preserved_decisions", "remaining_open"}
+            missing = sorted(field for field in required if not event.get(field))
+            if missing:
+                errors.append(f"decision authority trace: application receipt missing fields {missing}")
+            try:
+                application_count = int(event.get("application_count", ""))
+            except ValueError:
+                application_count = -1
+                errors.append("decision authority trace: application receipt count must be an integer")
+            if application_count != len(applications):
+                errors.append("decision authority trace: application receipt count does not match mappings")
+            last_application_receipt = index
+            final_receipt = event
+
+        elif kind == "ready":
+            if index != len(events) - 1:
+                errors.append("decision authority trace: Ready must be the terminal authority event")
+            if not source_map_complete:
+                errors.append("decision authority trace: Ready requires a complete specification source map")
+            if unreconciled_sources:
+                errors.append(
+                    f"decision authority trace: Ready has unreconciled specification sources {sorted(unreconciled_sources)}"
+                )
+            if event.get("open_decisions") != "none":
+                errors.append("decision authority trace: Ready requires no open user decisions")
+            unresolved = sorted(product_decisions - locked_decisions)
+            if unresolved:
+                errors.append(f"decision authority trace: Ready has unresolved product decisions {unresolved}")
+            unanswered_packets = sorted(
+                decision_id for decision_id in unresolved if decision_id not in presented_questions
+            )
+            if unanswered_packets:
+                errors.append(f"decision authority trace: product decisions lack decision packets {unanswered_packets}")
+            unresolved_technical = sorted(technical_gap_ids - technical_decision_ids)
+            if unresolved_technical:
+                errors.append(f"decision authority trace: Ready has unresolved technical decisions {unresolved_technical}")
+            if reapplications_required:
+                remaining_reapplications = sorted(
+                    (decision_id, target, change)
+                    for decision_id, targets in reapplications_required.items()
+                    for target, change in targets
+                )
+                errors.append(
+                    "decision authority trace: reopened decision requires current normative reapplication "
+                    f"{remaining_reapplications}"
+                )
+            write_keys = {write[:3] for write in normative_writes}
+            missing_applications = sorted(write_keys - set(applications))
+            if missing_applications:
+                errors.append(
+                    f"decision authority trace: application receipt omits normative writes {missing_applications}"
+                )
+            stale_applications = sorted(
+                key
+                for key, version in application_versions.items()
+                if version != decision_versions.get(key[0], -1)
+            )
+            if stale_applications:
+                errors.append(
+                    f"decision authority trace: Ready has applications from stale decision versions {stale_applications}"
+                )
+            last_write_index = max((write[3] for write in normative_writes), default=-1)
+            last_application_index = max(applications.values(), default=-1)
+            if (normative_writes or applications) and (
+                last_application_receipt is None
+                or last_application_receipt < last_write_index
+                or last_application_receipt < last_application_index
+            ):
+                errors.append("decision authority trace: Ready requires an application receipt after normative writes")
+            if final_receipt is not None and final_receipt.get("remaining_open") != "none":
+                errors.append("decision authority trace: application receipt still has open decisions")
+
+    return errors
+
+
 def validate_implementation_dispatch_trace(events: list[dict[str, str]]) -> list[str]:
     """Validate that the risk-matched exact writer owns the first code edit."""
 
@@ -523,15 +1171,67 @@ def validate_blindspot_contract(
     if "[the specification readiness protocol](references/blindspot-protocol.md)" not in audit:
         errors.append("SKILL.md blind-spot section: missing readiness protocol link")
 
+    selection = markdown_section(skill_text, "## Select the specification safely")
+    for token in [
+        "specification source map",
+        "every in-scope normative file",
+        "every outgoing normative edge",
+        "every source is reachable from the root",
+        "Do not assume that the root file overrides",
+    ]:
+        if token not in selection:
+            errors.append(f"SKILL.md specification source map: missing {token}")
+
+    authority = markdown_section(skill_text, "## Protect user decision authority")
+    for token in [
+        "The user owns any choice",
+        "product-impact boundary",
+        "T-###",
+        "mixed or uncertain",
+        "Never silently prefer",
+        "Initial source mapping cannot self-declare a user deferral",
+    ]:
+        if token not in authority:
+            errors.append(f"SKILL.md decision authority: missing {token}")
+
+    interview = markdown_section(skill_text, "## Ask product questions before normative edits")
+    for token in [
+        "Do not change normative specification content",
+        "decision application receipt",
+        "cannot replace a locked `D-###`",
+        "reopened decision invalidates the prior write/application authorization",
+        "every previously affected target/change tuple",
+        "keep the status at `Questions`",
+    ]:
+        if token not in interview:
+            errors.append(f"SKILL.md normative edit gate: missing {token}")
+
     for heading, label in [
+        ("## Specification source map", "specification source map"),
         ("## Coverage model", "coverage model"),
+        ("## Decision authority and conflict protocol", "decision authority"),
         ("## Decision memory and deduplication", "decision memory"),
+        ("## Decision application gate", "decision application gate"),
         ("## Adaptive critic loop", "adaptive critic loop"),
         ("## Critic result", "critic result"),
         ("## Ready gate", "Ready gate"),
     ]:
         if not markdown_section(protocol_text, heading):
             errors.append(f"blindspot-protocol.md: missing {label} section")
+
+    source_map = markdown_section(protocol_text, "## Specification source map")
+    for token in [
+        "every in-scope document linked",
+        "every outgoing normative link",
+        "every mapped source is reachable from the selected root",
+        "decision provenance must explicitly list",
+        "cannot self-declare `deferred`",
+        "decision record",
+        "Do not infer that the root silently overrides",
+        "route the conflict through the decision authority protocol",
+    ]:
+        if token not in source_map:
+            errors.append(f"blindspot-protocol.md source map: missing {token}")
 
     coverage = markdown_section(protocol_text, "## Coverage model")
     for token in ["B-###", "gap", "covered", "not applicable", "repository fact", "technical decision", "product decision", "new authority"]:
@@ -547,10 +1247,44 @@ def validate_blindspot_contract(
         "reopened",
         "new evidence",
         "do not ask it again",
+        "A second user answer cannot overwrite the locked outcome",
         "conditional child decision",
     ]:
         if token not in decision_memory:
             errors.append(f"blindspot-protocol.md decision memory: missing {token}")
+
+    decision_authority = markdown_section(protocol_text, "## Decision authority and conflict protocol")
+    for token in [
+        "bridge between user intent and implementation",
+        "product-impact test",
+        "When classification is mixed or uncertain",
+        "T-###",
+        "Never silently choose",
+        "structured reconciliation receipt",
+        "record type, governed target, source revision, and positive line number",
+        "Free-text evidence",
+        "wait for the user's answer",
+    ]:
+        if token not in decision_authority:
+            errors.append(f"blindspot-protocol.md decision authority: missing {token}")
+
+    application_gate = markdown_section(protocol_text, "## Decision application gate")
+    for token in [
+        "Do not change that dependent normative specification content",
+        "An answered independent ID may be applied immediately",
+        "decision application receipt",
+        "one structured mapping for every normative decision/target/change tuple",
+        "exact answer source",
+        "Every normative write captures the authorizing decision version",
+        "invalidates every prior normative write/application authorization",
+        "complete set of affected `(target, change)` tuples",
+        "repeats the exact pre-reopen outcome",
+        "Every Build-made normative change",
+        "cannot authorize a normative product change",
+        "keep the specification in `Questions`",
+    ]:
+        if token not in application_gate:
+            errors.append(f"blindspot-protocol.md decision application gate: missing {token}")
 
     critic_loop = markdown_section(protocol_text, "## Adaptive critic loop")
     for token in [
@@ -579,6 +1313,7 @@ def validate_blindspot_contract(
     ready_gate = markdown_section(protocol_text, "## Ready gate")
     for token in [
         "coverage ledger",
+        "specification source map",
         "gap",
         "blocking product decisions",
         "material contradiction",
@@ -587,6 +1322,10 @@ def validate_blindspot_contract(
         "acceptance criteria",
         "current specification revision",
         "COVERED",
+        "decision application receipt",
+        "Build-made normative change",
+        "T-###",
+        "current decision version",
     ]:
         if token not in ready_gate:
             errors.append(f"blindspot-protocol.md Ready gate: missing {token}")
@@ -595,6 +1334,17 @@ def validate_blindspot_contract(
     ledger_header = "ID | Concern | Status | Disposition | Evidence or decision | Next action"
     if ledger_header not in risks or "B-###" not in risks or "D-###" not in risks:
         errors.append("spec-template.md coverage ledger: missing durable IDs or required columns")
+    if "### Decision application receipt" not in risks or "Changed files/sections/ACs/milestones" not in risks:
+        errors.append("spec-template.md: missing decision application receipt")
+
+    current_state = markdown_section(template_text, "## 2. Current state and evidence")
+    if "### Specification source map" not in current_state or "Normative scope and decision IDs" not in current_state:
+        errors.append("spec-template.md: missing specification source map")
+
+    decisions = markdown_section(template_text, "## 3. Decision memory")
+    for token in ["### User-owned product decisions", "### Technical decision ledger", "T-001", "### Pending proposals"]:
+        if token not in decisions:
+            errors.append(f"spec-template.md decision authority: missing {token}")
 
     critic_result = markdown_section(protocol_text, "## Critic result")
     for token in [
@@ -613,14 +1363,36 @@ def validate_blindspot_contract(
     if not readme_blindspots:
         errors.append("README.md: missing blind-spot critique section")
     else:
-        for token in ["stable `D-###` IDs", "A resolved ID is a locked constraint", "Reopening is allowed only", "same critic perspective/tier", "not a claim of literal omniscience"]:
+        for token in [
+            "Build is a bridge between user intent and code",
+            "product-impact test",
+            "stable `D-###` IDs",
+            "stable `T-###` IDs",
+            "normative specification",
+            "decision application receipt",
+            "A resolved ID is a locked constraint",
+            "Reopening is allowed only",
+            "same critic perspective/tier",
+            "not a claim of literal omniscience",
+        ]:
             if token not in readme_blindspots:
                 errors.append(f"README.md blind-spot critique: missing {token}")
     readme_ru_blindspots = markdown_section(readme_ru, "## Как работает критика blind spots")
     if not readme_ru_blindspots:
         errors.append("README.ru.md: missing blind-spot critique section")
     else:
-        for token in ["стабильные IDs `D-###`", "Решённый ID становится зафиксированным ограничением", "Переоткрытие допустимо только", "одна perspective/tier не повторяется", "не заявление о буквальном всеведении"]:
+        for token in [
+            "Build — мост между намерением пользователя и кодом",
+            "Product-impact test",
+            "стабильные IDs `D-###`",
+            "стабильные IDs `T-###`",
+            "нормативную спецификацию",
+            "decision application receipt",
+            "Решённый ID становится зафиксированным ограничением",
+            "Переоткрытие допустимо только",
+            "одна perspective/tier не повторяется",
+            "не заявление о буквальном всеведении",
+        ]:
             if token not in readme_ru_blindspots:
                 errors.append(f"README.ru.md blind-spot critique: missing {token}")
     return errors

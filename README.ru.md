@@ -2,7 +2,7 @@
 
 [English version](README.md)
 
-OpenBuild — workflow для Codex, который превращает идею простыми словами или существующее ТЗ в проверенную по репозиторию спецификацию и, когда это запрошено, в протестированную реализацию с автоматическим выбором этапа, итеративной критикой blind spots, separate-usage-pool-first поиском кода, risk-matched-model coding, ограниченными writers, evidence-gated minimality, TDD-first milestones и прогрессивным review.
+OpenBuild — workflow для Codex, который превращает идею простыми словами или существующее ТЗ в проверенную по репозиторию спецификацию и, когда это запрошено, в протестированную реализацию с решениями продукта под контролем пользователя, автоматическим выбором этапа, итеративной критикой blind spots, separate-usage-pool-first поиском кода, risk-matched-model coding, ограниченными writers, evidence-gated minimality, TDD-first milestones и прогрессивным review.
 
 В plugin входит один явно вызываемый skill **Build** с шестью режимами:
 
@@ -17,7 +17,9 @@ OpenBuild самодостаточен. Ему не нужны отдельны�
 
 > OpenBuild `1.0.4` — текущий релиз. Immutable release tag — `v1.0.4`; закрепляйте его для воспроизводимой установки или осознанно используйте `main` для ещё не выпущенных изменений.
 
-Plugin manifest, immutable release tag и GitHub Release синхронизированы на версии `1.0.4`.
+Manifest в опубликованном artifact, immutable release tag и GitHub Release синхронизированы на версии `1.0.4`.
+
+Текущая development-версия в `main` — `1.1.0`; в ней добавлены decision-authority gates, и она не является immutable-релизом `v1.0.4`.
 
 ## Что вошло в 1.0.4
 
@@ -40,11 +42,16 @@ flowchart LR
     F --> C
     F --> D
     F --> E
-    D --> G["Покрытие blind spots и решения"]
-    G --> H{"Ready gate"}
-    H -->|есть gaps| D
+    D --> G["Карта источников ТЗ + blind spots"]
+    E --> G
+    G --> U{"Есть материальный продуктовый выбор?"}
+    U -->|да| P["Варианты + последствия + риски + рекомендация"]
+    P --> V["Решение пользователя"]
+    V --> R["Перестройка product map + application receipt"]
+    R --> H{"Ready gate"}
+    U -->|нет| H
+    H -->|есть gaps| G
     H -->|покрыто| T{"Цель workflow"}
-    E --> H
     T -->|только спецификация| Q["Готовая спецификация"]
     T -->|реализация| I["Реализация моделью по риску"]
     I --> J["Focused и risk-based validation"]
@@ -57,8 +64,8 @@ flowchart LR
     classDef gate fill:#422006,color:#fffbeb,stroke:#f59e0b,stroke-width:2px;
     classDef done fill:#052e16,color:#ecfdf5,stroke:#34d399,stroke-width:2px;
     class A,B input;
-    class C,D,E,F,G,I,J,K phase;
-    class H,T gate;
+    class C,D,E,F,G,P,V,R,I,J,K phase;
+    class U,H,T gate;
     class Q,L done;
 ```
 
@@ -175,18 +182,22 @@ Build:
 
 1. изучит текущий репозиторий и применимые `AGENTS.md`;
 2. зафиксирует Git- или artifact-baseline;
-3. по возможности делегирует широкий поиск кода ограниченным read-only discovery workers, затем проверит их evidence map;
-4. создаст стабильные IDs решений и evidence-backed coverage ledger для blind spots;
-5. задаст только оставшиеся продуктовые вопросы с короткими ответами вида `1а 2б`;
-6. запустит свежих critics подходящей глубины, дедуплицирует findings и повторит цикл только для новых gaps;
-7. создаст `BUILD.md` на языке пользователя и остановится до реализации, когда текущая revision полностью покрыта.
+3. составит карту root-спецификации и всех связанных нормативных ТЗ до синтеза, затем по возможности делегирует широкий поиск кода ограниченным read-only discovery workers;
+4. создаст стабильные IDs пользовательских решений, outcome-neutral технических решений и evidence-backed coverage ledger для blind spots;
+5. представит каждый оставшийся продуктовый выбор с вариантами, последствиями, рисками и рекомендацией, используя короткие ответы вида `1а 2б`;
+6. дождётся пользователя, затем перестроит затронутую product map и запишет, где применено каждое выбранное решение;
+7. запустит свежих critics подходящей глубины, дедуплицирует findings и повторит цикл только для новых gaps;
+8. создаст `BUILD.md` на языке пользователя и остановится до реализации, когда текущая revision полностью покрыта.
 
 Пример вопроса:
 
 ```text
 1. [D-001] Кто может сохранять список желаний?
+   Контекст: в магазине есть аккаунты, но поведение для гостей не определено.
    а) Только авторизованные пользователи; список привязан к аккаунту.
    б) Также гости; локальный список может объединиться после входа.
+   Риски: гостевой режим добавляет решения по local persistence, merge, privacy и recovery.
+   Затронутая product map: onboarding, хранение wishlist, privacy, recovery и acceptance criteria.
    Рекомендация: 1а — в первой версии не потребуется отдельная политика merge.
 
 Можно ответить: 1а
@@ -204,7 +215,7 @@ $build refine BUILD.md
 $build refine docs/checkout-spec.md
 ```
 
-Build сверит документ с текущим репозиторием, сохранит ручные правки и стабильные решения, создаст coverage ledger для legacy-документа и будет запускать свежих critics, пока каждая применимая область не станет covered или обоснованно not applicable. Решённый вопрос не задаётся повторно, пока проверенное новое evidence не переоткроет тот же ID с сохранением истории. Если подходят несколько файлов или выбранный документ относится к другой задаче, Build спросит до изменений.
+Build сначала составит карту выбранного root и всех связанных нормативных ТЗ, затем сверит этот граф с текущим репозиторием. Он сохранит ручные правки и стабильные решения независимо от места хранения, создаст coverage ledger для legacy-документа и будет запускать свежих critics, пока каждая применимая область не станет covered или обоснованно not applicable. Решённый вопрос не задаётся повторно, пока проверенное новое evidence не переоткроет тот же ID с сохранением истории. Конфликт равноправных документов становится вопросом пользователю, а не молчаливым приоритетом root-файла. Если подходят несколько файлов или выбранный документ относится к другой задаче, Build спросит до изменений.
 
 ### 3. Выполнить спецификацию
 
@@ -263,7 +274,7 @@ Legacy-спецификация со статусом `Ready` не приним�
 
 Перед любым `rg`, `rg --files`, поиском файла/symbol, repository grep, трассировкой зависимостей, поиском routes/tests/configs/schemas или log scan главный агент составляет короткий search plan и запускает exact custom agent `openbuild-search-separate`. Direct per-spawn model selector имеет приоритет, когда runtime его предоставляет; иначе Build выбирает custom agent по точному имени. Generic worker, описательный task name или простое упоминание profile не считаются выбором модели. Workers возвращают только evidence map: `path:line`, symbol или route, подтверждённый факт, его значение, negative results и confidence.
 
-Главный агент остаётся оркестратором: убирает дубли, точечно перечитывает уже известные критические файлы и строки, принимает продуктовые и архитектурные решения, владеет durable edits спецификации и версии, валидирует, управляет Git и отвечает пользователю. Новый grep или lookup снова идёт search worker. Search workers не редактируют код и не выбирают архитектуру; implementation edits используют отдельную risk-matched single-writer lease ниже.
+Главный агент остаётся оркестратором: убирает дубли, точечно перечитывает уже известные критические файлы и строки, превращает материальные продуктовые и архитектурные развилки в decision packets, фиксирует выбор пользователя, автономно принимает только outcome-neutral технические решения, владеет разрешёнными post-decision edits спецификации и версии, валидирует, управляет Git и отвечает пользователю. Новый grep или lookup снова идёт search worker. Search workers не редактируют код и не выбирают архитектуру; implementation edits используют отдельную risk-matched single-writer lease ниже.
 
 ## Как работает usage-aware routing моделей
 
@@ -343,11 +354,15 @@ Codex официально поддерживает per-agent `model`, `model_re
 
 ## Как работает критика blind spots
 
-До `Ready` Build присваивает каждой применимой области стабильный coverage ID и статус: `gap`, `covered` или `not applicable` с evidence. Ledger покрывает outcome и non-goals, actors и permissions, основные и ошибочные flows, accessibility и localization, ownership и contracts, данные и migrations, security и privacy, performance и concurrency, integrations, observability, rollout/rollback и acceptance/testability. Специфичные для задачи области добавляются отдельно, а не прячутся в общей строке.
+Build — мост между намерением пользователя и кодом. До `Ready` он составляет карту root и всех связанных нормативных ТЗ, затем присваивает каждой применимой области стабильный coverage ID и статус: `gap`, `covered` или `not applicable` с evidence. Ledger покрывает outcome и non-goals, actors и permissions, основные и ошибочные flows, accessibility и localization, ownership и contracts, данные и migrations, security и privacy, performance и concurrency, integrations, observability, rollout/rollback и acceptance/testability. Специфичные для задачи области добавляются отдельно, а не прячутся в общей строке.
 
-Продуктовые решения получают стабильные IDs `D-###`. Решённый ID становится зафиксированным ограничением, даже если следующий critic переформулирует тот же вопрос. Переоткрытие допустимо только когда проверенное новое evidence репозитория, failing signal, upstream-ограничение или явное изменение scope материально ломает выбранный outcome; Build сохраняет тот же ID и объясняет, что изменилось.
+Product-impact test смотрит на последствия: решение принадлежит пользователю, если оно меняет behavior, UX, eligibility/audience, platform или geography, permissions, privacy/data lifecycle, monetization/rewards, moderation/legal gates, compatibility, cost, rollout, acceptance criteria или scope. Такие продуктовые решения получают стабильные IDs `D-###`. Outcome-neutral механизмы реализации получают стабильные IDs `T-###` только когда сохраняют каждый зафиксированный выбор пользователя, requirement, criterion, invariant и observable outcome. Смешанные или сомнительные решения принадлежат пользователю.
 
-Для каждой нетривиальной revision свежий read-only critic получает актуальную спецификацию, decision memory, coverage ledger и evidence репозитория. Он возвращает только новые gaps, evidence-backed reopen requests и дубли со ссылками на существующие IDs. Root проверяет и дедуплицирует findings, самостоятельно закрывает repository и technical gaps и задаёт пользователю до пяти оставшихся продуктовых решений за раунд. Цикл продолжается на новых revisions, пока свежий closure pass подходящей глубины не вернёт `COVERED`; одна perspective/tier не повторяется на неизменённой revision.
+Решённый ID становится зафиксированным ограничением, даже если следующий critic переформулирует тот же вопрос. Переоткрытие допустимо только когда проверенное новое evidence репозитория, failing signal, upstream-ограничение или явное изменение scope материально ломает выбранный outcome; Build сохраняет тот же ID и объясняет, что изменилось. Legal, platform, repository или security evidence может исключить невозможный вариант, но Build всё равно объясняет жизнеспособные варианты, последствия, риски и рекомендацию и ждёт пользователя.
+
+Пока `D-###` открыт, Build может дополнять evidence, coverage, pending proposals и вопросы, но не переписывает нормативную спецификацию, acceptance criteria, roadmap, milestones или связанные документы вокруг этой развилки. После ответа Build применяет только выбранные IDs во всех зависимых файлах и записывает decision application receipt с изменёнными разделами/критериями, сохранёнными решениями и оставшимися открытыми IDs. Новые product-impacting findings запускают новый interview round, а не закрываются как technical cleanup.
+
+Для каждой нетривиальной revision свежий read-only critic получает актуальную спецификацию, decision memory, coverage ledger и evidence репозитория. Он возвращает только новые gaps, evidence-backed reopen requests и дубли со ссылками на существующие IDs. Root проверяет и дедуплицирует findings, самостоятельно закрывает repository facts и только outcome-neutral technical gaps и задаёт пользователю до пяти оставшихся продуктовых решений за раунд. Цикл продолжается на новых revisions, пока свежий closure pass подходящей глубины не вернёт `COVERED`; одна perspective/tier не повторяется на неизменённой revision.
 
 Глубина зависит от риска: low-задача получает structured self-audit и critic, если она нетривиальна; medium — свежего balanced critic и closure после ответов; high — complementary product/UX и architecture/data/security critics плюс strong closure; critical — adversarial perspectives, strongest available closure и необходимые authority checkpoints. Если critics исчерпаны, а gap остался, спецификация не получает `Ready`. Это evidence-backed покрытие определённых и task-specific областей, а не заявление о буквальном всеведении.
 
@@ -434,7 +449,7 @@ Score — только вторичный сигнал эскалации. Evide
 - Milestone-коммиты создаются, когда Git доступен, изменения можно изолировать и применимые инструкции не запрещают commit.
 - Push всегда требует явного разрешения.
 - Настройка моделей требует отдельного preview и разрешения.
-- Discovery workers, specification critics и reviewers остаются read-only. Bounded implementation worker может менять только один leased набор файлов; writers не пересекаются, а root владеет решениями, edits спецификации/версии, handoff validation, Git и итоговым ответом.
+- Discovery workers, specification critics и reviewers остаются read-only. Bounded implementation worker может менять только один leased набор файлов; writers не пересекаются. Материальный продуктовый outcome выбирает пользователь; root владеет interview, рекомендациями, outcome-neutral техническими решениями, разрешёнными edits спецификации/версии, handoff validation, Git и итоговым ответом.
 - Нет telemetry, daemon, `curl | shell`, скрытого auto-update или фонового сетевого сервиса.
 - Соблюдаются `AGENTS.md`, sandbox, approvals, validation и security-правила репозитория.
 
