@@ -15,9 +15,16 @@ It packages one explicit skill, **Build**, with six modes:
 
 OpenBuild is self-contained. It does not require separate discovery, TDD, or review skills, telemetry, a hosted service, or background network access.
 
-> OpenBuild `1.1.1` is the current release. The immutable release tag is `v1.1.1`; pin it for reproducible installation or use `main` intentionally for unreleased changes.
+> OpenBuild `2.0.0` is the current development version on `main`. The latest immutable release is `v1.1.1`; the `v2.0.0` tag and GitHub Release have not been published yet.
 
-The manifest packaged in the released artifact, immutable release tag, and GitHub Release are synchronized at `1.1.1`.
+The source manifest is `2.0.0`. Published `v1.1.1` artifacts remain immutable until a separately authorized `v2.0.0` release is created.
+
+## What changes in 2.0.0
+
+- all nine OpenBuild custom-agent IDs use the runtime-safe underscore grammar;
+- `agent_name` is the only profile selector, while `task_name` remains an independent task label;
+- `$build setup-models` provides a hash-bound, permission-gated, resumable migration from legacy hyphenated profiles without overwriting or deleting them;
+- deterministic search, implementation, review, and migration traces reject task-label substitution, stale hashes, divergent-target writes, and missing per-entry authority.
 
 ## What shipped in 1.1.1
 
@@ -81,7 +88,7 @@ flowchart LR
 - Git, when Build is expected to create milestone commits or review a task diff.
 - Windows unit, package, syntax, diff, and clean-artifact checks were completed for `v1.1.1`. Codex CLI install/runtime smoke was unavailable in the release environment; macOS and Linux remain unverified.
 
-OpenBuild `1.1.1` supports Codex only. It does not claim compatibility with Claude Code, Cursor, Gemini CLI, or other coding agents.
+OpenBuild `2.0.0` and the latest published `1.1.1` release support Codex only. They do not claim compatibility with Claude Code, Cursor, Gemini CLI, or other coding agents.
 
 ## Install as a plugin — recommended
 
@@ -91,6 +98,15 @@ The plugin is the primary distribution channel. It gives you versioned marketpla
 
 ```bash
 codex plugin marketplace add GeorgVahi/OpenBuild --ref v1.1.1
+codex plugin add openbuild@openbuild
+```
+
+### Planned `v2.0.0` pin
+
+Use this only after the `v2.0.0` tag is published; until then install `main` intentionally for development testing.
+
+```bash
+codex plugin marketplace add GeorgVahi/OpenBuild --ref v2.0.0
 codex plugin add openbuild@openbuild
 ```
 
@@ -146,6 +162,8 @@ Standalone installation gives you the shorter `$build` invocation. Ask the prein
 
 ```text
 Use $skill-installer to install the skill from https://github.com/GeorgVahi/OpenBuild/tree/v1.1.1/plugins/openbuild/skills/build
+
+After the 2.0 release is published, its pinned standalone path will be https://github.com/GeorgVahi/OpenBuild/tree/v2.0.0/plugins/openbuild/skills/build
 ```
 
 To test unreleased changes, use the same path with `/tree/main/`; keep `v1.1.1` for a reproducible tagged installation.
@@ -251,7 +269,7 @@ Explicit `new`, `refine`, `run`, or `full` remains authoritative. `auto` and a b
 $build setup-models
 ```
 
-Build first checks the capabilities exposed by the current Codex runtime. If native selection already provides every route, no files are needed. Otherwise it may propose read-only `openbuild-search-separate` and `openbuild-search-fallback`; write-capable `openbuild-implementation-fast`, `openbuild-implementation-balanced`, and `openbuild-implementation-strongest`; and read-only `openbuild-review-fast`, `balanced`, `strong`, and `strongest` profiles. Existing `openbuild-discovery` remains a legacy route and is treated as separate-pool search only when its mapping is proven.
+Build first checks the capabilities exposed by the current Codex runtime. If native selection already provides every route, no files are needed. Otherwise it may propose read-only `openbuild_search_separate` and `openbuild_search_fallback`; write-capable `openbuild_implementation_fast`, `openbuild_implementation_balanced`, and `openbuild_implementation_strongest`; and read-only `openbuild_review_fast`, `balanced`, `strong`, and `strongest` profiles. Existing `openbuild-discovery` remains a legacy route and is treated as separate-pool search only when its mapping is proven. Hyphenated OpenBuild profile names are legacy identifiers; setup detects them and proposes their underscore equivalents instead of dispatching them.
 
 Before writing anything, Build must show:
 
@@ -262,6 +280,8 @@ Before writing anything, Build must show:
 
 It writes only after separate permission, shows every `workspace-write` implementation profile separately, never overwrites an existing profile, validates TOML, and requires a reload or new session before use. Configured profile evidence is recorded separately from observed runtime metadata. Declining setup leaves search, specification, and read-only review operational with honest fallbacks; implementation proceeds only when the selected low, medium, high, or critical risk tier is satisfied.
 
+Legacy migration is preview-first and resumable. Build shows the complete supported mapping and detected inventory, an immutable canonical-SHA `plan_id`, a content-bound `entry_id` per detected profile, scope-relative paths, root fingerprint, SHA-256 source/target/rendered-canonical values, exact TOML diffs, and one action per entry: `create-if-absent`, `already-migrated`, or `config-conflict`. Permission is stored per entry with the exact precondition hashes and action; divergent targets are never overwritten, hash drift reopens only the affected entry, and each result receipt records observed preconditions plus the result hash or `not-written`. Legacy cleanup is a later, separately approved plan after reload and exact-selection smoke.
+
 ## How automatic phase routing works
 
 Build records two separate choices: the workflow target (`Ready` for specification-only work or `Complete` for implementation) and the first incomplete phase. Explicit modes and paths win. In `auto`, artifact evidence selects discovery, reconciliation/interview, blind-spot critique, implementation/resume, or verification; only genuine ambiguity between materially different targets or specification files becomes a routing question.
@@ -270,7 +290,7 @@ A legacy specification marked `Ready` is not trusted blindly. If it lacks the cu
 
 ## How automatic code discovery works
 
-Before any `rg`, `rg --files`, file/symbol lookup, repository grep, dependency trace, route/test/config/schema search, or log scan, the root agent creates a compact search plan and dispatches the exact `openbuild-search-separate` custom agent. A direct per-spawn model selector wins when the runtime exposes one; otherwise Build selects the custom agent by exact name. A generic worker, descriptive task name, or profile mention is not accepted as model selection. Workers return only an evidence map with `path:line`, symbol or route, a confirmed fact, relevance, negative results, and confidence.
+Before any `rg`, `rg --files`, file/symbol lookup, repository grep, dependency trace, route/test/config/schema search, or log scan, the root agent creates a compact search plan and dispatches the exact `openbuild_search_separate` custom agent. A direct per-spawn model selector wins when the runtime exposes one; otherwise Build passes the canonical ID through `agent_name` and an independent descriptive label through `task_name`. A generic worker, descriptive task name, or profile mention is not accepted as model selection. Workers return only an evidence map with `path:line`, symbol or route, a confirmed fact, relevance, negative results, and confidence.
 
 The root agent remains the orchestrator: it deduplicates evidence, verifies already-known critical files and lines with targeted reads, turns material product and architecture choices into decision packets, records the user's selections, makes only outcome-neutral technical decisions autonomously, owns post-decision specification/version edits, validates, owns Git, and writes the final answer. A new grep or lookup returns to the search worker. Search workers never edit or decide architecture; implementation edits use the separate risk-matched single-writer lease described below.
 
@@ -282,7 +302,7 @@ flowchart TB
 
     subgraph SEARCH["Search · read-only"]
         S0["Compact search plan"] --> S1{"Exact separate-agent dispatch?"}
-        S1 -->|selected| S2["openbuild-search-separate"]
+        S1 -->|selected| S2["openbuild_search_separate"]
         S1 -->|recorded failure| S5["Failure receipt + circuit breaker"]
         S5 --> S3["Efficient main-pool fallback"]
         S3 --> S4["Explorer → generic worker → root"]
@@ -291,9 +311,9 @@ flowchart TB
 
     subgraph WRITE["Implementation · exactly one writer"]
         W0{"Milestone risk"}
-        W0 -->|low| W1["openbuild-implementation-fast"]
-        W0 -->|medium| W2["openbuild-implementation-balanced"]
-        W0 -->|high / critical| W3["openbuild-implementation-strongest"]
+        W0 -->|low| W1["openbuild_implementation_fast"]
+        W0 -->|medium| W2["openbuild_implementation_balanced"]
+        W0 -->|high / critical| W3["openbuild_implementation_strongest"]
         W1 --> W4["Exact dispatch + routing receipt"]
         W2 --> W4
         W3 --> W4
@@ -327,10 +347,11 @@ flowchart TB
     class Z done;
 ```
 
-Search always attempts a confirmed separate-usage route first, normally the exact custom agent `openbuild-search-separate` or an equivalent native selector. The current Spark preview is an official example of a separately limited, near-instant text model when the account and runtime expose it, but OpenBuild never pins that example universally. Before the first lookup, Build records the requested agent, dispatch method, configured and observed model, pool, result, and fallback reason. It may fall back only after `profile-not-discoverable`, `selector-unavailable`, `model-unavailable`, `quota-exhausted`, `spawn-failed`, or a selected worker's timeout/unusable evidence. It then opens the current-run circuit breaker and tries `openbuild-search-fallback`, explorer, a generic read-only subagent, and finally minimum root search. It does not scrape the private usage dashboard, guess remaining quota, or retry a failed separate route for every grep.
+Search always attempts a confirmed separate-usage route first, normally the exact custom agent `openbuild_search_separate` or an equivalent native selector. The current Spark preview is an official example of a separately limited, near-instant text model when the account and runtime expose it, but OpenBuild never pins that example universally. Before the first lookup, Build records the requested agent, dispatch method, configured and observed model, pool, result, and fallback reason. It may fall back only after `profile-not-discoverable`, `selector-unavailable`, `model-unavailable`, `quota-exhausted`, `spawn-failed`, or a selected worker's timeout/unusable evidence. It then opens the current-run circuit breaker and tries `openbuild_search_fallback`, explorer, a generic read-only subagent, and finally minimum root search. It does not scrape the private usage dashboard, guess remaining quota, or retry a failed separate route for every grep.
 
 ```text
-search_agent: openbuild-search-separate
+search_agent: openbuild_search_separate
+task_name: <independent descriptive task label>
 dispatch_method: per-spawn-model | exact-custom-agent | unavailable
 configured_model: <profile/runtime value or unknown>
 observed_agent: <runtime value or unknown>
@@ -342,9 +363,9 @@ fallback_reason: none | <recorded allowed reason>
 
 This routing receipt is the primary acceptance signal. The account usage dashboard remains useful secondary evidence, but it does not replace an observable exact-agent dispatch.
 
-Code edits use an exact risk-matched writer while preserving the same Ready, TDD, minimality, single-writer, validation, and review gates at every tier. Before the first test or production edit, Build dispatches `openbuild-implementation-fast` for low risk, `openbuild-implementation-balanced` for medium risk, or `openbuild-implementation-strongest` for high/critical risk and emits an Implementation routing receipt. A generic worker, task label, profile mention, or stronger-than-requested agent does not count. Missing model metadata alone does not block an exact configured low or medium route, but Build records it as `unknown` and never claims an observed switch or saving. High and critical work still require their strong/strongest floor.
+Code edits use an exact risk-matched writer while preserving the same Ready, TDD, minimality, single-writer, validation, and review gates at every tier. Before the first test or production edit, Build dispatches `openbuild_implementation_fast` for low risk, `openbuild_implementation_balanced` for medium risk, or `openbuild_implementation_strongest` for high/critical risk and emits an Implementation routing receipt. The profile ID travels in `agent_name`; `task_name` remains a separate task label. A generic worker, task label, profile mention, or stronger-than-requested agent does not count. Missing model metadata alone does not block an exact configured low or medium route, but Build records it as `unknown` and never claims an observed switch or saving. High and critical work still require their strong/strongest floor.
 
-Progressive review uses the same exact-selection rule in read-only mode: low starts with `openbuild-review-fast`, medium with `openbuild-review-balanced`, high with `openbuild-review-strong`, and critical with `openbuild-review-strongest`. Each dispatch produces a Review routing receipt. Reviewers run sequentially through fast → balanced → strong → strongest from the risk floor; Build stops on sufficient acceptance evidence and advances exactly one proven tier only when a concrete trigger remains after root remediation and green validation.
+Progressive review uses the same `agent_name`/`task_name` separation in read-only mode: low starts with `openbuild_review_fast`, medium with `openbuild_review_balanced`, high with `openbuild_review_strong`, and critical with `openbuild_review_strongest`. Each dispatch produces a Review routing receipt. Reviewers run sequentially through fast → balanced → strong → strongest from the risk floor; Build stops on sufficient acceptance evidence and advances exactly one proven tier only when a concrete trigger remains after root remediation and green validation.
 
 Escalation is evidence-driven: Build moves to the next writer tier only when scope or risk increases, the current worker reports insufficient confidence, the red/green signal exposes a deeper owner-layer problem, validation fails for a task-scoped reason, or review confirms an actionable finding. It never launches stronger writers merely to demonstrate model switching. Exact `model` and `model_reasoning_effort` values stay in user- or project-scoped custom-agent files rather than the portable plugin.
 
@@ -424,10 +445,10 @@ Build classifies each task as `low`, `medium`, `high`, or `critical`. It starts 
 
 | Complexity | Typical work | Starting review request |
 |---|---|---|
-| `low` | Documentation or mechanical local changes | `openbuild-review-fast` |
-| `medium` | Contained behavior or refactoring with tests | `openbuild-review-balanced` |
-| `high` | Cross-layer state, public contracts, persistence, concurrency, auth, permissions, privacy | `openbuild-review-strong` |
-| `critical` | Irreversible actions, live infrastructure, secrets, destructive migration | `openbuild-review-strongest` |
+| `low` | Documentation or mechanical local changes | `openbuild_review_fast` |
+| `medium` | Contained behavior or refactoring with tests | `openbuild_review_balanced` |
+| `high` | Cross-layer state, public contracts, persistence, concurrency, auth, permissions, privacy | `openbuild_review_strong` |
+| `critical` | Irreversible actions, live infrastructure, secrets, destructive migration | `openbuild_review_strongest` |
 
 Reviewers return acceptance coverage, evidence-backed findings, confidence, a verdict, and an optional score. After confirmed findings are fixed and validation reruns, Build escalates when confidence is low, coverage is incomplete, reviewers conflict, validation fails, a high-impact finding remains, or the diff changed materially. A score below `9.5` triggers escalation only when the reviewer ties it to a concrete finding, uncertainty, or coverage gap.
 
@@ -474,7 +495,7 @@ You installed both channels. They use the same source but are separate local ins
 
 ### Model switching is reported as unavailable or unverified
 
-Run `$build setup-models`, reload Codex or start a new thread, and inspect the search routing receipt on the next Build run. Without a native selector or configured custom-agent profiles, OpenBuild cannot prove that search used a separate quota or that an observed model switch occurred. A generic subagent or task name does not count as selecting `openbuild-search-separate`; Build must report an explicit fallback reason instead. It can still use honest read-only fallbacks. For implementation, configured fast or balanced named profiles may proceed with runtime metadata recorded as `unknown`; high and critical milestones stop unless their required strong/strongest route can be selected.
+Run `$build setup-models`, reload Codex or start a new thread, and inspect the search routing receipt on the next Build run. Without a native selector or configured custom-agent profiles, OpenBuild cannot prove that search used a separate quota or that an observed model switch occurred. A generic subagent or task name does not count as selecting `openbuild_search_separate`; Build must report an explicit fallback reason instead. It can still use honest read-only fallbacks. For implementation, configured fast or balanced named profiles may proceed with runtime metadata recorded as `unknown`; high and critical milestones stop unless their required strong/strongest route can be selected.
 
 ### Build refuses to overwrite a specification
 

@@ -6,6 +6,15 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+Target version: `2.0.0`.
+
+### Changed
+
+- All nine OpenBuild custom-agent profiles now use canonical underscore IDs, with `agent_name` reserved for exact profile selection and `task_name` kept as an independent task label.
+- Search, Risk-matched-model coding, and progressive review receipts now carry the selector/label separation; Deterministic contract validation rejects legacy selector use and task-label substitution.
+- `$build setup-models` now previews a canonical-SHA-bound, permission-gated, resumable migration from legacy hyphenated profiles with complete inventory, hash-bound per-entry authority, observed precondition/result receipts, and conflict-safe actions; it never overwrites or deletes user configuration silently.
+- The existing blind-spot, `auto`, separate usage pool, TDD, single-writer, minimality, versioning, and evidence-gated review contracts remain intact.
+
 ## [1.1.1] - 2026-07-13
 
 ### Changed

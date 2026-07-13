@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
@@ -55,7 +56,7 @@ SEMVER_PARTS = re.compile(
 )
 MANIFEST_RELATIVE = "plugins/openbuild/.codex-plugin/plugin.json"
 VERSION_SYNC_PATHS = {MANIFEST_RELATIVE, "CHANGELOG.md", "README.md", "README.ru.md"}
-SEARCH_AGENT = "openbuild-search-separate"
+SEARCH_AGENT = "openbuild_search_separate"
 SEARCH_DISPATCH_FAILURES = {
     "profile-not-discoverable",
     "selector-unavailable",
@@ -64,16 +65,16 @@ SEARCH_DISPATCH_FAILURES = {
     "spawn-failed",
 }
 IMPLEMENTATION_AGENT_BY_RISK = {
-    "low": ("fast", "openbuild-implementation-fast"),
-    "medium": ("balanced", "openbuild-implementation-balanced"),
-    "high": ("strongest", "openbuild-implementation-strongest"),
-    "critical": ("strongest", "openbuild-implementation-strongest"),
+    "low": ("fast", "openbuild_implementation_fast"),
+    "medium": ("balanced", "openbuild_implementation_balanced"),
+    "high": ("strongest", "openbuild_implementation_strongest"),
+    "critical": ("strongest", "openbuild_implementation_strongest"),
 }
 REVIEW_AGENT_BY_TIER = {
-    "fast": "openbuild-review-fast",
-    "balanced": "openbuild-review-balanced",
-    "strong": "openbuild-review-strong",
-    "strongest": "openbuild-review-strongest",
+    "fast": "openbuild_review_fast",
+    "balanced": "openbuild_review_balanced",
+    "strong": "openbuild_review_strong",
+    "strongest": "openbuild_review_strongest",
 }
 REVIEW_START_BY_RISK = {
     "low": "fast",
@@ -91,6 +92,65 @@ REVIEW_ESCALATION_REASONS = {
     "material-diff-change",
     "complexity-floor",
 }
+CANONICAL_AGENT_IDS = {
+    "openbuild_search_separate": "openbuild-search-separate",
+    "openbuild_search_fallback": "openbuild-search-fallback",
+    "openbuild_implementation_fast": "openbuild-implementation-fast",
+    "openbuild_implementation_balanced": "openbuild-implementation-balanced",
+    "openbuild_implementation_strongest": "openbuild-implementation-strongest",
+    "openbuild_review_fast": "openbuild-review-fast",
+    "openbuild_review_balanced": "openbuild-review-balanced",
+    "openbuild_review_strong": "openbuild-review-strong",
+    "openbuild_review_strongest": "openbuild-review-strongest",
+}
+AGENT_NAME = re.compile(r"^[a-z0-9_]+$")
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
+MIGRATION_ENTRY_BINDING_FIELDS = (
+    "scope",
+    "source_path",
+    "target_path",
+    "root_fingerprint",
+    "legacy_name",
+    "target_name",
+    "source_sha256",
+    "target_sha256",
+    "rendered_sha256",
+    "exact_diff",
+    "action",
+)
+
+
+def _canonical_sha256(value: object) -> str:
+    serialized = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def migration_entry_id(entry: dict[str, object]) -> str:
+    """Return the stable ID that binds one migration entry to its exact preview."""
+
+    return _canonical_sha256({field: entry.get(field) for field in MIGRATION_ENTRY_BINDING_FIELDS})
+
+
+def migration_supported_mappings() -> list[dict[str, str]]:
+    """Return the complete legacy-to-canonical mapping in canonical order."""
+
+    return [
+        {"legacy_name": legacy, "target_name": canonical}
+        for canonical, legacy in sorted(CANONICAL_AGENT_IDS.items())
+    ]
+
+
+def migration_plan_id(
+    entries: list[dict[str, object]], detected_legacy_names: list[str]
+) -> str:
+    """Return the immutable ID for a complete detected-profile migration preview."""
+
+    payload = {
+        "supported_mappings": migration_supported_mappings(),
+        "detected_legacy_names": sorted(detected_legacy_names),
+        "entry_ids": sorted(str(entry.get("entry_id", "")) for entry in entries),
+    }
+    return _canonical_sha256(payload)
 
 
 def fail(errors: list[str], message: str) -> None:
@@ -148,8 +208,14 @@ def validate_search_dispatch_trace(events: list[dict[str, str]]) -> list[str]:
         return errors
 
     dispatch = dispatches[0]
-    if dispatch.get("agent") != SEARCH_AGENT:
-        errors.append(f"search dispatch trace: first dispatch must select exact agent {SEARCH_AGENT}")
+    agent_name = dispatch.get("agent_name", "")
+    task_name = dispatch.get("task_name", "")
+    if agent_name != SEARCH_AGENT:
+        errors.append(f"search dispatch trace: first dispatch agent_name must select exact agent {SEARCH_AGENT}")
+    if not AGENT_NAME.fullmatch(agent_name):
+        errors.append("search dispatch trace: agent_name must use the runtime-safe lowercase underscore grammar")
+    if not task_name or task_name == agent_name:
+        errors.append("search dispatch trace: task_name must be a separate non-profile task label")
 
     result = dispatch.get("result")
     fallback_reason = dispatch.get("fallback_reason", "")
@@ -179,6 +245,7 @@ def validate_search_dispatch_trace(events: list[dict[str, str]]) -> list[str]:
         errors.append("search dispatch trace: routing receipt must follow the exact dispatch attempt")
     required_fields = {
         "search_agent",
+        "task_name",
         "dispatch_method",
         "configured_model",
         "observed_agent",
@@ -191,6 +258,8 @@ def validate_search_dispatch_trace(events: list[dict[str, str]]) -> list[str]:
         errors.append(f"search dispatch trace: routing receipt missing fields {missing}")
     if receipt.get("search_agent") != SEARCH_AGENT:
         errors.append(f"search dispatch trace: routing receipt must name {SEARCH_AGENT}")
+    if receipt.get("task_name") != task_name:
+        errors.append("search dispatch trace: routing receipt task_name must match the separate task label")
     if receipt.get("dispatch_method") not in {"per-spawn-model", "exact-custom-agent", "unavailable"}:
         errors.append("search dispatch trace: routing receipt has invalid dispatch method")
     if result == "selected" and receipt.get("pool") != "separate":
@@ -198,6 +267,260 @@ def validate_search_dispatch_trace(events: list[dict[str, str]]) -> list[str]:
     expected_reason = "none" if result == "selected" else fallback_reason
     if receipt.get("fallback_reason") != expected_reason:
         errors.append("search dispatch trace: routing receipt fallback reason must match dispatch outcome")
+
+    return errors
+
+
+def validate_profile_migration_trace(events: list[dict[str, object]]) -> list[str]:
+    """Validate the guided legacy-profile migration plan and per-entry receipts."""
+
+    errors: list[str] = []
+    preview_indices = [
+        index for index, event in enumerate(events) if event.get("event") == "profile-migration-preview"
+    ]
+    previews = [events[index] for index in preview_indices]
+    if not previews:
+        return ["profile migration trace: missing migration preview"]
+    if len(previews) != 1:
+        errors.append("profile migration trace: exactly one immutable preview is allowed")
+    preview = previews[0]
+    preview_index = preview_indices[0]
+
+    plan_id = preview.get("plan_id")
+    entries = preview.get("entries")
+    detected_legacy_names = preview.get("detected_legacy_names")
+    if preview.get("supported_mappings") != migration_supported_mappings():
+        errors.append(
+            "profile migration trace: preview must carry the complete supported legacy mapping"
+        )
+    if not isinstance(entries, list):
+        return errors + ["profile migration trace: preview entries must be a list"]
+    if not isinstance(detected_legacy_names, list) or not all(
+        isinstance(value, str) for value in detected_legacy_names
+    ):
+        return errors + [
+            "profile migration trace: preview requires the complete detected legacy inventory"
+        ]
+    if len(detected_legacy_names) != len(set(detected_legacy_names)):
+        errors.append("profile migration trace: detected legacy inventory contains duplicates")
+    unknown_detected = sorted(set(detected_legacy_names) - set(CANONICAL_AGENT_IDS.values()))
+    if unknown_detected:
+        errors.append(
+            f"profile migration trace: detected legacy inventory contains unknown names {unknown_detected}"
+        )
+
+    entries_by_id: dict[str, dict[str, object]] = {}
+    targets: set[str] = set()
+    represented_legacy_names: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            errors.append("profile migration trace: every preview entry must be an object")
+            continue
+        entry_id = entry.get("entry_id")
+        legacy_name = entry.get("legacy_name")
+        target_name = entry.get("target_name")
+        source_sha256 = entry.get("source_sha256")
+        target_sha256 = entry.get("target_sha256")
+        rendered_sha256 = entry.get("rendered_sha256")
+        action = entry.get("action")
+        if not isinstance(entry_id, str) or entry_id in entries_by_id:
+            errors.append("profile migration trace: every entry needs a unique stable entry_id")
+            continue
+        if entry_id != migration_entry_id(entry):
+            errors.append(
+                f"profile migration trace: {entry_id or '<missing>'} entry_id must bind the canonical entry SHA-256"
+            )
+        entries_by_id[entry_id] = entry
+        if target_name not in CANONICAL_AGENT_IDS:
+            errors.append(f"profile migration trace: {entry_id} has an unknown canonical target")
+        elif legacy_name != CANONICAL_AGENT_IDS[target_name]:
+            errors.append(f"profile migration trace: {entry_id} legacy/canonical mapping is invalid")
+        if isinstance(legacy_name, str):
+            represented_legacy_names.add(legacy_name)
+        if not isinstance(target_name, str) or not AGENT_NAME.fullmatch(target_name):
+            errors.append(f"profile migration trace: {entry_id} target must use underscore grammar")
+        if isinstance(target_name, str):
+            if target_name in targets:
+                errors.append(f"profile migration trace: duplicate target {target_name}")
+            targets.add(target_name)
+        if not isinstance(source_sha256, str) or not SHA256.fullmatch(source_sha256):
+            errors.append(f"profile migration trace: {entry_id} needs a source SHA-256 precondition")
+        if target_sha256 != "absent" and (
+            not isinstance(target_sha256, str) or not SHA256.fullmatch(target_sha256)
+        ):
+            errors.append(f"profile migration trace: {entry_id} needs target SHA-256 or absent")
+        if not isinstance(rendered_sha256, str) or not SHA256.fullmatch(rendered_sha256):
+            errors.append(f"profile migration trace: {entry_id} needs the rendered canonical SHA-256")
+        scope = entry.get("scope")
+        if scope not in {"user", "project"}:
+            errors.append(f"profile migration trace: {entry_id} needs user or project scope")
+        root_fingerprint = entry.get("root_fingerprint")
+        if not isinstance(root_fingerprint, str) or not SHA256.fullmatch(root_fingerprint):
+            errors.append(f"profile migration trace: {entry_id} needs a trusted root fingerprint")
+        for field, expected_stem in (
+            ("source_path", legacy_name),
+            ("target_path", target_name),
+        ):
+            relative_path = entry.get(field)
+            if (
+                not isinstance(relative_path, str)
+                or not relative_path
+                or Path(relative_path).is_absolute()
+                or ".." in Path(relative_path).parts
+                or not isinstance(expected_stem, str)
+                or Path(relative_path).name != f"{expected_stem}.toml"
+            ):
+                errors.append(
+                    f"profile migration trace: {entry_id} {field} must be a scope-relative profile path"
+                )
+        exact_diff = entry.get("exact_diff")
+        if (
+            not isinstance(exact_diff, str)
+            or not exact_diff
+            or not isinstance(legacy_name, str)
+            or not isinstance(target_name, str)
+            or legacy_name not in exact_diff
+            or target_name not in exact_diff
+        ):
+            errors.append(f"profile migration trace: {entry_id} needs the complete exact TOML diff")
+        if action not in {"create-if-absent", "already-migrated", "config-conflict"}:
+            errors.append(f"profile migration trace: {entry_id} has an invalid action")
+        elif action == "create-if-absent" and target_sha256 != "absent":
+            errors.append(f"profile migration trace: {entry_id} create-if-absent requires an absent target")
+        elif action == "already-migrated" and target_sha256 != rendered_sha256:
+            errors.append(f"profile migration trace: {entry_id} already-migrated requires the rendered hash")
+        elif action == "config-conflict" and target_sha256 in {"absent", rendered_sha256}:
+            errors.append(f"profile migration trace: {entry_id} config-conflict requires a divergent target hash")
+
+    if represented_legacy_names != set(detected_legacy_names):
+        errors.append(
+            "profile migration trace: entries must cover the complete detected legacy inventory"
+        )
+    expected_plan_id = migration_plan_id(
+        [entry for entry in entries if isinstance(entry, dict)], detected_legacy_names
+    )
+    if not isinstance(plan_id, str) or plan_id != expected_plan_id:
+        errors.append("profile migration trace: plan_id must equal the canonical preview SHA-256")
+
+    approval_fields = (
+        "entry_id",
+        "source_sha256",
+        "target_sha256",
+        "rendered_sha256",
+        "action",
+    )
+    approvals: dict[str, dict[str, object]] = {}
+    approval_indices: dict[str, int] = {}
+    receipts: dict[str, dict[str, object]] = {}
+    receipt_indices: dict[str, int] = {}
+    for event_index, event in enumerate(events):
+        if event.get("plan_id") != plan_id:
+            if event.get("event") in {"profile-migration-approval", "profile-migration-receipt"}:
+                errors.append("profile migration trace: approval/receipt plan_id must match preview")
+            continue
+        if event.get("event") == "profile-migration-approval":
+            if event_index <= preview_index:
+                errors.append(
+                    "profile migration trace: authority must follow the displayed preview"
+                )
+                continue
+            approved_entries = event.get("entries")
+            if not isinstance(approved_entries, list) or not all(
+                isinstance(value, dict) for value in approved_entries
+            ):
+                errors.append(
+                    "profile migration trace: approval must bind per-entry authority to exact precondition hashes"
+                )
+                continue
+            for approved in approved_entries:
+                entry_id = approved.get("entry_id")
+                if not isinstance(entry_id, str) or entry_id not in entries_by_id:
+                    errors.append("profile migration trace: approval references an unknown entry_id")
+                    continue
+                expected = {
+                    field: entries_by_id[entry_id].get(field) for field in approval_fields
+                }
+                actual = {field: approved.get(field) for field in approval_fields}
+                if actual != expected:
+                    errors.append(
+                        f"profile migration trace: {entry_id} approval must bind exact precondition hashes and action"
+                    )
+                    continue
+                if entry_id in approvals:
+                    errors.append(f"profile migration trace: {entry_id} has duplicate authority records")
+                approvals[entry_id] = approved
+                approval_indices[entry_id] = event_index
+        elif event.get("event") == "profile-migration-receipt":
+            if event_index <= preview_index:
+                errors.append("profile migration trace: receipt must follow the displayed preview")
+                continue
+            entry_id = event.get("entry_id")
+            status = event.get("status")
+            if not isinstance(entry_id, str) or entry_id not in entries_by_id:
+                errors.append("profile migration trace: receipt references an unknown entry_id")
+                continue
+            if status not in {"created", "already-migrated", "config-conflict", "hash-drift"}:
+                errors.append(f"profile migration trace: {entry_id} has an invalid receipt status")
+                continue
+            if entry_id in receipts:
+                errors.append(f"profile migration trace: {entry_id} has duplicate receipts")
+            observed_source = event.get("observed_source_sha256")
+            observed_target = event.get("observed_target_sha256")
+            result_sha256 = event.get("result_sha256")
+            if not all(
+                value == "absent" or (isinstance(value, str) and SHA256.fullmatch(value))
+                for value in (observed_source, observed_target)
+            ):
+                errors.append(
+                    f"profile migration trace: {entry_id} receipt needs observed precondition hashes"
+                )
+            if result_sha256 != "not-written" and (
+                not isinstance(result_sha256, str) or not SHA256.fullmatch(result_sha256)
+            ):
+                errors.append(f"profile migration trace: {entry_id} receipt needs a result hash")
+            receipts[entry_id] = event
+            receipt_indices[entry_id] = event_index
+
+    for entry_id, entry in entries_by_id.items():
+        action = entry.get("action")
+        receipt = receipts.get(entry_id)
+        status = receipt.get("status") if receipt else None
+        observed_source = receipt.get("observed_source_sha256") if receipt else None
+        observed_target = receipt.get("observed_target_sha256") if receipt else None
+        result_sha256 = receipt.get("result_sha256") if receipt else None
+        preconditions_match = (
+            observed_source == entry.get("source_sha256")
+            and observed_target == entry.get("target_sha256")
+        )
+        if status == "created" and action != "create-if-absent":
+            errors.append(f"profile migration trace: {entry_id} created status contradicts preview action")
+        if action == "create-if-absent" and status not in {"created", "hash-drift"}:
+            errors.append(f"profile migration trace: {entry_id} create-if-absent receipt contradicts preview")
+        if status == "created":
+            if entry_id not in approvals:
+                errors.append(f"profile migration trace: {entry_id} was created without per-entry authority")
+            elif approval_indices[entry_id] >= receipt_indices[entry_id]:
+                errors.append(f"profile migration trace: {entry_id} was created before per-entry authority")
+            if not preconditions_match:
+                errors.append(f"profile migration trace: {entry_id} was created after hash drift")
+            if result_sha256 != entry.get("rendered_sha256"):
+                errors.append(f"profile migration trace: {entry_id} created result must match rendered hash")
+        if action == "already-migrated" and status not in {"already-migrated", "hash-drift"}:
+            errors.append(f"profile migration trace: {entry_id} already-migrated receipt contradicts preview")
+        if action == "config-conflict" and status not in {"config-conflict", "hash-drift"}:
+            errors.append(f"profile migration trace: {entry_id} overwrote a divergent target")
+        if status == "already-migrated" and (
+            not preconditions_match or result_sha256 != entry.get("rendered_sha256")
+        ):
+            errors.append(f"profile migration trace: {entry_id} already-migrated hashes are inconsistent")
+        if status == "config-conflict" and (
+            not preconditions_match or result_sha256 != entry.get("target_sha256")
+        ):
+            errors.append(f"profile migration trace: {entry_id} conflict must preserve the target hash")
+        if status == "hash-drift" and (preconditions_match or result_sha256 != "not-written"):
+            errors.append(f"profile migration trace: {entry_id} hash-drift must record no write")
+        if status is None:
+            errors.append(f"profile migration trace: {entry_id} is missing a resumable receipt")
 
     return errors
 
@@ -877,10 +1200,16 @@ def validate_implementation_dispatch_trace(events: list[dict[str, str]]) -> list
         errors.append("implementation dispatch trace: risk must be low, medium, high, or critical")
         return errors
     expected_tier, expected_agent = expected
-    if dispatch.get("agent") != expected_agent:
+    agent_name = dispatch.get("agent_name", "")
+    task_name = dispatch.get("task_name", "")
+    if agent_name != expected_agent:
         errors.append(
-            f"implementation dispatch trace: {risk} risk must select exact writer {expected_agent}"
+            f"implementation dispatch trace: {risk} risk agent_name must select exact writer {expected_agent}"
         )
+    if not AGENT_NAME.fullmatch(agent_name):
+        errors.append("implementation dispatch trace: agent_name must use underscore grammar")
+    if not task_name or task_name == agent_name:
+        errors.append("implementation dispatch trace: task_name must be a separate non-profile task label")
     if dispatch.get("result") != "selected":
         errors.append("implementation dispatch trace: code edits require a selected exact writer")
     if dispatch.get("fallback_reason", "none") not in {"", "none"}:
@@ -902,6 +1231,7 @@ def validate_implementation_dispatch_trace(events: list[dict[str, str]]) -> list
     required_fields = {
         "risk",
         "requested_agent",
+        "task_name",
         "requested_tier",
         "dispatch_method",
         "configured_model",
@@ -919,6 +1249,8 @@ def validate_implementation_dispatch_trace(events: list[dict[str, str]]) -> list
         errors.append("implementation dispatch trace: receipt risk must match dispatch risk")
     if receipt.get("requested_agent") != expected_agent:
         errors.append("implementation dispatch trace: receipt must name the exact risk-matched writer")
+    if receipt.get("task_name") != task_name:
+        errors.append("implementation dispatch trace: receipt task_name must match the separate task label")
     if receipt.get("requested_tier") != expected_tier:
         errors.append("implementation dispatch trace: receipt tier must match the risk floor")
     if receipt.get("dispatch_method") not in {"per-spawn-model", "exact-custom-agent"}:
@@ -954,7 +1286,8 @@ def validate_review_escalation_trace(events: list[dict[str, str]]) -> list[str]:
         dispatch = events[dispatch_index]
         risk = dispatch.get("risk", "")
         tier = dispatch.get("tier", "")
-        agent = dispatch.get("agent", "")
+        agent_name = dispatch.get("agent_name", "")
+        task_name = dispatch.get("task_name", "")
         diff_revision = dispatch.get("diff_revision", "")
         expected_start = REVIEW_START_BY_RISK.get(risk)
         expected_agent = REVIEW_AGENT_BY_TIER.get(tier)
@@ -966,8 +1299,12 @@ def validate_review_escalation_trace(events: list[dict[str, str]]) -> list[str]:
             errors.append(
                 f"review escalation trace: {risk} risk must start at exact {expected_start} reviewer"
             )
-        if expected_agent is None or agent != expected_agent:
+        if expected_agent is None or agent_name != expected_agent:
             errors.append("review escalation trace: dispatch must select the exact agent for its tier")
+        if not AGENT_NAME.fullmatch(agent_name):
+            errors.append("review escalation trace: agent_name must use underscore grammar")
+        if not task_name or task_name == agent_name:
+            errors.append("review escalation trace: task_name must be a separate non-profile task label")
         if dispatch.get("result") != "selected":
             errors.append("review escalation trace: review requires a selected exact reviewer")
         key = (diff_revision, tier)
@@ -1035,6 +1372,7 @@ def validate_review_escalation_trace(events: list[dict[str, str]]) -> list[str]:
             "diff_revision",
             "risk_floor",
             "requested_agent",
+            "task_name",
             "requested_tier",
             "dispatch_method",
             "configured_model",
@@ -1053,6 +1391,8 @@ def validate_review_escalation_trace(events: list[dict[str, str]]) -> list[str]:
             errors.append("review escalation trace: receipt must record the risk review floor")
         if receipt.get("requested_agent") != expected_agent or receipt.get("requested_tier") != tier:
             errors.append("review escalation trace: receipt must name the exact requested reviewer")
+        if receipt.get("task_name") != task_name:
+            errors.append("review escalation trace: receipt task_name must match the separate task label")
         if receipt.get("dispatch_method") not in {"per-spawn-model", "exact-custom-agent"}:
             errors.append("review escalation trace: reviewer requires an exact dispatch method")
         if receipt.get("sandbox") != "read-only":
@@ -1541,7 +1881,7 @@ def validate_usage_routing_contract(
         "separate-pool circuit-breaker",
         "every repository lookup",
         "any new file/symbol/grep lookup",
-        "Spawn the custom agent named `openbuild-search-separate`",
+        "Spawn the custom agent named `openbuild_search_separate`",
         "A generic subagent, a descriptive task name",
         "exact dispatch succeeds or returns an allowed fallback reason",
     ]:
@@ -1571,14 +1911,16 @@ def validate_usage_routing_contract(
     search_order = markdown_section(model_routing, "## Search usage-pool order")
     for token in [
         "**Separate usage pool:**",
-        "openbuild-search-separate",
+        "openbuild_search_separate",
         "**Efficient main-pool fallback:**",
-        "openbuild-search-fallback",
+        "openbuild_search_fallback",
         "open a circuit breaker",
         "without retrying the same failed route for every grep",
         "Do not scrape or infer remaining quota",
         "Do not silently skip it",
-        "select `openbuild-search-separate` by exact custom-agent name",
+        "select `openbuild_search_separate` by exact custom-agent name",
+        "`agent_name`",
+        "`task_name`",
         "generic subagent, task name, or profile mention does not count as selection",
         "profile-not-discoverable",
         "selector-unavailable",
@@ -1612,9 +1954,9 @@ def validate_usage_routing_contract(
     implementation_route = markdown_section(model_routing, "## Implementation worker routing")
     for token in [
         "minimum sufficient proven coding tier",
-        "openbuild-implementation-fast",
-        "openbuild-implementation-balanced",
-        "openbuild-implementation-strongest",
+        "openbuild_implementation_fast",
+        "openbuild_implementation_balanced",
+        "openbuild_implementation_strongest",
         "Escalate only on evidence",
         "Missing model/tier metadata alone does not block low or medium implementation",
         "High work still requires a confirmed strong route",
@@ -1622,6 +1964,8 @@ def validate_usage_routing_contract(
         "stop before every test or production code edit",
         "rather than silently lowering the risk floor",
         "Dispatch the exact selected profile before every test or production code edit",
+        "`agent_name`",
+        "`task_name`",
         "Implementation routing receipt",
     ]:
         if token not in implementation_route:
@@ -1631,13 +1975,15 @@ def validate_usage_routing_contract(
     review_route = markdown_section(model_routing, "### Exact sequential reviewer dispatch")
     for token in [
         "Dispatch the exact starting reviewer",
-        "openbuild-review-fast",
-        "openbuild-review-balanced",
-        "openbuild-review-strong",
-        "openbuild-review-strongest",
+        "openbuild_review_fast",
+        "openbuild_review_balanced",
+        "openbuild_review_strong",
+        "openbuild_review_strongest",
         "fast → balanced → strong → strongest",
         "Move exactly one proven tier higher",
         "Review routing receipt",
+        "`agent_name`",
+        "`task_name`",
         "Reviewers remain read-only",
     ]:
         if token not in review_route:
@@ -1651,22 +1997,44 @@ def validate_usage_routing_contract(
 
     setup = markdown_section(model_routing, "## `$build setup-models`")
     for token in [
-        "openbuild-search-separate",
-        "openbuild-search-fallback",
-        "openbuild-implementation-fast",
-        "openbuild-implementation-balanced",
-        "openbuild-implementation-strongest",
+        "openbuild_search_separate",
+        "openbuild_search_fallback",
+        "openbuild_implementation_fast",
+        "openbuild_implementation_balanced",
+        "openbuild_implementation_strongest",
+        "openbuild_review_fast",
+        "openbuild_review_balanced",
+        "openbuild_review_strong",
+        "openbuild_review_strongest",
         "confirmed usage pool",
         "workspace-write",
     ]:
         if token not in setup:
             errors.append(f"model-routing.md setup-models: missing {token}")
 
+    migration = markdown_section(model_routing, "### Guided legacy-profile migration")
+    for token in [
+        "immutable `plan_id`",
+        "stable `entry_id`",
+        "SHA-256",
+        "create-if-absent",
+        "already-migrated",
+        "config-conflict",
+        "per-entry authority",
+        "hash-drift",
+        "separate displayed plan and permission",
+    ]:
+        if token not in migration:
+            errors.append(f"model-routing.md guided migration: missing {token}")
+    for canonical, legacy in CANONICAL_AGENT_IDS.items():
+        if canonical not in migration or legacy not in migration:
+            errors.append(f"model-routing.md guided migration: missing mapping {legacy} -> {canonical}")
+
     mandatory_search = markdown_section(code_discovery, "## Mandatory routing rule")
     for token in [
         "`rg --files`",
-        "openbuild-search-separate",
-        "openbuild-search-fallback",
+        "openbuild_search_separate",
+        "openbuild_search_fallback",
         "new grep or lookup",
         "circuit breaker",
         "do not pay for repeated failed attempts",
@@ -1679,7 +2047,8 @@ def validate_usage_routing_contract(
 
     routing_receipt = markdown_section(code_discovery, "## Search routing receipt")
     for token in [
-        "search_agent: openbuild-search-separate",
+        "search_agent: openbuild_search_separate",
+        "task_name:",
         "dispatch_method:",
         "configured_model:",
         "observed_agent:",
@@ -1694,15 +2063,17 @@ def validate_usage_routing_contract(
 
     for token in [
         "risk-matched coding model for every complexity class",
-        "openbuild-implementation-fast",
-        "openbuild-implementation-balanced",
-        "openbuild-implementation-strongest",
+        "openbuild_implementation_fast",
+        "openbuild_implementation_balanced",
+        "openbuild_implementation_strongest",
         "Read-only search/discovery",
         "Missing model/tier metadata alone does not block low or medium implementation",
         "For high work require a confirmed strong route",
         "for critical work require the strongest proven route",
         "stop before all test and production code edits",
         "Dispatch that exact profile before every test or production code edit",
+        "`agent_name`",
+        "`task_name`",
         "Implementation routing receipt",
     ]:
         if token not in implementation:
@@ -1716,12 +2087,13 @@ def validate_usage_routing_contract(
 
     review_dispatch = markdown_section(review_protocol, "## Exact dispatch and routing receipt")
     for token in [
-        "low` → `openbuild-review-fast",
-        "medium` → `openbuild-review-balanced",
-        "high` → `openbuild-review-strong",
-        "critical` → `openbuild-review-strongest",
+        "low` → `openbuild_review_fast",
+        "medium` → `openbuild_review_balanced",
+        "high` → `openbuild_review_strong",
+        "critical` → `openbuild_review_strongest",
         "fast → balanced → strong → strongest",
         "Review routing receipt",
+        "task_name:",
         "sandbox: <read-only",
         "A configured profile with unobservable model metadata may satisfy low or medium selection",
         "High and critical floors still require proven strong/strongest capability",
@@ -1735,18 +2107,18 @@ def validate_usage_routing_contract(
     else:
         for token in [
             "Search always attempts a confirmed separate-usage route first",
-            "exact custom agent `openbuild-search-separate`",
+            "exact custom agent `openbuild_search_separate`",
             "routing receipt",
             "fallback_reason",
             "current-run circuit breaker",
             "does not scrape the private usage dashboard",
             "risk-matched writer",
-            "openbuild-implementation-fast",
-            "openbuild-implementation-balanced",
+            "openbuild_implementation_fast",
+            "openbuild_implementation_balanced",
             "Implementation routing receipt",
-            "Progressive review uses the same exact-selection rule",
-            "openbuild-review-balanced",
-            "openbuild-review-strongest",
+            "Progressive review uses the same `agent_name`/`task_name` separation",
+            "openbuild_review_balanced",
+            "openbuild_review_strongest",
             "Review routing receipt",
             "fast → balanced → strong → strongest",
             "Escalation",
@@ -1760,19 +2132,19 @@ def validate_usage_routing_contract(
         errors.append("README.ru.md: missing usage-aware model-routing section")
     else:
         for token in [
-            "exact custom agent `openbuild-search-separate`",
+            "exact custom agent `openbuild_search_separate`",
             "routing receipt",
             "fallback_reason",
             "Поиск всегда сначала пытается использовать подтверждённый separate-usage route",
             "circuit breaker на текущий run",
             "не скрейпит приватную usage page",
             "risk-matched writer",
-            "openbuild-implementation-fast",
-            "openbuild-implementation-balanced",
+            "openbuild_implementation_fast",
+            "openbuild_implementation_balanced",
             "Implementation routing receipt",
-            "Progressive review применяет то же правило exact selection",
-            "openbuild-review-balanced",
-            "openbuild-review-strongest",
+            "Progressive review применяет то же разделение `agent_name`/`task_name`",
+            "openbuild_review_balanced",
+            "openbuild_review_strongest",
             "Review routing receipt",
             "fast → balanced → strong → strongest",
             "Эскалация",
@@ -2098,12 +2470,12 @@ def main() -> int:
         "$build setup-models",
         "$skill-installer",
         "openbuild-discovery",
-        "openbuild-search-separate",
-        "openbuild-search-fallback",
-        "openbuild-implementation-fast",
-        "openbuild-implementation-balanced",
-        "openbuild-implementation-strongest",
-        "openbuild-review-fast",
+        "openbuild_search_separate",
+        "openbuild_search_fallback",
+        "openbuild_implementation_fast",
+        "openbuild_implementation_balanced",
+        "openbuild_implementation_strongest",
+        "openbuild_review_fast",
         "TDD-first",
         "CONTRIBUTING.md",
     ]

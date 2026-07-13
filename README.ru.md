@@ -15,9 +15,16 @@ OpenBuild — workflow для Codex, который превращает иде�
 
 OpenBuild самодостаточен. Ему не нужны отдельные discovery-, TDD- или review-skills, telemetry, внешний сервис или фоновые сетевые процессы.
 
-> OpenBuild `1.1.1` — текущий релиз. Immutable release tag — `v1.1.1`; закрепляйте его для воспроизводимой установки или осознанно используйте `main` для ещё не выпущенных изменений.
+> OpenBuild `2.0.0` — текущая development-версия в `main`. Последний immutable release — `v1.1.1`; tag и GitHub Release `v2.0.0` ещё не опубликованы.
 
-Manifest в опубликованном artifact, immutable release tag и GitHub Release синхронизированы на версии `1.1.1`.
+Source manifest имеет версию `2.0.0`. Опубликованные artifacts `v1.1.1` остаются неизменными до отдельно разрешённого релиза `v2.0.0`.
+
+## Что меняется в 2.0.0
+
+- все девять custom-agent IDs OpenBuild используют runtime-safe underscore grammar;
+- только `agent_name` выбирает profile, а `task_name` остаётся независимым task label;
+- `$build setup-models` выполняет hash-bound, permission-gated и resumable migration legacy-профилей с дефисами без перезаписи или удаления;
+- deterministic traces поиска, реализации, review и migration отклоняют подмену selector через task label, stale hashes, запись поверх divergent target и отсутствие per-entry authority.
 
 ## Что вошло в 1.1.1
 
@@ -81,7 +88,7 @@ flowchart LR
 - Git, если Build должен создавать milestone-коммиты или проверять task diff.
 - Для `v1.1.1` на Windows пройдены unit-, package-, syntax-, diff- и clean-artifact-проверки. Codex CLI install/runtime smoke был недоступен в release environment; macOS и Linux остаются непроверенными.
 
-OpenBuild `1.1.1` поддерживает только Codex. Совместимость с Claude Code, Cursor, Gemini CLI и другими coding agents не заявляется.
+OpenBuild `2.0.0` и последний опубликованный релиз `1.1.1` поддерживают только Codex. Совместимость с Claude Code, Cursor, Gemini CLI и другими coding agents не заявляется.
 
 ## Установка как plugin — рекомендуется
 
@@ -91,6 +98,15 @@ Plugin — основной канал распространения. Он да
 
 ```bash
 codex plugin marketplace add GeorgVahi/OpenBuild --ref v1.1.1
+codex plugin add openbuild@openbuild
+```
+
+### Планируемый pin `v2.0.0`
+
+Используйте его только после публикации tag `v2.0.0`; до этого для development testing осознанно устанавливайте `main`.
+
+```bash
+codex plugin marketplace add GeorgVahi/OpenBuild --ref v2.0.0
 codex plugin add openbuild@openbuild
 ```
 
@@ -146,6 +162,8 @@ Standalone-установка даёт короткий вызов `$build`. П�
 
 ```text
 Используй $skill-installer и установи skill из https://github.com/GeorgVahi/OpenBuild/tree/v1.1.1/plugins/openbuild/skills/build
+
+После публикации релиза 2.0 его pinned standalone path будет https://github.com/GeorgVahi/OpenBuild/tree/v2.0.0/plugins/openbuild/skills/build
 ```
 
 Чтобы проверить ещё не выпущенные изменения, используйте тот же путь с `/tree/main/`; для воспроизводимой tagged-установки оставьте `v1.1.1`.
@@ -251,7 +269,7 @@ $build auto BUILD.md
 $build setup-models
 ```
 
-Build сначала проверит возможности текущего Codex runtime. Если native selection уже предоставляет все routes, файлы не нужны. Иначе Build может предложить read-only `openbuild-search-separate` и `openbuild-search-fallback`; write-capable `openbuild-implementation-fast`, `openbuild-implementation-balanced` и `openbuild-implementation-strongest`; а также read-only profiles `openbuild-review-fast`, `balanced`, `strong` и `strongest`. Существующий `openbuild-discovery` остаётся legacy-route и считается separate-pool поиском только при доказанном mapping.
+Build сначала проверит возможности текущего Codex runtime. Если native selection уже предоставляет все routes, файлы не нужны. Иначе Build может предложить read-only `openbuild_search_separate` и `openbuild_search_fallback`; write-capable `openbuild_implementation_fast`, `openbuild_implementation_balanced` и `openbuild_implementation_strongest`; а также read-only profiles `openbuild_review_fast`, `balanced`, `strong` и `strongest`. Существующий `openbuild-discovery` остаётся legacy-route и считается separate-pool поиском только при доказанном mapping. OpenBuild profiles с дефисами считаются legacy identifiers; setup обнаруживает их и предлагает underscore-эквиваленты вместо dispatch старых имён.
 
 До записи Build обязан показать:
 
@@ -262,6 +280,8 @@ Build сначала проверит возможности текущего Co
 
 Запись выполняется только после отдельного разрешения; каждый `workspace-write` implementation profile показывается отдельно. Существующие profiles не перезаписываются, TOML проверяется, а после reload/new session configured-profile evidence записывается отдельно от observed runtime metadata. Отказ от setup сохраняет честные zero-config fallbacks для поиска, спецификации и read-only review; реализация продолжается только когда удовлетворён выбранный low, medium, high или critical risk tier.
 
+Legacy migration сначала показывает resumable preview: полный supported mapping и detected inventory, immutable canonical-SHA `plan_id`, content-bound `entry_id` для каждого обнаруженного профиля, scope-relative paths, root fingerprint, SHA-256 values source/target/rendered-canonical, точные TOML diffs и одно действие на entry — `create-if-absent`, `already-migrated` или `config-conflict`. Разрешение хранится per entry вместе с точными precondition hashes и action; divergent targets никогда не перезаписываются, hash drift переоткрывает только затронутый entry, а каждый receipt фиксирует observed preconditions и result hash либо `not-written`. Cleanup legacy-файлов становится отдельным планом с новым разрешением только после reload и exact-selection smoke.
+
 ## Как работает автоматический выбор этапа
 
 Build отдельно записывает цель workflow (`Ready` для работы только над спецификацией или `Complete` для реализации) и первый незавершённый этап. Явные режимы и пути имеют приоритет. В `auto` evidence артефактов выбирает discovery, reconciliation/interview, blind-spot critique, implementation/resume или verification; только настоящая неоднозначность между существенно разными целями или файлами становится routing-вопросом.
@@ -270,7 +290,7 @@ Legacy-спецификация со статусом `Ready` не приним�
 
 ## Как работает автоматический поиск по коду
 
-Перед любым `rg`, `rg --files`, поиском файла/symbol, repository grep, трассировкой зависимостей, поиском routes/tests/configs/schemas или log scan главный агент составляет короткий search plan и запускает exact custom agent `openbuild-search-separate`. Direct per-spawn model selector имеет приоритет, когда runtime его предоставляет; иначе Build выбирает custom agent по точному имени. Generic worker, описательный task name или простое упоминание profile не считаются выбором модели. Workers возвращают только evidence map: `path:line`, symbol или route, подтверждённый факт, его значение, negative results и confidence.
+Перед любым `rg`, `rg --files`, поиском файла/symbol, repository grep, трассировкой зависимостей, поиском routes/tests/configs/schemas или log scan главный агент составляет короткий search plan и запускает exact custom agent `openbuild_search_separate`. Direct per-spawn model selector имеет приоритет, когда runtime его предоставляет; иначе Build передаёт canonical ID через `agent_name`, а независимое описательное имя задачи — через `task_name`. Generic worker, описательный task name или простое упоминание profile не считаются выбором модели. Workers возвращают только evidence map: `path:line`, symbol или route, подтверждённый факт, его значение, negative results и confidence.
 
 Главный агент остаётся оркестратором: убирает дубли, точечно перечитывает уже известные критические файлы и строки, превращает материальные продуктовые и архитектурные развилки в decision packets, фиксирует выбор пользователя, автономно принимает только outcome-neutral технические решения, владеет разрешёнными post-decision edits спецификации и версии, валидирует, управляет Git и отвечает пользователю. Новый grep или lookup снова идёт search worker. Search workers не редактируют код и не выбирают архитектуру; implementation edits используют отдельную risk-matched single-writer lease ниже.
 
@@ -282,7 +302,7 @@ flowchart TB
 
     subgraph SEARCH["Поиск · только чтение"]
         S0["Короткий search plan"] --> S1{"Exact separate-agent dispatch?"}
-        S1 -->|selected| S2["openbuild-search-separate"]
+        S1 -->|selected| S2["openbuild_search_separate"]
         S1 -->|зафиксированная ошибка| S5["Failure receipt + circuit breaker"]
         S5 --> S3["Экономный main-pool fallback"]
         S3 --> S4["Explorer → generic worker → root"]
@@ -291,9 +311,9 @@ flowchart TB
 
     subgraph WRITE["Реализация · ровно один writer"]
         W0{"Риск milestone"}
-        W0 -->|low| W1["openbuild-implementation-fast"]
-        W0 -->|medium| W2["openbuild-implementation-balanced"]
-        W0 -->|high / critical| W3["openbuild-implementation-strongest"]
+        W0 -->|low| W1["openbuild_implementation_fast"]
+        W0 -->|medium| W2["openbuild_implementation_balanced"]
+        W0 -->|high / critical| W3["openbuild_implementation_strongest"]
         W1 --> W4["Exact dispatch + routing receipt"]
         W2 --> W4
         W3 --> W4
@@ -327,10 +347,11 @@ flowchart TB
     class Z done;
 ```
 
-Поиск всегда сначала пытается использовать подтверждённый separate-usage route — обычно exact custom agent `openbuild-search-separate` или эквивалентный native selector. Текущий Spark preview является официальным примером отдельно лимитируемой near-instant text-модели, когда account/runtime его предоставляет, но OpenBuild не закрепляет этот пример как универсальный model ID. До первого lookup Build записывает requested agent, dispatch method, configured и observed model, pool, result и fallback reason. Fallback разрешён только после `profile-not-discoverable`, `selector-unavailable`, `model-unavailable`, `quota-exhausted`, `spawn-failed` либо timeout/unusable evidence уже выбранного worker. После этого Build включает circuit breaker на текущий run и пробует `openbuild-search-fallback`, explorer, generic read-only subagent и минимальный root search. OpenBuild не скрейпит приватную usage page, не угадывает остаток quota и не повторяет неудачный separate route перед каждым grep.
+Поиск всегда сначала пытается использовать подтверждённый separate-usage route — обычно exact custom agent `openbuild_search_separate` или эквивалентный native selector. Текущий Spark preview является официальным примером отдельно лимитируемой near-instant text-модели, когда account/runtime его предоставляет, но OpenBuild не закрепляет этот пример как универсальный model ID. До первого lookup Build записывает requested agent, dispatch method, configured и observed model, pool, result и fallback reason. Fallback разрешён только после `profile-not-discoverable`, `selector-unavailable`, `model-unavailable`, `quota-exhausted`, `spawn-failed` либо timeout/unusable evidence уже выбранного worker. После этого Build включает circuit breaker на текущий run и пробует `openbuild_search_fallback`, explorer, generic read-only subagent и минимальный root search. OpenBuild не скрейпит приватную usage page, не угадывает остаток quota и не повторяет неудачный separate route перед каждым grep.
 
 ```text
-search_agent: openbuild-search-separate
+search_agent: openbuild_search_separate
+task_name: <независимое описательное имя задачи>
 dispatch_method: per-spawn-model | exact-custom-agent | unavailable
 configured_model: <profile/runtime value or unknown>
 observed_agent: <runtime value or unknown>
@@ -342,9 +363,9 @@ fallback_reason: none | <зафиксированная допустимая п�
 
 Этот routing receipt является primary acceptance signal. Account usage dashboard остаётся полезным secondary evidence, но не заменяет наблюдаемый exact-agent dispatch.
 
-Code edits выполняет exact risk-matched writer при сохранении одинаковых Ready, TDD, minimality, single-writer, validation и review gates на каждом tier. До первой правки test или production code Build dispatch-ит `openbuild-implementation-fast` для low risk, `openbuild-implementation-balanced` для medium risk или `openbuild-implementation-strongest` для high/critical risk и записывает Implementation routing receipt. Generic worker, task label, упоминание profile или более сильный, чем запрошено, agent не считаются выбором route. Отсутствие model metadata само по себе не блокирует exact configured low или medium route, но Build записывает его как `unknown` и не заявляет наблюдаемое переключение или экономию. High и critical work по-прежнему требуют своего strong/strongest floor.
+Code edits выполняет exact risk-matched writer при сохранении одинаковых Ready, TDD, minimality, single-writer, validation и review gates на каждом tier. До первой правки test или production code Build dispatch-ит `openbuild_implementation_fast` для low risk, `openbuild_implementation_balanced` для medium risk или `openbuild_implementation_strongest` для high/critical risk и записывает Implementation routing receipt. Profile ID передаётся через `agent_name`; `task_name` остаётся отдельным task label. Generic worker, task label, упоминание profile или более сильный, чем запрошено, agent не считаются выбором route. Отсутствие model metadata само по себе не блокирует exact configured low или medium route, но Build записывает его как `unknown` и не заявляет наблюдаемое переключение или экономию. High и critical work по-прежнему требуют своего strong/strongest floor.
 
-Progressive review применяет то же правило exact selection в read-only режиме: low начинает `openbuild-review-fast`, medium — `openbuild-review-balanced`, high — `openbuild-review-strong`, critical — `openbuild-review-strongest`. Каждый dispatch создаёт Review routing receipt. Reviewers запускаются последовательно по лестнице fast → balanced → strong → strongest от risk floor; Build останавливается при достаточном acceptance evidence и переходит ровно на один доказанный tier выше только когда после root remediation и green validation остаётся конкретный trigger.
+Progressive review применяет то же разделение `agent_name`/`task_name` в read-only режиме: low начинает `openbuild_review_fast`, medium — `openbuild_review_balanced`, high — `openbuild_review_strong`, critical — `openbuild_review_strongest`. Каждый dispatch создаёт Review routing receipt. Reviewers запускаются последовательно по лестнице fast → balanced → strong → strongest от risk floor; Build останавливается при достаточном acceptance evidence и переходит ровно на один доказанный tier выше только когда после root remediation и green validation остаётся конкретный trigger.
 
 Эскалация выполняется только по evidence: Build переходит на следующий writer tier при росте scope или risk, недостаточной уверенности worker, более глубокой owner-layer проблеме в red/green signal, task-scoped validation failure или подтверждённом review finding. Более сильные writers не запускаются только ради демонстрации model switching. Точные `model` и `model_reasoning_effort` остаются в user- или project-scoped custom-agent files, а не в portable plugin.
 
@@ -424,10 +445,10 @@ Build классифицирует задачу как `low`, `medium`, `high` �
 
 | Сложность | Типичная работа | Начальный запрос review |
 |---|---|---|
-| `low` | Документация или локальная механическая правка | `openbuild-review-fast` |
-| `medium` | Ограниченная логика или refactor с тестами | `openbuild-review-balanced` |
-| `high` | Межслойное состояние, публичные контракты, persistence, concurrency, auth, permissions, privacy | `openbuild-review-strong` |
-| `critical` | Необратимые действия, live-инфраструктура, secrets, разрушительная миграция | `openbuild-review-strongest` |
+| `low` | Документация или локальная механическая правка | `openbuild_review_fast` |
+| `medium` | Ограниченная логика или refactor с тестами | `openbuild_review_balanced` |
+| `high` | Межслойное состояние, публичные контракты, persistence, concurrency, auth, permissions, privacy | `openbuild_review_strong` |
+| `critical` | Необратимые действия, live-инфраструктура, secrets, разрушительная миграция | `openbuild_review_strongest` |
 
 Reviewer возвращает покрытие acceptance criteria, findings с evidence, confidence, verdict и optional score. После исправления подтверждённых замечаний и повторных проверок Build повышает tier, если confidence низкий, coverage неполный, reviewers конфликтуют, validation падает, остаётся high-impact finding или diff существенно изменился. Score ниже `9.5` запускает эскалацию только вместе с конкретным finding, uncertainty или пробелом coverage.
 
@@ -474,7 +495,7 @@ Build не придумывает versioning для неверсионируем
 
 ### Переключение моделей недоступно или не подтверждено
 
-Запустите `$build setup-models`, перезагрузите Codex или начните новый thread и проверьте search routing receipt в следующем Build run. Без native selector или настроенных custom-agent profiles OpenBuild не может доказать, что поиск использовал отдельную quota или что произошло наблюдаемое model switching. Generic subagent или task name не считаются выбором `openbuild-search-separate`; вместо этого Build обязан указать явную fallback reason. Honest read-only fallbacks остаются доступны. Для implementation настроенные fast или balanced named profiles могут продолжить работу с runtime metadata `unknown`; high и critical milestones останавливаются, если их required strong/strongest route нельзя выбрать.
+Запустите `$build setup-models`, перезагрузите Codex или начните новый thread и проверьте search routing receipt в следующем Build run. Без native selector или настроенных custom-agent profiles OpenBuild не может доказать, что поиск использовал отдельную quota или что произошло наблюдаемое model switching. Generic subagent или task name не считаются выбором `openbuild_search_separate`; вместо этого Build обязан указать явную fallback reason. Honest read-only fallbacks остаются доступны. Для implementation настроенные fast или balanced named profiles могут продолжить работу с runtime metadata `unknown`; high и critical milestones останавливаются, если их required strong/strongest route нельзя выбрать.
 
 ### Build отказывается перезаписывать спецификацию
 

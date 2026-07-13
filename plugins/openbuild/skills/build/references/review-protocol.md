@@ -23,7 +23,7 @@ Use a fresh context with conversation-history inheritance disabled when the runt
 
 ## Exact dispatch and routing receipt
 
-Select the exact starting reviewer from task risk: `low` → `openbuild-review-fast`, `medium` → `openbuild-review-balanced`, `high` → `openbuild-review-strong`, and `critical` → `openbuild-review-strongest`. Bind a confirmed model through a direct per-spawn selector when exposed; otherwise dispatch the exact custom-agent name. Do not accept a generic reviewer or a prompt that merely names the profile as selection evidence.
+Select the exact starting reviewer from task risk: `low` → `openbuild_review_fast`, `medium` → `openbuild_review_balanced`, `high` → `openbuild_review_strong`, and `critical` → `openbuild_review_strongest`. Bind a confirmed model through a direct per-spawn selector when exposed; otherwise pass the canonical profile ID through `agent_name` and a separate descriptive label through `task_name`. Do not accept a generic reviewer or a prompt that merely names the profile as selection evidence.
 
 Run a strictly sequential ladder, starting at the floor and moving at most one step at a time: `fast → balanced → strong → strongest`. After every dispatch and before using the result, record:
 
@@ -31,7 +31,8 @@ Run a strictly sequential ladder, starting at the floor and moving at most one s
 Review routing receipt:
 diff_revision: <commit/status/hash identity>
 risk_floor: <fast|balanced|strong|strongest>
-requested_agent: <exact openbuild-review-* profile>
+requested_agent: <exact openbuild_review_* profile>
+task_name: <independent descriptive task label>
 requested_tier: <fast|balanced|strong|strongest>
 dispatch_method: <per-spawn-model|exact-custom-agent|unavailable>
 configured_model: <profile model or unknown>

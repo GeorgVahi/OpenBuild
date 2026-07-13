@@ -16,23 +16,24 @@ Choose the minimum sufficient implementation depth:
 
 | Complexity | Default implementation mode |
 |---|---|
-| `low` | exact `openbuild-implementation-fast` profile for Direct, documentation, cosmetic, or mechanical work without behavior changes |
-| `medium` | exact `openbuild-implementation-balanced` profile for contained logic or refactoring with clear contracts and supported tests |
-| `high` | exact `openbuild-implementation-strongest` profile for cross-layer behavior, public contracts, persistence, concurrency, auth, permissions, privacy, or sensitive state |
-| `critical` | exact `openbuild-implementation-strongest` profile with the deepest supported reasoning; never delegate destructive execution |
+| `low` | exact `openbuild_implementation_fast` profile for Direct, documentation, cosmetic, or mechanical work without behavior changes |
+| `medium` | exact `openbuild_implementation_balanced` profile for contained logic or refactoring with clear contracts and supported tests |
+| `high` | exact `openbuild_implementation_strongest` profile for cross-layer behavior, public contracts, persistence, concurrency, auth, permissions, privacy, or sensitive state |
+| `critical` | exact `openbuild_implementation_strongest` profile with the deepest supported reasoning; never delegate destructive execution |
 
 Use a risk-matched coding model for every complexity class, as defined by [model routing](model-routing.md). Select fast for low-risk Direct work, balanced for contained medium-risk behavior, and strong/strongest for high or critical work. Scale supported reasoning effort within the selected tier: low/minimal when safe for mechanical work, medium for contained behavior, high for cross-layer work, and the deepest supported effort for critical reasoning. Escalate only after evidence shows that the current tier is insufficient. Do not infer capability from a model name, and do not claim a route or delegation without runtime/configuration evidence.
 
 ## Exact writer dispatch
 
-Dispatch that exact profile before every test or production code edit: `low` → `openbuild-implementation-fast`, `medium` → `openbuild-implementation-balanced`, and `high` or `critical` → `openbuild-implementation-strongest`. When the callable spawn schema exposes a direct model selector, bind the profile's confirmed model there; otherwise select the custom agent by its exact name. A generic worker, descriptive task name, prompt mention, or stronger-than-requested profile is not the selected risk route and must not start editing.
+Dispatch that exact profile before every test or production code edit: `low` → `openbuild_implementation_fast`, `medium` → `openbuild_implementation_balanced`, and `high` or `critical` → `openbuild_implementation_strongest`. When the callable spawn schema exposes a direct model selector, bind the profile's confirmed model there; otherwise pass the canonical profile ID through `agent_name` and a separate descriptive label through `task_name`. A generic worker, descriptive task name, prompt mention, or stronger-than-requested profile is not the selected risk route and must not start editing.
 
 Emit an Implementation routing receipt after dispatch and before granting the single-writer lease or changing any file:
 
 ```text
 Implementation routing receipt:
 risk: <low|medium|high|critical>
-requested_agent: <exact openbuild-implementation-* profile>
+requested_agent: <exact openbuild_implementation_* profile>
+task_name: <independent descriptive task label>
 requested_tier: <fast|balanced|strongest>
 dispatch_method: <per-spawn-model|exact-custom-agent|unavailable>
 configured_model: <profile model or unknown>
@@ -99,7 +100,7 @@ The worker must not:
 - add production dependencies or infrastructure without existing approval;
 - continue after discovering a new product choice, owner-layer conflict, secret, destructive action, or material scope expansion.
 
-Require the exact dispatch and Implementation routing receipt above for `openbuild-implementation-fast`, `openbuild-implementation-balanced`, or `openbuild-implementation-strongest` before the selected worker receives its lease. Read-only search/discovery and `openbuild-review-*` profiles are never implementation workers. A proven equivalent native selector, built-in worker, generic bounded subagent, or `root-only` route may write only under the explicitly recorded exception above and when the same lease, TDD, minimality, validation, and review controls remain in force.
+Require the exact dispatch and Implementation routing receipt above for `openbuild_implementation_fast`, `openbuild_implementation_balanced`, or `openbuild_implementation_strongest` before the selected worker receives its lease. Read-only search/discovery and `openbuild_review_*` profiles are never implementation workers. A proven equivalent native selector, built-in worker, generic bounded subagent, or `root-only` route may write only under the explicitly recorded exception above and when the same lease, TDD, minimality, validation, and review controls remain in force.
 
 Missing model/tier metadata alone does not block low or medium implementation when the exact named profile is configured, the requested agent selection is recorded, its sandbox is appropriate, and no runtime evidence contradicts the route. Record the effective model/tier as `unknown` or `unobservable`; never claim a model switch or usage saving from the profile name alone. For high work require a confirmed strong route, and for critical work require the strongest proven route plus any applicable authority checkpoint. If the required tier cannot be selected, stop before all test and production code edits rather than silently lowering the risk floor.
 

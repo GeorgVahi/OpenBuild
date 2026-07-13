@@ -6,7 +6,7 @@ Use this protocol before any repository search in every Build mode. The root age
 
 1. Treat `rg`, `rg --files`, file or symbol lookup, repository-wide or targeted grep, dependency/route tracing, test/config/schema discovery, similar-pattern search, log scanning, and cross-file flow mapping as search operations covered by this rule.
 2. Write a compact search plan with the objective, likely regions, independent branches, minimum evidence, and a stop condition.
-3. Use the search usage-pool order in [model routing](model-routing.md). Dispatch the confirmed read-only route before the root runs any new repository search command: use a direct per-spawn model selector when the runtime exposes one, otherwise spawn the custom agent named `openbuild-search-separate`. Then use `openbuild-search-fallback`, an explorer role, a generic read-only subagent, or root fallback in that order.
+3. Use the search usage-pool order in [model routing](model-routing.md). Dispatch the confirmed read-only route before the root runs any new repository search command: use a direct per-spawn model selector when the runtime exposes one, otherwise pass `openbuild_search_separate` through `agent_name` or an equivalent selector and a separate descriptive label through `task_name`. Then use `openbuild_search_fallback`, an explorer role, a generic read-only subagent, or root fallback in that order.
 4. Delegate independent search branches in parallel when capacity and scope justify it.
 5. Aggregate and deduplicate results, surface contradictions and negative results, then decide whether more discovery is useful.
 6. Let the root agent reread already-known critical files and lines before decisions or edits. If verification requires a new grep or lookup, send that search through the same usage-pool order.
@@ -52,8 +52,8 @@ Keep raw logs, large file dumps, and repetitive matches out of the root context.
 
 - Never infer suitability, price, speed, or strength from a model name.
 - Report a concrete model only when the runtime or confirmed profile exposes it.
-- Prefer `openbuild-search-separate` only when its separate usage pool is confirmed. A legacy `openbuild-discovery` profile follows the same evidence rule.
-- If the separate route is unavailable, prefer `openbuild-search-fallback` with the lowest supported reasoning effort that remains suitable.
+- Prefer `openbuild_search_separate` only when its separate usage pool is confirmed. A legacy `openbuild-discovery` profile follows the same evidence rule.
+- If the separate route is unavailable, prefer `openbuild_search_fallback` with the lowest supported reasoning effort that remains suitable.
 - Do not scrape the user's private usage page or guess remaining quota. Treat runtime quota/unavailability errors or explicit user evidence as authoritative for the current-run circuit breaker.
 - A different role, prompt, or thread is not proof of a different model or reduced token cost.
 
@@ -62,7 +62,8 @@ Keep raw logs, large file dumps, and repetitive matches out of the root context.
 Emit this receipt after the exact dispatch attempt and before the first repository search command. Use `none` when no fallback occurred and otherwise use only the failure vocabulary from [model routing](model-routing.md). If a selected worker later times out or returns unusable evidence, update the same receipt before moving to the next route; do not rewrite the original dispatch result.
 
 ```text
-search_agent: openbuild-search-separate
+search_agent: openbuild_search_separate
+task_name: <independent descriptive task label>
 dispatch_method: per-spawn-model | exact-custom-agent | unavailable
 configured_model: <profile/runtime value or unknown>
 observed_agent: <runtime value or unknown>

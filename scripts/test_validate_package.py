@@ -12,12 +12,16 @@ from validate_package import (
     SKILL,
     VERSION_SYNC_PATHS,
     commit_requires_version_bump,
+    migration_entry_id,
+    migration_plan_id,
+    migration_supported_mappings,
     validate_auto_routing_contract,
     validate_blindspot_contract,
     validate_changelog_contract,
     validate_decision_authority_trace,
     validate_implementation_delegation_contract,
     validate_implementation_dispatch_trace,
+    validate_profile_migration_trace,
     validate_release_docs_contract,
     validate_review_escalation_trace,
     validate_search_dispatch_trace,
@@ -1343,16 +1347,53 @@ class UsageRoutingContractTests(unittest.TestCase):
         skill_text = self.skill_text.replace(initialized, "__ROUTING_HEADING__").replace(selection, initialized).replace("__ROUTING_HEADING__", selection)
         self.assertTrue(any("must precede specification selection" in error for error in self.validate(skill_text=skill_text)))
 
+    def test_runtime_safe_profile_ids_and_guided_migration_are_required(self) -> None:
+        combined = "\n".join(
+            [
+                self.skill_text,
+                self.model_routing,
+                self.code_discovery,
+                self.implementation,
+                self.review_protocol,
+                self.readme,
+                self.readme_ru,
+            ]
+        )
+        for profile in [
+            "openbuild_search_separate",
+            "openbuild_search_fallback",
+            "openbuild_implementation_fast",
+            "openbuild_implementation_balanced",
+            "openbuild_implementation_strongest",
+            "openbuild_review_fast",
+            "openbuild_review_balanced",
+            "openbuild_review_strong",
+            "openbuild_review_strongest",
+        ]:
+            with self.subTest(profile=profile):
+                self.assertIn(profile, combined)
+        for token in [
+            "immutable `plan_id`",
+            "stable `entry_id`",
+            "SHA-256",
+            "create-if-absent",
+            "already-migrated",
+            "config-conflict",
+            "per-entry authority",
+        ]:
+            with self.subTest(token=token):
+                self.assertIn(token, self.model_routing)
+
     def test_exact_named_search_agent_dispatch_precedes_repository_search(self) -> None:
         skill_text = self.skill_text.replace(
-            "Spawn the custom agent named `openbuild-search-separate`",
+            "Spawn the custom agent named `openbuild_search_separate`",
             "Attempt a suitable search worker",
         )
         self.assertTrue(any("exact agent dispatch" in error for error in self.validate(skill_text=skill_text)))
 
         model_routing = self.model_routing.replace(
-            "select `openbuild-search-separate` by exact custom-agent name",
-            "prefer `openbuild-search-separate` when convenient",
+            "select `openbuild_search_separate` by exact custom-agent name",
+            "prefer `openbuild_search_separate` when convenient",
         )
         self.assertTrue(any("exact agent dispatch" in error for error in self.validate(model_routing=model_routing)))
 
@@ -1390,9 +1431,9 @@ class UsageRoutingContractTests(unittest.TestCase):
         self.assertTrue(any("implementation-delegation.md" in error for error in self.validate(implementation=implementation)))
 
         for profile in [
-            "openbuild-implementation-fast",
-            "openbuild-implementation-balanced",
-            "openbuild-implementation-strongest",
+            "openbuild_implementation_fast",
+            "openbuild_implementation_balanced",
+            "openbuild_implementation_strongest",
         ]:
             model_routing = self.model_routing.replace(profile, "missing-writer-profile")
             self.assertTrue(any("implementation routing" in error for error in self.validate(model_routing=model_routing)))
@@ -1471,38 +1512,85 @@ class UsageRoutingContractTests(unittest.TestCase):
         readme = self.readme.replace("Search always attempts a confirmed separate-usage route first", "Search selects a suitable route")
         self.assertTrue(any("README.md" in error for error in self.validate(readme=readme)))
 
-        readme = self.readme.replace("exact custom agent `openbuild-search-separate`", "a suitable worker")
+        readme = self.readme.replace("exact custom agent `openbuild_search_separate`", "a suitable worker")
         self.assertTrue(any("README.md" in error for error in self.validate(readme=readme)))
 
         readme_ru = self.readme_ru.replace("Поиск всегда сначала пытается использовать подтверждённый separate-usage route", "Поиск выбирает подходящий route")
         self.assertTrue(any("README.ru.md" in error for error in self.validate(readme_ru=readme_ru)))
 
-        readme_ru = self.readme_ru.replace("exact custom agent `openbuild-search-separate`", "generic worker")
+        readme_ru = self.readme_ru.replace("exact custom agent `openbuild_search_separate`", "generic worker")
         self.assertTrue(any("README.ru.md" in error for error in self.validate(readme_ru=readme_ru)))
 
 
 class SearchDispatchTraceTests(unittest.TestCase):
-    def test_exact_named_agent_owns_first_search(self) -> None:
+    def test_canonical_agent_name_is_separate_from_task_name(self) -> None:
         trace = [
             {
                 "event": "search-dispatch",
-                "agent": "openbuild-search-separate",
+                "agent_name": "openbuild_search_separate",
+                "task_name": "map_routing_contract",
                 "result": "selected",
                 "fallback_reason": "none",
             },
             {
                 "event": "search-routing-receipt",
-                "search_agent": "openbuild-search-separate",
+                "search_agent": "openbuild_search_separate",
+                "task_name": "map_routing_contract",
                 "dispatch_method": "exact-custom-agent",
                 "configured_model": "separate-search-model",
-                "observed_agent": "openbuild-search-separate",
+                "observed_agent": "openbuild_search_separate",
                 "observed_model": "unknown",
                 "pool": "separate",
                 "fallback_reason": "none",
             },
             {
                 "event": "repository-search",
-                "actor": "openbuild-search-separate",
+                "actor": "openbuild_search_separate",
+            },
+        ]
+
+        self.assertEqual(validate_search_dispatch_trace(trace), [])
+
+    def test_task_name_alone_cannot_select_a_profile(self) -> None:
+        trace = [
+            {
+                "event": "search-dispatch",
+                "task_name": "openbuild_search_separate",
+                "result": "selected",
+                "fallback_reason": "none",
+            },
+            {
+                "event": "repository-search",
+                "actor": "openbuild_search_separate",
+            },
+        ]
+
+        errors = validate_search_dispatch_trace(trace)
+        self.assertTrue(any("agent_name" in error for error in errors))
+
+    def test_exact_named_agent_owns_first_search(self) -> None:
+        trace = [
+            {
+                "event": "search-dispatch",
+                "agent_name": "openbuild_search_separate",
+                "task_name": "fixture_task",
+                "result": "selected",
+                "fallback_reason": "none",
+            },
+            {
+                "event": "search-routing-receipt",
+                "search_agent": "openbuild_search_separate",
+                "task_name": "fixture_task",
+                "dispatch_method": "exact-custom-agent",
+                "configured_model": "separate-search-model",
+                "observed_agent": "openbuild_search_separate",
+                "observed_model": "unknown",
+                "pool": "separate",
+                "fallback_reason": "none",
+            },
+            {
+                "event": "repository-search",
+                "actor": "openbuild_search_separate",
             },
         ]
 
@@ -1522,13 +1610,15 @@ class SearchDispatchTraceTests(unittest.TestCase):
         trace = [
             {
                 "event": "search-dispatch",
-                "agent": "openbuild-search-separate",
+                "agent_name": "openbuild_search_separate",
+                "task_name": "fixture_task",
                 "result": "failed",
                 "fallback_reason": "unknown-problem",
             },
             {
                 "event": "search-routing-receipt",
-                "search_agent": "openbuild-search-separate",
+                "search_agent": "openbuild_search_separate",
+                "task_name": "fixture_task",
                 "dispatch_method": "unavailable",
                 "configured_model": "separate-search-model",
                 "observed_agent": "unknown",
@@ -1538,7 +1628,7 @@ class SearchDispatchTraceTests(unittest.TestCase):
             },
             {
                 "event": "repository-search",
-                "actor": "openbuild-search-fallback",
+                "actor": "openbuild_search_fallback",
             },
         ]
 
@@ -1548,13 +1638,15 @@ class SearchDispatchTraceTests(unittest.TestCase):
         trace = [
             {
                 "event": "search-dispatch",
-                "agent": "openbuild-search-separate",
+                "agent_name": "openbuild_search_separate",
+                "task_name": "fixture_task",
                 "result": "failed",
                 "fallback_reason": "selector-unavailable",
             },
             {
                 "event": "search-routing-receipt",
-                "search_agent": "openbuild-search-separate",
+                "search_agent": "openbuild_search_separate",
+                "task_name": "fixture_task",
                 "dispatch_method": "unavailable",
                 "configured_model": "separate-search-model",
                 "observed_agent": "unknown",
@@ -1564,7 +1656,7 @@ class SearchDispatchTraceTests(unittest.TestCase):
             },
             {
                 "event": "repository-search",
-                "actor": "openbuild-search-fallback",
+                "actor": "openbuild_search_fallback",
             },
         ]
 
@@ -1574,47 +1666,270 @@ class SearchDispatchTraceTests(unittest.TestCase):
         trace = [
             {
                 "event": "search-routing-receipt",
-                "search_agent": "openbuild-search-separate",
+                "search_agent": "openbuild_search_separate",
+                "task_name": "fixture_task",
                 "dispatch_method": "exact-custom-agent",
                 "configured_model": "separate-search-model",
-                "observed_agent": "openbuild-search-separate",
+                "observed_agent": "openbuild_search_separate",
                 "observed_model": "unknown",
                 "pool": "separate",
                 "fallback_reason": "none",
             },
             {
                 "event": "search-dispatch",
-                "agent": "openbuild-search-separate",
+                "agent_name": "openbuild_search_separate",
+                "task_name": "fixture_task",
                 "result": "selected",
                 "fallback_reason": "none",
             },
             {
                 "event": "repository-search",
-                "actor": "openbuild-search-separate",
+                "actor": "openbuild_search_separate",
             },
         ]
 
         self.assertTrue(any("must follow" in error for error in validate_search_dispatch_trace(trace)))
 
 
+class ProfileMigrationTraceTests(unittest.TestCase):
+    @staticmethod
+    def preview(action: str = "create-if-absent") -> dict[str, object]:
+        target_sha256 = {
+            "create-if-absent": "absent",
+            "already-migrated": "b" * 64,
+            "config-conflict": "c" * 64,
+        }[action]
+        entry: dict[str, object] = {
+            "scope": "user",
+            "source_path": "openbuild-search-separate.toml",
+            "target_path": "openbuild_search_separate.toml",
+            "root_fingerprint": "d" * 64,
+            "legacy_name": "openbuild-search-separate",
+            "target_name": "openbuild_search_separate",
+            "source_sha256": "a" * 64,
+            "target_sha256": target_sha256,
+            "rendered_sha256": "b" * 64,
+            "exact_diff": (
+                '-name = "openbuild-search-separate"\n'
+                '+name = "openbuild_search_separate"'
+            ),
+            "action": action,
+        }
+        entry["entry_id"] = migration_entry_id(entry)
+        detected = ["openbuild-search-separate"]
+        preview: dict[str, object] = {
+            "event": "profile-migration-preview",
+            "supported_mappings": migration_supported_mappings(),
+            "detected_legacy_names": detected,
+            "entries": [entry],
+        }
+        preview["plan_id"] = migration_plan_id([entry], detected)
+        return preview
+
+    @staticmethod
+    def approval(preview: dict[str, object]) -> dict[str, object]:
+        entry = preview["entries"][0]
+        return {
+            "event": "profile-migration-approval",
+            "plan_id": preview["plan_id"],
+            "entries": [
+                {
+                    "entry_id": entry["entry_id"],
+                    "source_sha256": entry["source_sha256"],
+                    "target_sha256": entry["target_sha256"],
+                    "rendered_sha256": entry["rendered_sha256"],
+                    "action": entry["action"],
+                }
+            ],
+        }
+
+    @staticmethod
+    def receipt(preview: dict[str, object], status: str) -> dict[str, object]:
+        entry = preview["entries"][0]
+        result_sha256 = {
+            "created": entry["rendered_sha256"],
+            "already-migrated": entry["rendered_sha256"],
+            "config-conflict": entry["target_sha256"],
+            "hash-drift": "not-written",
+        }[status]
+        return {
+            "event": "profile-migration-receipt",
+            "plan_id": preview["plan_id"],
+            "entry_id": entry["entry_id"],
+            "status": status,
+            "observed_source_sha256": entry["source_sha256"],
+            "observed_target_sha256": entry["target_sha256"],
+            "result_sha256": result_sha256,
+        }
+
+    def test_approved_create_has_a_resumable_receipt(self) -> None:
+        preview = self.preview()
+        trace = [preview, self.approval(preview), self.receipt(preview, "created")]
+
+        self.assertEqual(validate_profile_migration_trace(trace), [])
+
+    def test_create_without_per_entry_authority_is_rejected(self) -> None:
+        preview = self.preview()
+        trace = [preview, self.receipt(preview, "created")]
+
+        errors = validate_profile_migration_trace(trace)
+        self.assertTrue(any("without per-entry authority" in error for error in errors))
+
+    def test_create_before_matching_authority_is_rejected(self) -> None:
+        preview = self.preview()
+        trace = [preview, self.receipt(preview, "created"), self.approval(preview)]
+
+        errors = validate_profile_migration_trace(trace)
+        self.assertTrue(any("before per-entry authority" in error for error in errors))
+
+    def test_authority_before_displayed_preview_is_rejected(self) -> None:
+        preview = self.preview()
+        trace = [self.approval(preview), preview, self.receipt(preview, "created")]
+
+        errors = validate_profile_migration_trace(trace)
+        self.assertTrue(any("authority must follow the displayed preview" in error for error in errors))
+
+    def test_config_conflict_cannot_be_written(self) -> None:
+        preview = self.preview(action="config-conflict")
+        trace = [preview, self.approval(preview), self.receipt(preview, "created")]
+
+        errors = validate_profile_migration_trace(trace)
+        self.assertTrue(any("overwrote a divergent target" in error for error in errors))
+
+    def test_create_action_cannot_report_already_migrated(self) -> None:
+        preview = self.preview()
+        trace = [preview, self.receipt(preview, "already-migrated")]
+
+        errors = validate_profile_migration_trace(trace)
+        self.assertTrue(any("create-if-absent receipt contradicts preview" in error for error in errors))
+
+    def test_action_must_match_the_target_precondition(self) -> None:
+        preview = self.preview(action="already-migrated")
+        entry = preview["entries"][0]
+        entry["target_sha256"] = "absent"
+        entry["entry_id"] = migration_entry_id(entry)
+        preview["plan_id"] = migration_plan_id(
+            [entry], preview["detected_legacy_names"]
+        )
+        trace = [preview, self.receipt(preview, "already-migrated")]
+
+        errors = validate_profile_migration_trace(trace)
+        self.assertTrue(any("requires the rendered hash" in error for error in errors))
+
+    def test_preview_inventory_must_cover_every_detected_profile(self) -> None:
+        preview = self.preview()
+        preview["detected_legacy_names"] = [
+            "openbuild-search-separate",
+            "openbuild-review-fast",
+        ]
+        preview["plan_id"] = migration_plan_id(
+            preview["entries"], preview["detected_legacy_names"]
+        )
+        trace = [preview, self.approval(preview), self.receipt(preview, "created")]
+
+        errors = validate_profile_migration_trace(trace)
+        self.assertTrue(any("detected legacy inventory" in error for error in errors))
+
+    def test_plan_id_must_bind_the_canonical_preview(self) -> None:
+        preview = self.preview()
+        preview["plan_id"] = "0" * 64
+        trace = [preview, self.approval(preview), self.receipt(preview, "created")]
+
+        errors = validate_profile_migration_trace(trace)
+        self.assertTrue(any("canonical preview SHA-256" in error for error in errors))
+
+    def test_approval_must_bind_exact_precondition_hashes(self) -> None:
+        preview = self.preview()
+        stale_approval = self.approval(preview)
+        stale_approval["entries"][0]["source_sha256"] = "e" * 64
+        trace = [
+            preview,
+            stale_approval,
+            self.receipt(preview, "created"),
+        ]
+
+        errors = validate_profile_migration_trace(trace)
+        self.assertTrue(any("exact precondition hashes" in error for error in errors))
+
+    def test_receipt_must_record_precondition_recheck_and_result_hash(self) -> None:
+        preview = self.preview()
+        trace = [
+            preview,
+            self.approval(preview),
+            {
+                "event": "profile-migration-receipt",
+                "plan_id": preview["plan_id"],
+                "entry_id": preview["entries"][0]["entry_id"],
+                "status": "created",
+            },
+        ]
+
+        errors = validate_profile_migration_trace(trace)
+        self.assertTrue(any("observed precondition hashes" in error for error in errors))
+        self.assertTrue(any("result hash" in error for error in errors))
+
+    def test_hash_drift_receipt_preserves_unchanged_authority_without_writing(self) -> None:
+        preview = self.preview()
+        receipt = self.receipt(preview, "hash-drift")
+        receipt["observed_target_sha256"] = "e" * 64
+        trace = [preview, self.approval(preview), receipt]
+
+        self.assertEqual(validate_profile_migration_trace(trace), [])
+
+
 class ImplementationDispatchTraceTests(unittest.TestCase):
+    def test_canonical_writer_agent_name_is_separate_from_task_name(self) -> None:
+        trace = [
+            {
+                "event": "implementation-dispatch",
+                "risk": "high",
+                "agent_name": "openbuild_implementation_strongest",
+                "task_name": "implement_m3",
+                "result": "selected",
+                "fallback_reason": "none",
+            },
+            {
+                "event": "implementation-routing-receipt",
+                "risk": "high",
+                "requested_agent": "openbuild_implementation_strongest",
+                "task_name": "implement_m3",
+                "requested_tier": "strongest",
+                "dispatch_method": "exact-custom-agent",
+                "configured_model": "strong-code-model",
+                "observed_agent": "openbuild_implementation_strongest",
+                "observed_model": "unknown",
+                "sandbox": "workspace-write",
+                "lease": "M3",
+                "dispatch_result": "selected",
+                "fallback_reason": "none",
+            },
+            {
+                "event": "code-write",
+                "actor": "openbuild_implementation_strongest",
+            },
+        ]
+
+        self.assertEqual(validate_implementation_dispatch_trace(trace), [])
+
     def test_low_risk_exact_fast_writer_owns_first_edit(self) -> None:
         trace = [
             {
                 "event": "implementation-dispatch",
                 "risk": "low",
-                "agent": "openbuild-implementation-fast",
+                "agent_name": "openbuild_implementation_fast",
+                "task_name": "fixture_task",
                 "result": "selected",
                 "fallback_reason": "none",
             },
             {
                 "event": "implementation-routing-receipt",
                 "risk": "low",
-                "requested_agent": "openbuild-implementation-fast",
+                "requested_agent": "openbuild_implementation_fast",
+                "task_name": "fixture_task",
                 "requested_tier": "fast",
                 "dispatch_method": "exact-custom-agent",
                 "configured_model": "fast-code-model",
-                "observed_agent": "openbuild-implementation-fast",
+                "observed_agent": "openbuild_implementation_fast",
                 "observed_model": "unknown",
                 "sandbox": "workspace-write",
                 "lease": "M1",
@@ -1623,7 +1938,7 @@ class ImplementationDispatchTraceTests(unittest.TestCase):
             },
             {
                 "event": "test-write",
-                "actor": "openbuild-implementation-fast",
+                "actor": "openbuild_implementation_fast",
             },
         ]
 
@@ -1634,18 +1949,20 @@ class ImplementationDispatchTraceTests(unittest.TestCase):
             {
                 "event": "implementation-dispatch",
                 "risk": "medium",
-                "agent": "openbuild-implementation-strongest",
+                "agent_name": "openbuild_implementation_strongest",
+                "task_name": "fixture_task",
                 "result": "selected",
                 "fallback_reason": "none",
             },
             {
                 "event": "implementation-routing-receipt",
                 "risk": "medium",
-                "requested_agent": "openbuild-implementation-strongest",
+                "requested_agent": "openbuild_implementation_strongest",
+                "task_name": "fixture_task",
                 "requested_tier": "strongest",
                 "dispatch_method": "exact-custom-agent",
                 "configured_model": "strong-code-model",
-                "observed_agent": "openbuild-implementation-strongest",
+                "observed_agent": "openbuild_implementation_strongest",
                 "observed_model": "unknown",
                 "sandbox": "workspace-write",
                 "lease": "M1",
@@ -1654,29 +1971,31 @@ class ImplementationDispatchTraceTests(unittest.TestCase):
             },
             {
                 "event": "code-write",
-                "actor": "openbuild-implementation-strongest",
+                "actor": "openbuild_implementation_strongest",
             },
         ]
 
-        self.assertTrue(any("openbuild-implementation-balanced" in error for error in validate_implementation_dispatch_trace(trace)))
+        self.assertTrue(any("openbuild_implementation_balanced" in error for error in validate_implementation_dispatch_trace(trace)))
 
     def test_writer_receipt_must_precede_the_edit_and_be_write_capable(self) -> None:
         trace = [
             {
                 "event": "implementation-dispatch",
                 "risk": "high",
-                "agent": "openbuild-implementation-strongest",
+                "agent_name": "openbuild_implementation_strongest",
+                "task_name": "fixture_task",
                 "result": "selected",
                 "fallback_reason": "none",
             },
             {
                 "event": "implementation-routing-receipt",
                 "risk": "high",
-                "requested_agent": "openbuild-implementation-strongest",
+                "requested_agent": "openbuild_implementation_strongest",
+                "task_name": "fixture_task",
                 "requested_tier": "strongest",
                 "dispatch_method": "exact-custom-agent",
                 "configured_model": "strong-code-model",
-                "observed_agent": "openbuild-implementation-strongest",
+                "observed_agent": "openbuild_implementation_strongest",
                 "observed_model": "unknown",
                 "sandbox": "read-only",
                 "lease": "M1",
@@ -1685,7 +2004,7 @@ class ImplementationDispatchTraceTests(unittest.TestCase):
             },
             {
                 "event": "code-write",
-                "actor": "openbuild-implementation-strongest",
+                "actor": "openbuild_implementation_strongest",
             },
         ]
 
@@ -1708,7 +2027,8 @@ class ReviewEscalationTraceTests(unittest.TestCase):
                 "event": "review-dispatch",
                 "risk": "low",
                 "tier": tier,
-                "agent": agent,
+                "agent_name": agent,
+                "task_name": "fixture_task",
                 "diff_revision": revision,
                 "result": "selected",
             },
@@ -1717,6 +2037,7 @@ class ReviewEscalationTraceTests(unittest.TestCase):
                 "diff_revision": revision,
                 "risk_floor": "fast",
                 "requested_agent": agent,
+                "task_name": "fixture_task",
                 "requested_tier": tier,
                 "dispatch_method": "exact-custom-agent",
                 "configured_model": f"{tier}-review-model",
@@ -1741,7 +2062,7 @@ class ReviewEscalationTraceTests(unittest.TestCase):
     def test_low_risk_escalates_one_tier_after_root_remediation(self) -> None:
         trace = self.review_cycle(
             "fast",
-            "openbuild-review-fast",
+            "openbuild_review_fast",
             "D1",
             verdict="REVISE",
             findings="F-1",
@@ -1756,7 +2077,7 @@ class ReviewEscalationTraceTests(unittest.TestCase):
         trace.extend(
             self.review_cycle(
                 "balanced",
-                "openbuild-review-balanced",
+                "openbuild_review_balanced",
                 "D2",
                 verdict="ACCEPT",
                 findings="none",
@@ -1769,7 +2090,7 @@ class ReviewEscalationTraceTests(unittest.TestCase):
     def test_review_ladder_cannot_skip_a_proven_intermediate_tier(self) -> None:
         trace = self.review_cycle(
             "fast",
-            "openbuild-review-fast",
+            "openbuild_review_fast",
             "D1",
             verdict="REVISE",
             findings="none",
@@ -1778,7 +2099,7 @@ class ReviewEscalationTraceTests(unittest.TestCase):
         trace.extend(
             self.review_cycle(
                 "strong",
-                "openbuild-review-strong",
+                "openbuild_review_strong",
                 "D1",
                 verdict="ACCEPT",
                 findings="none",
@@ -1800,7 +2121,7 @@ class ReviewEscalationTraceTests(unittest.TestCase):
         trace.extend(
             self.review_cycle(
                 "balanced",
-                "openbuild-review-balanced",
+                "openbuild_review_balanced",
                 "D1",
                 verdict="ACCEPT",
                 findings="none",
@@ -1813,7 +2134,7 @@ class ReviewEscalationTraceTests(unittest.TestCase):
     def test_stronger_reviewer_requires_a_concrete_trigger(self) -> None:
         trace = self.review_cycle(
             "fast",
-            "openbuild-review-fast",
+            "openbuild_review_fast",
             "D1",
             verdict="ACCEPT",
             findings="none",
@@ -1822,7 +2143,7 @@ class ReviewEscalationTraceTests(unittest.TestCase):
         trace.extend(
             self.review_cycle(
                 "balanced",
-                "openbuild-review-balanced",
+                "openbuild_review_balanced",
                 "D1",
                 verdict="ACCEPT",
                 findings="none",
@@ -1835,7 +2156,7 @@ class ReviewEscalationTraceTests(unittest.TestCase):
     def test_non_accepting_final_result_cannot_close_the_ladder(self) -> None:
         trace = self.review_cycle(
             "fast",
-            "openbuild-review-fast",
+            "openbuild_review_fast",
             "D1",
             verdict="REVISE",
             findings="none",
@@ -1847,7 +2168,7 @@ class ReviewEscalationTraceTests(unittest.TestCase):
     def test_high_risk_starts_with_exact_strong_read_only_reviewer(self) -> None:
         trace = self.review_cycle(
             "balanced",
-            "openbuild-review-balanced",
+            "openbuild_review_balanced",
             "D1",
             verdict="ACCEPT",
             findings="none",
