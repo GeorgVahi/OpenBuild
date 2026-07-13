@@ -17,7 +17,7 @@ OpenBuild is self-contained. It does not require separate discovery, TDD, or rev
 
 > OpenBuild `0.4.0` is the current release. The immutable release tag is `v0.4.0`; pin it for reproducible installation or use `main` intentionally for unreleased changes.
 
-The manifest development version on `main` is `1.0.2`; the latest immutable release tag and GitHub Release remain synchronized at `0.4.0` until separately authorized publication.
+The manifest development version on `main` is `1.0.3`; the latest immutable release tag and GitHub Release remain synchronized at `0.4.0` until separately authorized publication.
 
 ## Workflow at a glance
 
@@ -274,35 +274,39 @@ flowchart TB
 
     subgraph WRITE["Implementation · exactly one writer"]
         W0{"Milestone risk"}
-        W0 -->|low| W1["Fast writer"]
-        W0 -->|medium| W2["Balanced writer"]
-        W0 -->|high / critical| W3["Strong / strongest writer"]
-        W1 --> W4["Same Ready, TDD, minimality, lease and validation gates"]
+        W0 -->|low| W1["openbuild-implementation-fast"]
+        W0 -->|medium| W2["openbuild-implementation-balanced"]
+        W0 -->|high / critical| W3["openbuild-implementation-strongest"]
+        W1 --> W4["Exact dispatch + routing receipt"]
         W2 --> W4
         W3 --> W4
+        W4 --> W5["Same Ready, TDD, minimality, lease and validation gates"]
     end
 
     subgraph REVIEW["Review · read-only"]
-        V0{"Diff risk and evidence"} --> V1["Fast → balanced → strong → strongest"]
-        V1 --> V2{"Accepted with sufficient confidence?"}
+        V0{"Diff risk floor"} --> V1["Exact profile: fast / balanced / strong / strongest"]
+        V1 --> V2["Routing receipt + structured result"]
+        V2 --> V3{"Accept with no concrete trigger?"}
+        V3 -->|no| V4["Root adjudication, remediation and green validation"]
+        V4 --> V5["Next proven tier only"]
+        V5 --> V2
     end
 
     R --> S0
     S6 --> W0
     S4 --> W0
-    W4 --> V0
-    V2 -->|finding| W0
-    V2 -->|yes| Z["Verified completion"]
+    W5 --> V0
+    V3 -->|yes| Z["Verified completion"]
 
     classDef decision fill:#422006,color:#fffbeb,stroke:#f59e0b,stroke-width:2px;
     classDef search fill:#083344,color:#ecfeff,stroke:#22d3ee,stroke-width:1.5px;
     classDef write fill:#172554,color:#eff6ff,stroke:#60a5fa,stroke-width:1.5px;
     classDef review fill:#3b0764,color:#faf5ff,stroke:#c084fc,stroke-width:1.5px;
     classDef done fill:#052e16,color:#ecfdf5,stroke:#34d399,stroke-width:2px;
-    class R,S1,W0,V0,V2 decision;
+    class R,S1,W0,V0,V3 decision;
     class S0,S2,S3,S4,S5,S6 search;
-    class W1,W2,W3,W4 write;
-    class V1 review;
+    class W1,W2,W3,W4,W5 write;
+    class V1,V2,V4,V5 review;
     class Z done;
 ```
 
@@ -321,7 +325,9 @@ fallback_reason: none | <recorded allowed reason>
 
 This routing receipt is the primary acceptance signal. The account usage dashboard remains useful secondary evidence, but it does not replace an observable exact-agent dispatch.
 
-Code edits use a risk-matched writer while preserving the same Ready, TDD, minimality, single-writer, validation, and review gates at every tier. `openbuild-implementation-fast` handles low-risk Direct documentation, cosmetic, or mechanical work; `openbuild-implementation-balanced` handles medium-risk contained behavior with clear tests; and `openbuild-implementation-strongest` handles high or critical contracts, security, persistence, concurrency, permissions, privacy, and sensitive state. Missing model metadata alone does not block a configured low or medium route, but Build records it as `unknown` and never claims an observed switch or saving. High and critical work still require their strong/strongest floor.
+Code edits use an exact risk-matched writer while preserving the same Ready, TDD, minimality, single-writer, validation, and review gates at every tier. Before the first test or production edit, Build dispatches `openbuild-implementation-fast` for low risk, `openbuild-implementation-balanced` for medium risk, or `openbuild-implementation-strongest` for high/critical risk and emits an Implementation routing receipt. A generic worker, task label, profile mention, or stronger-than-requested agent does not count. Missing model metadata alone does not block an exact configured low or medium route, but Build records it as `unknown` and never claims an observed switch or saving. High and critical work still require their strong/strongest floor.
+
+Progressive review uses the same exact-selection rule in read-only mode: low starts with `openbuild-review-fast`, medium with `openbuild-review-balanced`, high with `openbuild-review-strong`, and critical with `openbuild-review-strongest`. Each dispatch produces a Review routing receipt. Reviewers run sequentially through fast → balanced → strong → strongest from the risk floor; Build stops on sufficient acceptance evidence and advances exactly one proven tier only when a concrete trigger remains after root remediation and green validation.
 
 Escalation is evidence-driven: Build moves to the next writer tier only when scope or risk increases, the current worker reports insufficient confidence, the red/green signal exposes a deeper owner-layer problem, validation fails for a task-scoped reason, or review confirms an actionable finding. It never launches stronger writers merely to demonstrate model switching. Exact `model` and `model_reasoning_effort` values stay in user- or project-scoped custom-agent files rather than the portable plugin.
 
@@ -351,10 +357,11 @@ Reviewers stay read-only. They audit the red signal, owning layer, focused green
 flowchart LR
     A["Root classifies milestone and risk"] --> B{"Ready and required tier proven?"}
     B -->|no| X["Stop and record the exact blocker"]
-    B -->|yes| C["Issue one bounded writer lease"]
+    B -->|yes| C["Dispatch exact risk profile + routing receipt"]
 
     subgraph LEASE["Exclusive writer lease · root pauses edits"]
-        C --> D["Red or primary signal"]
+        C --> C1["Issue one bounded writer lease"]
+        C1 --> D["Red or primary signal"]
         D --> E["Minimum owner-layer change"]
         E --> F["Focused green validation"]
         F --> G["Diff, evidence and assumptions handoff"]
@@ -373,12 +380,12 @@ flowchart LR
     classDef done fill:#052e16,color:#ecfdf5,stroke:#34d399,stroke-width:2px;
     class A,H,I,J root;
     class B gate;
-    class C,D,E,F,G worker;
+    class C,C1,D,E,F,G worker;
     class X stop;
     class K done;
 ```
 
-After `Ready`, each milestone selects `root-only`, `bounded-worker`, or `sequential-workers`, and then selects the minimum sufficient proven writer tier from the milestone risk. Reasoning effort scales from low/minimal for mechanical changes to the deepest supported effort for critical work. A worker is used only when the owning files, acceptance criteria, red or primary signal, and stop conditions are clear; `root-only` requires the root to satisfy the selected tier. An unavailable required tier blocks that milestone instead of authorizing a risk-floor downgrade.
+After `Ready`, each milestone selects `root-only`, `bounded-worker`, or `sequential-workers`, then dispatches the exact minimum sufficient writer profile from milestone risk and records its routing receipt before a lease or edit. Reasoning effort scales from low/minimal for mechanical changes to the deepest supported effort for critical work. A worker is used only when the owning files, acceptance criteria, red or primary signal, and stop conditions are clear; `root-only` remains limited to documented safety cases and requires the root to satisfy the selected tier. An unavailable required tier blocks that milestone instead of authorizing a risk-floor downgrade.
 
 The shared checkout has one active writer. A worker receives a baseline and exact allowed files, cannot edit the specification, version, changelog, or unrelated files, cannot make product or architecture decisions, and cannot stage, commit, push, publish, or deploy. The root does not edit while the lease is active. After handoff, the root rechecks the complete diff, rereads changed code, reruns focused and risk-based validation, updates durable records and versioning, and only then starts progressive review or Git actions. Multiple worker milestones run strictly sequentially.
 
@@ -396,14 +403,14 @@ Build classifies each task as `low`, `medium`, `high`, or `critical`. It starts 
 
 | Complexity | Typical work | Starting review request |
 |---|---|---|
-| `low` | Documentation or mechanical local changes | Fast/economy |
-| `medium` | Contained behavior or refactoring with tests | Balanced |
-| `high` | Cross-layer state, public contracts, persistence, concurrency, auth, permissions, privacy | Strong |
-| `critical` | Irreversible actions, live infrastructure, secrets, destructive migration | Strongest available |
+| `low` | Documentation or mechanical local changes | `openbuild-review-fast` |
+| `medium` | Contained behavior or refactoring with tests | `openbuild-review-balanced` |
+| `high` | Cross-layer state, public contracts, persistence, concurrency, auth, permissions, privacy | `openbuild-review-strong` |
+| `critical` | Irreversible actions, live infrastructure, secrets, destructive migration | `openbuild-review-strongest` |
 
 Reviewers return acceptance coverage, evidence-backed findings, confidence, a verdict, and an optional score. After confirmed findings are fixed and validation reruns, Build escalates when confidence is low, coverage is incomplete, reviewers conflict, validation fails, a high-impact finding remains, or the diff changed materially. A score below `9.5` triggers escalation only when the reviewer ties it to a concrete finding, uncertainty, or coverage gap.
 
-The score is only a secondary escalation signal. An evidence-backed accept verdict with sufficient confidence, green validation, complete acceptance coverage, and no confirmed actionable findings is enough even when a score is omitted or below `9.5` without a concrete gap. The loop is bounded by distinct proven tiers and never repeats the same reviewer on an unchanged diff.
+The score is only a secondary escalation signal. An evidence-backed accept verdict with sufficient confidence, green validation, complete acceptance coverage, and no confirmed actionable findings is enough even when a score is omitted or below `9.5` without a concrete gap. Reviewers are exact-dispatched one at a time, each with a read-only sandbox and Review routing receipt. The loop starts at the risk floor, follows fast → balanced → strong → strongest without skipping a proven tier, and never repeats the same reviewer on an unchanged diff.
 
 When Codex does not expose a model selector, Build does not invent one. It falls back through configured profiles, supported reasoning efforts, a read-only explorer role, a generic subagent, and finally root-only self-review. The effective mode and any unknown tier are recorded explicitly.
 

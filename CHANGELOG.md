@@ -6,10 +6,14 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-Target development version: `1.0.2`.
+Target development version: `1.0.3`.
 
 ### Changed
 
+- Implementation now exact-dispatches `openbuild-implementation-fast`, `openbuild-implementation-balanced`, or `openbuild-implementation-strongest` from milestone risk before every test or production edit and records a workspace-write routing receipt before the single-writer lease begins.
+- Progressive review now exact-dispatches the risk-floor `openbuild-review-*` profile, records a read-only routing receipt, stops on sufficient acceptance evidence, and escalates sequentially through fast → balanced → strong → strongest only after a concrete remaining trigger, root remediation, and green validation.
+- Deterministic writer and reviewer trace fixtures reject generic or stronger-than-requested writer substitution, sandbox/receipt ordering errors, reviewer tier skips, trigger-free escalation, missing remediation, and unresolved strongest-tier blockers.
+- The Build skill, TDD workflow, specification template, contributor guide, and bilingual diagrams now carry the same exact-dispatch receipts without weakening Ready, blind-spot closure, minimality, single-writer, validation, versioning, or root-owned Git controls.
 - Repository discovery now requires an exact `openbuild-search-separate` custom-agent dispatch before the first non-trivial lookup; generic workers, task labels, and profile mentions no longer count as model selection.
 - Search fallback now uses a fixed observable failure vocabulary and emits a routing receipt with requested/configured/observed route metadata before any repository search.
 - Deterministic routing-trace fixtures reject root-first search, silent generic fallback, missing receipts, and unrecognized fallback reasons while preserving the existing circuit breaker and honest runtime-metadata limitations.

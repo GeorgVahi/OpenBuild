@@ -15,6 +15,7 @@ PLUGIN = ROOT / "plugins" / "openbuild"
 SKILL = PLUGIN / "skills" / "build"
 BLINDSPOT_PROTOCOL = SKILL / "references" / "blindspot-protocol.md"
 IMPLEMENTATION_DELEGATION = SKILL / "references" / "implementation-delegation.md"
+REVIEW_PROTOCOL = SKILL / "references" / "review-protocol.md"
 
 REQUIRED = [
     ROOT / ".agents" / "plugins" / "marketplace.json",
@@ -34,7 +35,7 @@ REQUIRED = [
     IMPLEMENTATION_DELEGATION,
     SKILL / "references" / "minimality-protocol.md",
     SKILL / "references" / "model-routing.md",
-    SKILL / "references" / "review-protocol.md",
+    REVIEW_PROTOCOL,
     SKILL / "references" / "tdd-workflow.md",
     SKILL / "references" / "versioning.md",
     ROOT / "scripts" / "test_validate_package.py",
@@ -61,6 +62,34 @@ SEARCH_DISPATCH_FAILURES = {
     "model-unavailable",
     "quota-exhausted",
     "spawn-failed",
+}
+IMPLEMENTATION_AGENT_BY_RISK = {
+    "low": ("fast", "openbuild-implementation-fast"),
+    "medium": ("balanced", "openbuild-implementation-balanced"),
+    "high": ("strongest", "openbuild-implementation-strongest"),
+    "critical": ("strongest", "openbuild-implementation-strongest"),
+}
+REVIEW_AGENT_BY_TIER = {
+    "fast": "openbuild-review-fast",
+    "balanced": "openbuild-review-balanced",
+    "strong": "openbuild-review-strong",
+    "strongest": "openbuild-review-strongest",
+}
+REVIEW_START_BY_RISK = {
+    "low": "fast",
+    "medium": "balanced",
+    "high": "strong",
+    "critical": "strongest",
+}
+REVIEW_TIERS = tuple(REVIEW_AGENT_BY_TIER)
+REVIEW_ESCALATION_REASONS = {
+    "low-confidence",
+    "incomplete-coverage",
+    "conflicting-evidence",
+    "validation-failure",
+    "unresolved-high-impact-finding",
+    "material-diff-change",
+    "complexity-floor",
 }
 
 
@@ -169,6 +198,261 @@ def validate_search_dispatch_trace(events: list[dict[str, str]]) -> list[str]:
     expected_reason = "none" if result == "selected" else fallback_reason
     if receipt.get("fallback_reason") != expected_reason:
         errors.append("search dispatch trace: routing receipt fallback reason must match dispatch outcome")
+
+    return errors
+
+
+def validate_implementation_dispatch_trace(events: list[dict[str, str]]) -> list[str]:
+    """Validate that the risk-matched exact writer owns the first code edit."""
+
+    errors: list[str] = []
+    write_index = next(
+        (
+            index
+            for index, event in enumerate(events)
+            if event.get("event") in {"test-write", "code-write"}
+        ),
+        None,
+    )
+    if write_index is None:
+        return ["implementation dispatch trace: missing test-write or code-write event"]
+
+    prior_events = events[:write_index]
+    dispatches = [event for event in prior_events if event.get("event") == "implementation-dispatch"]
+    if not dispatches:
+        return ["implementation dispatch trace: exact writer dispatch must precede every code edit"]
+
+    dispatch = dispatches[-1]
+    risk = dispatch.get("risk", "")
+    expected = IMPLEMENTATION_AGENT_BY_RISK.get(risk)
+    if expected is None:
+        errors.append("implementation dispatch trace: risk must be low, medium, high, or critical")
+        return errors
+    expected_tier, expected_agent = expected
+    if dispatch.get("agent") != expected_agent:
+        errors.append(
+            f"implementation dispatch trace: {risk} risk must select exact writer {expected_agent}"
+        )
+    if dispatch.get("result") != "selected":
+        errors.append("implementation dispatch trace: code edits require a selected exact writer")
+    if dispatch.get("fallback_reason", "none") not in {"", "none"}:
+        errors.append("implementation dispatch trace: selected exact writer must not report fallback")
+
+    receipt_events = [
+        (index, event)
+        for index, event in enumerate(prior_events)
+        if event.get("event") == "implementation-routing-receipt"
+    ]
+    if not receipt_events:
+        errors.append("implementation dispatch trace: implementation routing receipt must precede every code edit")
+        return errors
+
+    receipt_index, receipt = receipt_events[-1]
+    dispatch_index = prior_events.index(dispatch)
+    if receipt_index <= dispatch_index:
+        errors.append("implementation dispatch trace: routing receipt must follow exact writer dispatch")
+    required_fields = {
+        "risk",
+        "requested_agent",
+        "requested_tier",
+        "dispatch_method",
+        "configured_model",
+        "observed_agent",
+        "observed_model",
+        "sandbox",
+        "lease",
+        "dispatch_result",
+        "fallback_reason",
+    }
+    missing = sorted(field for field in required_fields if field not in receipt)
+    if missing:
+        errors.append(f"implementation dispatch trace: routing receipt missing fields {missing}")
+    if receipt.get("risk") != risk:
+        errors.append("implementation dispatch trace: receipt risk must match dispatch risk")
+    if receipt.get("requested_agent") != expected_agent:
+        errors.append("implementation dispatch trace: receipt must name the exact risk-matched writer")
+    if receipt.get("requested_tier") != expected_tier:
+        errors.append("implementation dispatch trace: receipt tier must match the risk floor")
+    if receipt.get("dispatch_method") not in {"per-spawn-model", "exact-custom-agent"}:
+        errors.append("implementation dispatch trace: writer requires an exact dispatch method")
+    if receipt.get("sandbox") != "workspace-write":
+        errors.append("implementation dispatch trace: writer sandbox must be workspace-write")
+    if receipt.get("dispatch_result") != "selected":
+        errors.append("implementation dispatch trace: receipt must confirm selected writer")
+    if receipt.get("fallback_reason") not in {"", "none"}:
+        errors.append("implementation dispatch trace: selected writer receipt must not report fallback")
+    if events[write_index].get("actor") != expected_agent:
+        errors.append("implementation dispatch trace: exact risk-matched writer must own the first code edit")
+
+    return errors
+
+
+def validate_review_escalation_trace(events: list[dict[str, str]]) -> list[str]:
+    """Validate exact read-only reviewer dispatch and evidence-gated tier escalation."""
+
+    errors: list[str] = []
+    dispatch_indexes = [
+        index for index, event in enumerate(events) if event.get("event") == "review-dispatch"
+    ]
+    if not dispatch_indexes:
+        return ["review escalation trace: missing exact reviewer dispatch"]
+
+    seen: set[tuple[str, str]] = set()
+    prior_tier: str | None = None
+    prior_result_index: int | None = None
+    prior_result: dict[str, str] | None = None
+
+    for position, dispatch_index in enumerate(dispatch_indexes):
+        dispatch = events[dispatch_index]
+        risk = dispatch.get("risk", "")
+        tier = dispatch.get("tier", "")
+        agent = dispatch.get("agent", "")
+        diff_revision = dispatch.get("diff_revision", "")
+        expected_start = REVIEW_START_BY_RISK.get(risk)
+        expected_agent = REVIEW_AGENT_BY_TIER.get(tier)
+
+        if expected_start is None:
+            errors.append("review escalation trace: risk must be low, medium, high, or critical")
+            continue
+        if position == 0 and tier != expected_start:
+            errors.append(
+                f"review escalation trace: {risk} risk must start at exact {expected_start} reviewer"
+            )
+        if expected_agent is None or agent != expected_agent:
+            errors.append("review escalation trace: dispatch must select the exact agent for its tier")
+        if dispatch.get("result") != "selected":
+            errors.append("review escalation trace: review requires a selected exact reviewer")
+        key = (diff_revision, tier)
+        if key in seen:
+            errors.append("review escalation trace: unchanged diff cannot repeat the same reviewer tier")
+        seen.add(key)
+
+        if prior_tier is not None and prior_result is not None and prior_result_index is not None:
+            if prior_tier in REVIEW_TIERS:
+                prior_rank = REVIEW_TIERS.index(prior_tier)
+                expected_next = (
+                    REVIEW_TIERS[prior_rank + 1]
+                    if prior_rank + 1 < len(REVIEW_TIERS)
+                    else None
+                )
+                if tier != expected_next:
+                    errors.append("review escalation trace: sequential review ladder cannot skip a proven tier")
+            reason = prior_result.get("escalation_reason", "none")
+            if reason not in REVIEW_ESCALATION_REASONS:
+                errors.append("review escalation trace: stronger reviewer requires a concrete escalation trigger")
+            actionable = prior_result.get("actionable_findings", "none") not in {
+                "",
+                "0",
+                "false",
+                "none",
+            }
+            if actionable:
+                between = events[prior_result_index + 1 : dispatch_index]
+                if not any(event.get("event") == "root-remediation" for event in between):
+                    errors.append("review escalation trace: root must remediate actionable findings before escalation")
+                if not any(
+                    event.get("event") == "validation" and event.get("result") == "green"
+                    for event in between
+                ):
+                    errors.append("review escalation trace: green validation must follow remediation before escalation")
+
+        next_dispatch_index = (
+            dispatch_indexes[position + 1] if position + 1 < len(dispatch_indexes) else len(events)
+        )
+        window = events[dispatch_index + 1 : next_dispatch_index]
+        receipt_offset = next(
+            (
+                offset
+                for offset, event in enumerate(window)
+                if event.get("event") == "review-routing-receipt"
+            ),
+            None,
+        )
+        result_offset = next(
+            (offset for offset, event in enumerate(window) if event.get("event") == "review-result"),
+            None,
+        )
+        if receipt_offset is None:
+            errors.append("review escalation trace: review routing receipt must follow exact dispatch")
+            continue
+        if result_offset is None:
+            errors.append("review escalation trace: selected reviewer must return a structured result")
+            continue
+        if receipt_offset >= result_offset:
+            errors.append("review escalation trace: review routing receipt must precede reviewer result")
+
+        receipt = window[receipt_offset]
+        result = window[result_offset]
+        required_receipt = {
+            "diff_revision",
+            "risk_floor",
+            "requested_agent",
+            "requested_tier",
+            "dispatch_method",
+            "configured_model",
+            "observed_agent",
+            "observed_model",
+            "sandbox",
+            "dispatch_result",
+            "fallback_reason",
+        }
+        missing_receipt = sorted(field for field in required_receipt if field not in receipt)
+        if missing_receipt:
+            errors.append(f"review escalation trace: routing receipt missing fields {missing_receipt}")
+        if receipt.get("diff_revision") != diff_revision:
+            errors.append("review escalation trace: receipt diff revision must match dispatch")
+        if receipt.get("risk_floor") != expected_start:
+            errors.append("review escalation trace: receipt must record the risk review floor")
+        if receipt.get("requested_agent") != expected_agent or receipt.get("requested_tier") != tier:
+            errors.append("review escalation trace: receipt must name the exact requested reviewer")
+        if receipt.get("dispatch_method") not in {"per-spawn-model", "exact-custom-agent"}:
+            errors.append("review escalation trace: reviewer requires an exact dispatch method")
+        if receipt.get("sandbox") != "read-only":
+            errors.append("review escalation trace: reviewer sandbox must be read-only")
+        if receipt.get("dispatch_result") != "selected":
+            errors.append("review escalation trace: receipt must confirm selected reviewer")
+        if receipt.get("fallback_reason") not in {"", "none"}:
+            errors.append("review escalation trace: selected reviewer receipt must not report fallback")
+
+        required_result = {
+            "diff_revision",
+            "tier",
+            "verdict",
+            "confidence",
+            "coverage",
+            "actionable_findings",
+            "escalation_reason",
+        }
+        missing_result = sorted(field for field in required_result if field not in result)
+        if missing_result:
+            errors.append(f"review escalation trace: reviewer result missing fields {missing_result}")
+        if result.get("diff_revision") != diff_revision or result.get("tier") != tier:
+            errors.append("review escalation trace: reviewer result must match dispatched tier and diff")
+        if result.get("verdict") not in {"ACCEPT", "REVISE", "ESCALATE", "BLOCKED"}:
+            errors.append("review escalation trace: reviewer result has an invalid verdict")
+
+        prior_tier = tier
+        prior_result = result
+        prior_result_index = dispatch_index + 1 + result_offset
+
+    if prior_result is not None:
+        final_reason = prior_result.get("escalation_reason", "none")
+        actionable = prior_result.get("actionable_findings", "none") not in {
+            "",
+            "0",
+            "false",
+            "none",
+        }
+        incomplete = (
+            prior_result.get("verdict") != "ACCEPT"
+            or prior_result.get("confidence") == "low"
+            or prior_result.get("coverage") != "complete"
+        )
+        if final_reason in REVIEW_ESCALATION_REASONS or actionable or incomplete:
+            if prior_tier == "strongest":
+                errors.append("review escalation trace: strongest reviewer left the task blocked")
+            else:
+                errors.append("review escalation trace: unresolved trigger requires the next reviewer tier")
 
     return errors
 
@@ -473,6 +757,7 @@ def validate_usage_routing_contract(
     model_routing: str,
     code_discovery: str,
     implementation: str,
+    review_protocol: str,
     readme: str,
     readme_ru: str,
 ) -> list[str]:
@@ -564,9 +849,33 @@ def validate_usage_routing_contract(
         "critical work requires the strongest proven route",
         "stop before every test or production code edit",
         "rather than silently lowering the risk floor",
+        "Dispatch the exact selected profile before every test or production code edit",
+        "Implementation routing receipt",
     ]:
         if token not in implementation_route:
-            errors.append(f"model-routing.md implementation routing: missing {token}")
+            category = "exact writer dispatch" if token.startswith("Dispatch the exact") else "implementation routing"
+            errors.append(f"model-routing.md {category}: missing {token}")
+
+    review_route = markdown_section(model_routing, "### Exact sequential reviewer dispatch")
+    for token in [
+        "Dispatch the exact starting reviewer",
+        "openbuild-review-fast",
+        "openbuild-review-balanced",
+        "openbuild-review-strong",
+        "openbuild-review-strongest",
+        "fast → balanced → strong → strongest",
+        "Move exactly one proven tier higher",
+        "Review routing receipt",
+        "Reviewers remain read-only",
+    ]:
+        if token not in review_route:
+            if token.startswith("Dispatch the exact"):
+                category = "exact reviewer dispatch"
+            elif token == "fast → balanced → strong → strongest":
+                category = "sequential review ladder"
+            else:
+                category = "review routing"
+            errors.append(f"model-routing.md {category}: missing {token}")
 
     setup = markdown_section(model_routing, "## `$build setup-models`")
     for token in [
@@ -621,9 +930,32 @@ def validate_usage_routing_contract(
         "For high work require a confirmed strong route",
         "for critical work require the strongest proven route",
         "stop before all test and production code edits",
+        "Dispatch that exact profile before every test or production code edit",
+        "Implementation routing receipt",
     ]:
         if token not in implementation:
-            errors.append(f"implementation-delegation.md risk-matched writer routing: missing {token}")
+            if token.startswith("Dispatch that exact"):
+                category = "exact writer dispatch"
+            elif token == "Implementation routing receipt":
+                category = "implementation routing receipt"
+            else:
+                category = "risk-matched writer routing"
+            errors.append(f"implementation-delegation.md {category}: missing {token}")
+
+    review_dispatch = markdown_section(review_protocol, "## Exact dispatch and routing receipt")
+    for token in [
+        "low` → `openbuild-review-fast",
+        "medium` → `openbuild-review-balanced",
+        "high` → `openbuild-review-strong",
+        "critical` → `openbuild-review-strongest",
+        "fast → balanced → strong → strongest",
+        "Review routing receipt",
+        "sandbox: <read-only",
+        "A configured profile with unobservable model metadata may satisfy low or medium selection",
+        "High and critical floors still require proven strong/strongest capability",
+    ]:
+        if token not in review_dispatch:
+            errors.append(f"review-protocol.md exact reviewer routing: missing {token}")
 
     readme_usage = markdown_section(readme, "## How usage-aware model routing works")
     if not readme_usage:
@@ -639,6 +971,12 @@ def validate_usage_routing_contract(
             "risk-matched writer",
             "openbuild-implementation-fast",
             "openbuild-implementation-balanced",
+            "Implementation routing receipt",
+            "Progressive review uses the same exact-selection rule",
+            "openbuild-review-balanced",
+            "openbuild-review-strongest",
+            "Review routing receipt",
+            "fast → balanced → strong → strongest",
             "Escalation",
             "model_reasoning_effort",
         ]:
@@ -659,6 +997,12 @@ def validate_usage_routing_contract(
             "risk-matched writer",
             "openbuild-implementation-fast",
             "openbuild-implementation-balanced",
+            "Implementation routing receipt",
+            "Progressive review применяет то же правило exact selection",
+            "openbuild-review-balanced",
+            "openbuild-review-strongest",
+            "Review routing receipt",
+            "fast → balanced → strong → strongest",
             "Эскалация",
             "model_reasoning_effort",
         ]:
@@ -956,6 +1300,8 @@ def main() -> int:
         (SKILL / "references" / "review-protocol.md", "Minimality assessment:"),
         (SKILL / "references" / "spec-template.md", "Minimality decision:"),
         (SKILL / "references" / "spec-template.md", "Search routing receipt:"),
+        (SKILL / "references" / "spec-template.md", "Implementation routing receipt:"),
+        (SKILL / "references" / "spec-template.md", "Review routing receipt:"),
     ]:
         if token not in read_text(path, errors):
             fail(errors, f"{path.name}: missing minimality contract {token}")
@@ -1015,6 +1361,7 @@ def main() -> int:
     template_text = read_text(SKILL / "references" / "spec-template.md", errors)
     blindspot_text = read_text(BLINDSPOT_PROTOCOL, errors)
     implementation_delegation_text = read_text(IMPLEMENTATION_DELEGATION, errors)
+    review_protocol_text = read_text(REVIEW_PROTOCOL, errors)
     code_discovery_text = read_text(SKILL / "references" / "code-discovery.md", errors)
     model_routing_text = read_text(SKILL / "references" / "model-routing.md", errors)
     tdd_workflow_text = read_text(SKILL / "references" / "tdd-workflow.md", errors)
@@ -1036,6 +1383,7 @@ def main() -> int:
             model_routing_text,
             code_discovery_text,
             implementation_delegation_text,
+            review_protocol_text,
             readme,
             readme_ru,
         )

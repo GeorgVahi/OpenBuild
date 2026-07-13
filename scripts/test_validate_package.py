@@ -7,6 +7,7 @@ import unittest
 from validate_package import (
     BLINDSPOT_PROTOCOL,
     IMPLEMENTATION_DELEGATION,
+    REVIEW_PROTOCOL,
     ROOT,
     SKILL,
     VERSION_SYNC_PATHS,
@@ -15,7 +16,9 @@ from validate_package import (
     validate_blindspot_contract,
     validate_changelog_contract,
     validate_implementation_delegation_contract,
+    validate_implementation_dispatch_trace,
     validate_release_docs_contract,
+    validate_review_escalation_trace,
     validate_search_dispatch_trace,
     validate_usage_routing_contract,
 )
@@ -232,10 +235,10 @@ class ChangelogContractTests(unittest.TestCase):
     def test_development_manifest_version_and_latest_release_are_documented(self) -> None:
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
         self.assertIn("## [0.4.0] - 2026-07-12", changelog)
-        self.assertEqual(validate_changelog_contract(changelog, "1.0.2"), [])
+        self.assertEqual(validate_changelog_contract(changelog, "1.0.3"), [])
 
-        mutated = changelog.replace("Target development version: `1.0.2`.", "Target development version: `next`.")
-        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "1.0.2")))
+        mutated = changelog.replace("Target development version: `1.0.3`.", "Target development version: `next`.")
+        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "1.0.3")))
 
     def test_released_version_is_pinned_in_both_install_channels(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -252,6 +255,7 @@ class UsageRoutingContractTests(unittest.TestCase):
         self.model_routing = (SKILL / "references" / "model-routing.md").read_text(encoding="utf-8")
         self.code_discovery = (SKILL / "references" / "code-discovery.md").read_text(encoding="utf-8")
         self.implementation = IMPLEMENTATION_DELEGATION.read_text(encoding="utf-8")
+        self.review_protocol = REVIEW_PROTOCOL.read_text(encoding="utf-8")
         self.readme = (ROOT / "README.md").read_text(encoding="utf-8")
         self.readme_ru = (ROOT / "README.ru.md").read_text(encoding="utf-8")
 
@@ -261,6 +265,7 @@ class UsageRoutingContractTests(unittest.TestCase):
             overrides.get("model_routing", self.model_routing),
             overrides.get("code_discovery", self.code_discovery),
             overrides.get("implementation", self.implementation),
+            overrides.get("review_protocol", self.review_protocol),
             overrides.get("readme", self.readme),
             overrides.get("readme_ru", self.readme_ru),
         )
@@ -335,6 +340,38 @@ class UsageRoutingContractTests(unittest.TestCase):
         ]:
             model_routing = self.model_routing.replace(profile, "missing-writer-profile")
             self.assertTrue(any("implementation routing" in error for error in self.validate(model_routing=model_routing)))
+
+    def test_exact_named_writer_dispatch_precedes_every_code_edit(self) -> None:
+        implementation = self.implementation.replace(
+            "Dispatch that exact profile before every test or production code edit",
+            "Prefer that profile while implementing",
+        )
+        self.assertTrue(any("exact writer dispatch" in error for error in self.validate(implementation=implementation)))
+
+        implementation = self.implementation.replace(
+            "Implementation routing receipt",
+            "Implementation routing summary",
+        )
+        self.assertTrue(any("implementation routing receipt" in error for error in self.validate(implementation=implementation)))
+
+    def test_reviewers_use_exact_profiles_in_a_sequential_ladder(self) -> None:
+        model_routing = self.model_routing.replace(
+            "Dispatch the exact starting reviewer",
+            "Choose a suitable reviewer",
+        )
+        self.assertTrue(any("exact reviewer dispatch" in error for error in self.validate(model_routing=model_routing)))
+
+        model_routing = self.model_routing.replace(
+            "fast → balanced → strong → strongest",
+            "fast → strongest",
+        )
+        self.assertTrue(any("sequential review ladder" in error for error in self.validate(model_routing=model_routing)))
+
+        review_protocol = self.review_protocol.replace(
+            "Review routing receipt",
+            "Review routing summary",
+        )
+        self.assertTrue(any("review-protocol.md" in error for error in self.validate(review_protocol=review_protocol)))
 
     def test_writer_escalation_preserves_tdd_and_single_writer_controls(self) -> None:
         model_routing = self.model_routing.replace(
@@ -502,6 +539,269 @@ class SearchDispatchTraceTests(unittest.TestCase):
         ]
 
         self.assertTrue(any("must follow" in error for error in validate_search_dispatch_trace(trace)))
+
+
+class ImplementationDispatchTraceTests(unittest.TestCase):
+    def test_low_risk_exact_fast_writer_owns_first_edit(self) -> None:
+        trace = [
+            {
+                "event": "implementation-dispatch",
+                "risk": "low",
+                "agent": "openbuild-implementation-fast",
+                "result": "selected",
+                "fallback_reason": "none",
+            },
+            {
+                "event": "implementation-routing-receipt",
+                "risk": "low",
+                "requested_agent": "openbuild-implementation-fast",
+                "requested_tier": "fast",
+                "dispatch_method": "exact-custom-agent",
+                "configured_model": "fast-code-model",
+                "observed_agent": "openbuild-implementation-fast",
+                "observed_model": "unknown",
+                "sandbox": "workspace-write",
+                "lease": "M1",
+                "dispatch_result": "selected",
+                "fallback_reason": "none",
+            },
+            {
+                "event": "test-write",
+                "actor": "openbuild-implementation-fast",
+            },
+        ]
+
+        self.assertEqual(validate_implementation_dispatch_trace(trace), [])
+
+    def test_medium_risk_cannot_silently_jump_to_generic_or_strongest_writer(self) -> None:
+        trace = [
+            {
+                "event": "implementation-dispatch",
+                "risk": "medium",
+                "agent": "openbuild-implementation-strongest",
+                "result": "selected",
+                "fallback_reason": "none",
+            },
+            {
+                "event": "implementation-routing-receipt",
+                "risk": "medium",
+                "requested_agent": "openbuild-implementation-strongest",
+                "requested_tier": "strongest",
+                "dispatch_method": "exact-custom-agent",
+                "configured_model": "strong-code-model",
+                "observed_agent": "openbuild-implementation-strongest",
+                "observed_model": "unknown",
+                "sandbox": "workspace-write",
+                "lease": "M1",
+                "dispatch_result": "selected",
+                "fallback_reason": "none",
+            },
+            {
+                "event": "code-write",
+                "actor": "openbuild-implementation-strongest",
+            },
+        ]
+
+        self.assertTrue(any("openbuild-implementation-balanced" in error for error in validate_implementation_dispatch_trace(trace)))
+
+    def test_writer_receipt_must_precede_the_edit_and_be_write_capable(self) -> None:
+        trace = [
+            {
+                "event": "implementation-dispatch",
+                "risk": "high",
+                "agent": "openbuild-implementation-strongest",
+                "result": "selected",
+                "fallback_reason": "none",
+            },
+            {
+                "event": "implementation-routing-receipt",
+                "risk": "high",
+                "requested_agent": "openbuild-implementation-strongest",
+                "requested_tier": "strongest",
+                "dispatch_method": "exact-custom-agent",
+                "configured_model": "strong-code-model",
+                "observed_agent": "openbuild-implementation-strongest",
+                "observed_model": "unknown",
+                "sandbox": "read-only",
+                "lease": "M1",
+                "dispatch_result": "selected",
+                "fallback_reason": "none",
+            },
+            {
+                "event": "code-write",
+                "actor": "openbuild-implementation-strongest",
+            },
+        ]
+
+        self.assertTrue(any("workspace-write" in error for error in validate_implementation_dispatch_trace(trace)))
+
+
+class ReviewEscalationTraceTests(unittest.TestCase):
+    @staticmethod
+    def review_cycle(
+        tier: str,
+        agent: str,
+        revision: str,
+        *,
+        verdict: str,
+        findings: str,
+        escalation_reason: str,
+    ) -> list[dict[str, str]]:
+        return [
+            {
+                "event": "review-dispatch",
+                "risk": "low",
+                "tier": tier,
+                "agent": agent,
+                "diff_revision": revision,
+                "result": "selected",
+            },
+            {
+                "event": "review-routing-receipt",
+                "diff_revision": revision,
+                "risk_floor": "fast",
+                "requested_agent": agent,
+                "requested_tier": tier,
+                "dispatch_method": "exact-custom-agent",
+                "configured_model": f"{tier}-review-model",
+                "observed_agent": agent,
+                "observed_model": "unknown",
+                "sandbox": "read-only",
+                "dispatch_result": "selected",
+                "fallback_reason": "none",
+            },
+            {
+                "event": "review-result",
+                "diff_revision": revision,
+                "tier": tier,
+                "verdict": verdict,
+                "confidence": "high",
+                "coverage": "complete",
+                "actionable_findings": findings,
+                "escalation_reason": escalation_reason,
+            },
+        ]
+
+    def test_low_risk_escalates_one_tier_after_root_remediation(self) -> None:
+        trace = self.review_cycle(
+            "fast",
+            "openbuild-review-fast",
+            "D1",
+            verdict="REVISE",
+            findings="F-1",
+            escalation_reason="unresolved-high-impact-finding",
+        )
+        trace.extend(
+            [
+                {"event": "root-remediation"},
+                {"event": "validation", "result": "green"},
+            ]
+        )
+        trace.extend(
+            self.review_cycle(
+                "balanced",
+                "openbuild-review-balanced",
+                "D2",
+                verdict="ACCEPT",
+                findings="none",
+                escalation_reason="none",
+            )
+        )
+
+        self.assertEqual(validate_review_escalation_trace(trace), [])
+
+    def test_review_ladder_cannot_skip_a_proven_intermediate_tier(self) -> None:
+        trace = self.review_cycle(
+            "fast",
+            "openbuild-review-fast",
+            "D1",
+            verdict="REVISE",
+            findings="none",
+            escalation_reason="low-confidence",
+        )
+        trace.extend(
+            self.review_cycle(
+                "strong",
+                "openbuild-review-strong",
+                "D1",
+                verdict="ACCEPT",
+                findings="none",
+                escalation_reason="none",
+            )
+        )
+
+        self.assertTrue(any("cannot skip" in error for error in validate_review_escalation_trace(trace)))
+
+    def test_unknown_reviewer_tier_is_rejected_without_crashing_the_trace(self) -> None:
+        trace = self.review_cycle(
+            "economy",
+            "generic-reviewer",
+            "D1",
+            verdict="REVISE",
+            findings="none",
+            escalation_reason="low-confidence",
+        )
+        trace.extend(
+            self.review_cycle(
+                "balanced",
+                "openbuild-review-balanced",
+                "D1",
+                verdict="ACCEPT",
+                findings="none",
+                escalation_reason="none",
+            )
+        )
+
+        self.assertTrue(any("exact agent" in error for error in validate_review_escalation_trace(trace)))
+
+    def test_stronger_reviewer_requires_a_concrete_trigger(self) -> None:
+        trace = self.review_cycle(
+            "fast",
+            "openbuild-review-fast",
+            "D1",
+            verdict="ACCEPT",
+            findings="none",
+            escalation_reason="none",
+        )
+        trace.extend(
+            self.review_cycle(
+                "balanced",
+                "openbuild-review-balanced",
+                "D1",
+                verdict="ACCEPT",
+                findings="none",
+                escalation_reason="none",
+            )
+        )
+
+        self.assertTrue(any("concrete escalation trigger" in error for error in validate_review_escalation_trace(trace)))
+
+    def test_non_accepting_final_result_cannot_close_the_ladder(self) -> None:
+        trace = self.review_cycle(
+            "fast",
+            "openbuild-review-fast",
+            "D1",
+            verdict="REVISE",
+            findings="none",
+            escalation_reason="none",
+        )
+
+        self.assertTrue(any("requires the next reviewer tier" in error for error in validate_review_escalation_trace(trace)))
+
+    def test_high_risk_starts_with_exact_strong_read_only_reviewer(self) -> None:
+        trace = self.review_cycle(
+            "balanced",
+            "openbuild-review-balanced",
+            "D1",
+            verdict="ACCEPT",
+            findings="none",
+            escalation_reason="none",
+        )
+        trace[0]["risk"] = "high"
+        trace[1]["risk_floor"] = "strong"
+
+        errors = validate_review_escalation_trace(trace)
+        self.assertTrue(any("must start at exact strong reviewer" in error for error in errors))
 
 
 if __name__ == "__main__":

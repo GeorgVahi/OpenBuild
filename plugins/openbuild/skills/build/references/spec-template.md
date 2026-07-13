@@ -21,6 +21,8 @@ Use this as a flexible structure. Remove irrelevant sections and keep the docume
 - Search usage route: separate-pool | main-efficient | role-only | generic-subagent | root-fallback — <observed model/pool, first-attempt result, and circuit breaker>
 - Search routing receipt: <exact agent, dispatch method, configured/observed model, pool, result, and fallback reason>
 - Implementation model route: fast-profile | balanced-profile | strongest-profile | native-selector | risk-matched-root | blocked — <requested profile/tier, observed model or unknown, escalation, and exact blocker>
+- Implementation routing receipt: <risk, exact requested agent/tier, dispatch method, configured/observed model, workspace-write sandbox, lease, result, and fallback reason>
+- Review routing receipt: <diff revision, risk floor, exact requested agent/tier, dispatch method, configured/observed model, read-only sandbox, result, and fallback reason>
 
 ## 1. Outcome
 
@@ -117,6 +119,7 @@ Use this as a flexible structure. Remove irrelevant sections and keep the docume
 - Manual/runtime check: <if required>.
 - Starting review tier: <tier and evidence>.
 - Required final tier: <tier and evidence>.
+- Review ladder: <exact profiles dispatched sequentially, trigger/remediation between tiers, and stop reason>.
 - Review focus: <correctness, security, data, UX, etc.>.
 
 ## 8. Milestones
@@ -133,7 +136,7 @@ Use this as a flexible structure. Remove irrelevant sections and keep the docume
 - Focused green: `<command or scenario>` -> <result>
 - Validation: `<commands or scenarios>`
 - Acceptance: AC-01, AC-02
-- Review: Pending | Accepted — <mode/tier/confidence>
+- Review: Pending | Accepted — <exact agent, routing receipt, mode/tier/confidence, verdict, coverage, findings, escalation trigger or stop reason>
 - Version: unchanged | `<previous> -> <next>` — <impact/evidence>
 - Commit: Pending | `<sha>` | Not applicable
 
@@ -174,7 +177,7 @@ Non-blocking assumptions:
 ### YYYY-MM-DD — <stage>
 
 - Changed: <summary>.
-- Routing: <search usage route/circuit breaker; implementation model/delegation evidence>.
+- Routing: <search receipt/circuit breaker; implementation exact dispatch/receipt/lease; sequential review receipts>.
 - Primary signal: met | not met | partially validated.
 - Validation: `<command>` -> <result>.
 - Minimality decision: <selected rung and evidence>.
@@ -199,6 +202,8 @@ Non-blocking assumptions:
 - TDD-first milestones record an intended red signal, owner-layer implementation, and focused green evidence, or explain why an automated red signal was impractical.
 - Implementation milestones record an evidence-backed minimality decision without weakening acceptance criteria or safeguards.
 - Delegated implementation records one active writer lease, allowed files, root handoff validation, and root-only Git ownership.
+- Every test or production code edit follows an exact risk-matched writer dispatch and Implementation routing receipt; every progressive review follows an exact read-only reviewer dispatch and Review routing receipt.
+- Reviewer escalation is sequential from the risk floor, advances one proven tier only after a concrete remaining trigger, and stops when acceptance evidence is sufficient.
 - Milestones deliver coherent outcomes rather than arbitrary file groups.
 - Validation commands exist or are explicitly marked as proposed.
 - Blocking questions are empty before implementation starts.

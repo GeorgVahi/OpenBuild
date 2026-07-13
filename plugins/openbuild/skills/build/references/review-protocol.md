@@ -21,6 +21,29 @@ Provide the reviewer with:
 
 Use a fresh context with conversation-history inheritance disabled when the runtime supports it, such as `fork_turns: "none"` or an equivalent `fork_context: false`. If no isolation control exists, disclose possible inherited context and label independence as limited. Do not reveal earlier reviewer conclusions; pass source artifacts instead.
 
+## Exact dispatch and routing receipt
+
+Select the exact starting reviewer from task risk: `low` → `openbuild-review-fast`, `medium` → `openbuild-review-balanced`, `high` → `openbuild-review-strong`, and `critical` → `openbuild-review-strongest`. Bind a confirmed model through a direct per-spawn selector when exposed; otherwise dispatch the exact custom-agent name. Do not accept a generic reviewer or a prompt that merely names the profile as selection evidence.
+
+Run a strictly sequential ladder, starting at the floor and moving at most one step at a time: `fast → balanced → strong → strongest`. After every dispatch and before using the result, record:
+
+```text
+Review routing receipt:
+diff_revision: <commit/status/hash identity>
+risk_floor: <fast|balanced|strong|strongest>
+requested_agent: <exact openbuild-review-* profile>
+requested_tier: <fast|balanced|strong|strongest>
+dispatch_method: <per-spawn-model|exact-custom-agent|unavailable>
+configured_model: <profile model or unknown>
+observed_agent: <runtime agent or unknown>
+observed_model: <runtime model or unknown>
+sandbox: <read-only or observed value>
+dispatch_result: <selected|failed>
+fallback_reason: <none|profile-not-discoverable|selector-unavailable|model-unavailable|quota-exhausted|spawn-failed|tier-unproven>
+```
+
+The receipt proves routing intent and observed selection separately. A configured profile with unobservable model metadata may satisfy low or medium selection when no evidence contradicts it. High and critical floors still require proven strong/strongest capability. Any fallback must be read-only and proven at or above the floor; name the actual reviewer instead of impersonating the unavailable profile.
+
 ## Required result
 
 Ask for this structure:
@@ -102,9 +125,13 @@ After adjudication and remediation, move one proven tier higher when any trigger
 
 Escalation means a stronger confirmed model/profile or supported reasoning effort. Changing only the prompt, role label, or thread is not a model escalation; report it accurately.
 
+Dispatch the next exact reviewer only after the current reviewer returns its structured result, the root adjudicates every finding, confirmed changes are remediated through the owning TDD/minimality workflow, and affected validation is green. If no trigger remains, stop; do not spend a stronger tier merely to seek a higher score. If a trigger remains, advance exactly one available proven step and give the next reviewer source artifacts rather than the previous conclusion.
+
 ## Loop bounds
 
 - Run at most one review per unchanged diff and effective tier.
+- Run only one reviewer at a time; do not fan out the progressive ladder.
+- Follow `fast → balanced → strong → strongest` from the risk floor without skipping a proven intermediate tier.
 - Fix confirmed issues before moving up unless the stronger tier is needed to resolve a conflict.
 - Never downgrade below the task's complexity floor.
 - Stop escalating when distinct proven tiers are exhausted.

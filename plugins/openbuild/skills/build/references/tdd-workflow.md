@@ -17,7 +17,7 @@ For TDD-first work:
 1. Identify the owning layer and an observable primary signal.
 2. Find the narrowest existing supported test path before creating a new harness.
 3. Define the smallest contract-level or user-visible failing test, expected failure, minimality decision, and exact test/production file set without editing them.
-4. Select the risk-matched root or bounded implementation worker and acquire the single-writer lease before any test or production code edit. Require fast for low-risk Direct work, balanced for medium contained behavior, strong for high-risk work, and strongest for critical work. If the required tier is unavailable, stop implementation.
+4. Select the risk-matched root or bounded implementation worker, dispatch the exact profile required by [adaptive implementation delegation](implementation-delegation.md), record its Implementation routing receipt, and acquire the single-writer lease before any test or production code edit. Require `openbuild-implementation-fast` for low-risk Direct work, `openbuild-implementation-balanced` for medium contained behavior, and `openbuild-implementation-strongest` for high or critical work. If the required tier is unavailable, stop implementation.
 5. Under that lease, add or modify the test when needed, run it, and record the expected failing signal. A failure caused by broken setup, unrelated code, or an invalid assertion is not a useful red signal.
 6. Under the same lease, apply [the minimality protocol](minimality-protocol.md) and implement the smallest coherent owner-layer change supported by repository evidence.
 7. Rerun the focused test and require a successful exit before calling it green.

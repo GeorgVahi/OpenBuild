@@ -33,7 +33,15 @@ Official Codex guidance documents a separate usage limit for the Spark preview a
 
 ## Critic and review capability order
 
-For specification critics and diff reviewers, use the first supported native selector, configured `openbuild-review-*` profile, confirmed reasoning ladder, reviewer role, generic read-only subagent, or root self-review. Apply the complexity floor below; search-pool priority does not lower the reasoning depth required to adjudicate product, architecture, security, or code correctness.
+For specification critics, use the first supported native selector, configured `openbuild-review-*` profile, confirmed reasoning ladder, reviewer role, generic read-only subagent, or root self-review. Diff review has a stricter exact-dispatch contract below. Apply the complexity floor; search-pool priority does not lower the reasoning depth required to adjudicate product, architecture, security, or code correctness.
+
+### Exact sequential reviewer dispatch
+
+Dispatch the exact starting reviewer from risk before every progressive-review ladder: `low` → `openbuild-review-fast`, `medium` → `openbuild-review-balanced`, `high` → `openbuild-review-strong`, and `critical` → `openbuild-review-strongest`. When a direct model selector exists, bind the confirmed model; otherwise select that exact custom-agent name. A generic reviewer, task label, prompt mention, or changed thread is not proof of model selection.
+
+Run reviewers one at a time in this order: fast → balanced → strong → strongest. Begin at the complexity floor, never below it. Stop after an evidence-backed `ACCEPT` with sufficient confidence, complete acceptance coverage, green validation, and no actionable finding. Move exactly one proven tier higher only when the previous structured result records a trigger from [the review protocol](review-protocol.md). The root adjudicates and remediates confirmed findings through TDD/minimality, reruns affected validation, and only then dispatches the next exact reviewer. Reviewers remain read-only and never fix their own findings.
+
+Emit a Review routing receipt after each exact dispatch and before accepting its result, with `diff_revision`, `risk_floor`, `requested_agent`, `requested_tier`, `dispatch_method`, `configured_model`, `observed_agent`, `observed_model`, `sandbox`, `dispatch_result`, and `fallback_reason`. Do not repeat the same tier on an unchanged diff or skip a proven intermediate tier. If an exact profile is unavailable, record `profile-not-discoverable`, `selector-unavailable`, `model-unavailable`, `quota-exhausted`, or `spawn-failed`; use only a proven equivalent at or above the floor and do not claim the missing profile ran.
 
 ## Complexity floor
 
@@ -68,7 +76,7 @@ Choose an Implementation worker only after the current specification revision pa
 - `openbuild-implementation-balanced` for medium-risk contained logic or refactoring with clear contracts and supported tests;
 - `openbuild-implementation-strongest` for high-risk cross-layer behavior, public contracts, persistence, concurrency, auth, permissions, privacy, or sensitive state, and for critical work at the deepest supported effort.
 
-Prefer exact native custom-agent selection or the configured profile for the selected tier. The root may use `root-only` only when its effective model satisfies that tier. A built-in worker or generic bounded subagent may edit only when configuration or runtime evidence supports the same tier. Never infer suitability, strength, cost, or pool from a model slug.
+Dispatch the exact selected profile before every test or production code edit. When a per-spawn model selector exists, bind the confirmed profile model directly; otherwise select the custom agent by exact name. A generic agent, descriptive task label, profile mention, or stronger-than-requested writer is not proof of the selected route. Emit the Implementation routing receipt from [adaptive implementation delegation](implementation-delegation.md) after dispatch and before any lease or edit. The root may use `root-only` only for the documented safety cases and when its effective model satisfies that tier. A proven equivalent worker may edit only after the failed exact attempt and equivalent evidence are recorded. Never infer suitability, strength, cost, or pool from a model slug.
 
 Never use `openbuild-search-separate`, `openbuild-search-fallback`, legacy `openbuild-discovery`, or `openbuild-review-*` profiles for code edits. Select `root-only`, `bounded-worker`, or `sequential-workers` from milestone ownership, overlap, dirty-state safety, risk, and validation evidence; never run concurrent writers in one checkout.
 

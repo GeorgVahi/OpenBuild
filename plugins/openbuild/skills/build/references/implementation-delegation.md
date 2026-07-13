@@ -16,12 +16,35 @@ Choose the minimum sufficient implementation depth:
 
 | Complexity | Default implementation mode |
 |---|---|
-| `low` | `openbuild-implementation-fast` or an equivalent proven fast coding route for Direct, documentation, cosmetic, or mechanical work without behavior changes |
-| `medium` | `openbuild-implementation-balanced` or an equivalent proven balanced coding route for contained logic or refactoring with clear contracts and supported tests |
-| `high` | `openbuild-implementation-strongest` or an equivalent strong coding route for cross-layer behavior, public contracts, persistence, concurrency, auth, permissions, privacy, or sensitive state |
-| `critical` | strongest proven route with deepest supported reasoning; prefer `root-only` only when the root satisfies that route, and never delegate destructive execution |
+| `low` | exact `openbuild-implementation-fast` profile for Direct, documentation, cosmetic, or mechanical work without behavior changes |
+| `medium` | exact `openbuild-implementation-balanced` profile for contained logic or refactoring with clear contracts and supported tests |
+| `high` | exact `openbuild-implementation-strongest` profile for cross-layer behavior, public contracts, persistence, concurrency, auth, permissions, privacy, or sensitive state |
+| `critical` | exact `openbuild-implementation-strongest` profile with the deepest supported reasoning; never delegate destructive execution |
 
 Use a risk-matched coding model for every complexity class, as defined by [model routing](model-routing.md). Select fast for low-risk Direct work, balanced for contained medium-risk behavior, and strong/strongest for high or critical work. Scale supported reasoning effort within the selected tier: low/minimal when safe for mechanical work, medium for contained behavior, high for cross-layer work, and the deepest supported effort for critical reasoning. Escalate only after evidence shows that the current tier is insufficient. Do not infer capability from a model name, and do not claim a route or delegation without runtime/configuration evidence.
+
+## Exact writer dispatch
+
+Dispatch that exact profile before every test or production code edit: `low` → `openbuild-implementation-fast`, `medium` → `openbuild-implementation-balanced`, and `high` or `critical` → `openbuild-implementation-strongest`. When the callable spawn schema exposes a direct model selector, bind the profile's confirmed model there; otherwise select the custom agent by its exact name. A generic worker, descriptive task name, prompt mention, or stronger-than-requested profile is not the selected risk route and must not start editing.
+
+Emit an Implementation routing receipt after dispatch and before granting the single-writer lease or changing any file:
+
+```text
+Implementation routing receipt:
+risk: <low|medium|high|critical>
+requested_agent: <exact openbuild-implementation-* profile>
+requested_tier: <fast|balanced|strongest>
+dispatch_method: <per-spawn-model|exact-custom-agent|unavailable>
+configured_model: <profile model or unknown>
+observed_agent: <runtime agent or unknown>
+observed_model: <runtime model or unknown>
+sandbox: <workspace-write or observed value>
+lease: <milestone ID or none>
+dispatch_result: <selected|failed>
+fallback_reason: <none|profile-not-discoverable|selector-unavailable|model-unavailable|quota-exhausted|spawn-failed|sandbox-mismatch|tier-unproven|lease-conflict>
+```
+
+For low or medium work, a failed exact dispatch may use another writer only when native selection or runtime/configuration evidence proves the same requested tier, sandbox, and lease; record the failed exact attempt and replacement identity instead of calling it the requested profile. For high or critical work, block before editing if the required profile/model floor is not proven. `root-only` remains a safety mode for coupled, sensitive, destructive, or overlapping scope, but it may edit only when the root's observed model satisfies the same tier and its receipt records `dispatch_method: risk-matched-root`; never use it as a silent convenience fallback.
 
 ## Single-writer lease
 
@@ -76,7 +99,7 @@ The worker must not:
 - add production dependencies or infrastructure without existing approval;
 - continue after discovering a new product choice, owner-layer conflict, secret, destructive action, or material scope expansion.
 
-Prefer an exact native custom-agent selection or the configured `openbuild-implementation-fast`, `openbuild-implementation-balanced`, or `openbuild-implementation-strongest` profile selected from the milestone risk. Read-only search/discovery and `openbuild-review-*` profiles are never implementation workers. A built-in worker, generic bounded subagent, or `root-only` route may write only when its configured or observed capability satisfies the selected tier and the same lease, TDD, minimality, validation, and review controls remain in force.
+Require the exact dispatch and Implementation routing receipt above for `openbuild-implementation-fast`, `openbuild-implementation-balanced`, or `openbuild-implementation-strongest` before the selected worker receives its lease. Read-only search/discovery and `openbuild-review-*` profiles are never implementation workers. A proven equivalent native selector, built-in worker, generic bounded subagent, or `root-only` route may write only under the explicitly recorded exception above and when the same lease, TDD, minimality, validation, and review controls remain in force.
 
 Missing model/tier metadata alone does not block low or medium implementation when the exact named profile is configured, the requested agent selection is recorded, its sandbox is appropriate, and no runtime evidence contradicts the route. Record the effective model/tier as `unknown` or `unobservable`; never claim a model switch or usage saving from the profile name alone. For high work require a confirmed strong route, and for critical work require the strongest proven route plus any applicable authority checkpoint. If the required tier cannot be selected, stop before all test and production code edits rather than silently lowering the risk floor.
 
