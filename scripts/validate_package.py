@@ -54,6 +54,14 @@ SEMVER_PARTS = re.compile(
 )
 MANIFEST_RELATIVE = "plugins/openbuild/.codex-plugin/plugin.json"
 VERSION_SYNC_PATHS = {MANIFEST_RELATIVE, "CHANGELOG.md", "README.md", "README.ru.md"}
+SEARCH_AGENT = "openbuild-search-separate"
+SEARCH_DISPATCH_FAILURES = {
+    "profile-not-discoverable",
+    "selector-unavailable",
+    "model-unavailable",
+    "quota-exhausted",
+    "spawn-failed",
+}
 
 
 def fail(errors: list[str], message: str) -> None:
@@ -91,6 +99,78 @@ def markdown_section(text: str, heading: str) -> str:
             end = index
             break
     return "\n".join(lines[start:end])
+
+
+def validate_search_dispatch_trace(events: list[dict[str, str]]) -> list[str]:
+    """Validate a compact observable trace for the first repository lookup."""
+
+    errors: list[str] = []
+    lookup_index = next(
+        (index for index, event in enumerate(events) if event.get("event") == "repository-search"),
+        None,
+    )
+    if lookup_index is None:
+        return ["search dispatch trace: missing repository-search event"]
+
+    prior_events = events[:lookup_index]
+    dispatches = [event for event in prior_events if event.get("event") == "search-dispatch"]
+    if not dispatches:
+        errors.append("search dispatch trace: exact agent dispatch must precede repository search")
+        return errors
+
+    dispatch = dispatches[0]
+    if dispatch.get("agent") != SEARCH_AGENT:
+        errors.append(f"search dispatch trace: first dispatch must select exact agent {SEARCH_AGENT}")
+
+    result = dispatch.get("result")
+    fallback_reason = dispatch.get("fallback_reason", "")
+    if result == "selected":
+        if fallback_reason not in {"", "none"}:
+            errors.append("search dispatch trace: selected route must not report a fallback reason")
+        if events[lookup_index].get("actor") != SEARCH_AGENT:
+            errors.append("search dispatch trace: selected exact agent must own the first repository search")
+    elif result == "failed":
+        if fallback_reason not in SEARCH_DISPATCH_FAILURES:
+            errors.append("search dispatch trace: failed dispatch must use an allowed fallback reason")
+    else:
+        errors.append("search dispatch trace: dispatch result must be selected or failed")
+
+    receipt_events = [
+        (index, event)
+        for index, event in enumerate(prior_events)
+        if event.get("event") == "search-routing-receipt"
+    ]
+    if not receipt_events:
+        errors.append("search dispatch trace: routing receipt must precede repository search")
+        return errors
+
+    receipt_index, receipt = receipt_events[-1]
+    dispatch_index = prior_events.index(dispatch)
+    if receipt_index <= dispatch_index:
+        errors.append("search dispatch trace: routing receipt must follow the exact dispatch attempt")
+    required_fields = {
+        "search_agent",
+        "dispatch_method",
+        "configured_model",
+        "observed_agent",
+        "observed_model",
+        "pool",
+        "fallback_reason",
+    }
+    missing = sorted(field for field in required_fields if field not in receipt)
+    if missing:
+        errors.append(f"search dispatch trace: routing receipt missing fields {missing}")
+    if receipt.get("search_agent") != SEARCH_AGENT:
+        errors.append(f"search dispatch trace: routing receipt must name {SEARCH_AGENT}")
+    if receipt.get("dispatch_method") not in {"per-spawn-model", "exact-custom-agent", "unavailable"}:
+        errors.append("search dispatch trace: routing receipt has invalid dispatch method")
+    if result == "selected" and receipt.get("pool") != "separate":
+        errors.append("search dispatch trace: selected exact agent must record the confirmed separate pool")
+    expected_reason = "none" if result == "selected" else fallback_reason
+    if receipt.get("fallback_reason") != expected_reason:
+        errors.append("search dispatch trace: routing receipt fallback reason must match dispatch outcome")
+
+    return errors
 
 
 def validate_auto_routing_contract(
@@ -399,9 +479,18 @@ def validate_usage_routing_contract(
     errors: list[str] = []
 
     search_preflight = markdown_section(skill_text, "## Initialize search routing")
-    for token in ["Before locating a specification", "separate-pool circuit-breaker", "every repository lookup", "any new file/symbol/grep lookup"]:
+    for token in [
+        "Before locating a specification",
+        "separate-pool circuit-breaker",
+        "every repository lookup",
+        "any new file/symbol/grep lookup",
+        "Spawn the custom agent named `openbuild-search-separate`",
+        "A generic subagent, a descriptive task name",
+        "exact dispatch succeeds or returns an allowed fallback reason",
+    ]:
         if token not in search_preflight:
-            errors.append(f"SKILL.md search preflight: missing {token}")
+            category = "exact agent dispatch" if "agent" in token or "exact dispatch" in token else "search preflight"
+            errors.append(f"SKILL.md {category}: missing {token}")
     preflight_position = skill_text.find("## Initialize search routing")
     selection_position = skill_text.find("## Select the specification safely")
     baseline_position = skill_text.find("## Establish the baseline")
@@ -409,7 +498,12 @@ def validate_usage_routing_contract(
         errors.append("SKILL.md search preflight: must precede specification selection and baseline discovery")
 
     skill_discovery = markdown_section(skill_text, "## Discover repository evidence")
-    for token in ["before any repository grep", "separate-usage search profile first", "main-pool model", "root search only"]:
+    for token in [
+        "before any repository grep",
+        "dispatch the exact confirmed separate-usage search agent first",
+        "main-pool model",
+        "root search only",
+    ]:
         if token not in skill_discovery:
             errors.append(f"SKILL.md usage routing: missing {token}")
     skill_implementation = markdown_section(skill_text, "## Implement milestones")
@@ -427,9 +521,26 @@ def validate_usage_routing_contract(
         "without retrying the same failed route for every grep",
         "Do not scrape or infer remaining quota",
         "Do not silently skip it",
+        "select `openbuild-search-separate` by exact custom-agent name",
+        "generic subagent, task name, or profile mention does not count as selection",
+        "profile-not-discoverable",
+        "selector-unavailable",
+        "model-unavailable",
+        "quota-exhausted",
+        "spawn-failed",
+        "routing receipt",
+        "configured_model",
+        "observed_model",
+        "fallback_reason",
     ]:
         if token not in search_order:
-            errors.append(f"model-routing.md search usage-pool order: missing {token}")
+            if token in SEARCH_DISPATCH_FAILURES:
+                category = "fallback reason"
+            elif token.startswith("select `openbuild") or "does not count" in token:
+                category = "exact agent dispatch"
+            else:
+                category = "search usage-pool order"
+            errors.append(f"model-routing.md {category}: missing {token}")
     ordered_search_tokens = [
         "**Separate usage pool:**",
         "**Efficient main-pool fallback:**",
@@ -478,9 +589,27 @@ def validate_usage_routing_contract(
         "new grep or lookup",
         "circuit breaker",
         "do not pay for repeated failed attempts",
+        "before the root runs any new repository search command",
+        "generic spawn or task label",
     ]:
         if token not in mandatory_search:
-            errors.append(f"code-discovery.md usage routing: missing {token}")
+            category = "exact agent dispatch" if "root runs" in token or "generic spawn" in token else "usage routing"
+            errors.append(f"code-discovery.md {category}: missing {token}")
+
+    routing_receipt = markdown_section(code_discovery, "## Search routing receipt")
+    for token in [
+        "search_agent: openbuild-search-separate",
+        "dispatch_method:",
+        "configured_model:",
+        "observed_agent:",
+        "observed_model:",
+        "pool:",
+        "dispatch_result:",
+        "fallback_reason:",
+        "usage dashboard as secondary evidence",
+    ]:
+        if token not in routing_receipt:
+            errors.append(f"code-discovery.md routing receipt: missing {token}")
 
     for token in [
         "risk-matched coding model for every complexity class",
@@ -502,7 +631,10 @@ def validate_usage_routing_contract(
     else:
         for token in [
             "Search always attempts a confirmed separate-usage route first",
-            "circuit breaker for the current run",
+            "exact custom agent `openbuild-search-separate`",
+            "routing receipt",
+            "fallback_reason",
+            "current-run circuit breaker",
             "does not scrape the private usage dashboard",
             "risk-matched writer",
             "openbuild-implementation-fast",
@@ -518,6 +650,9 @@ def validate_usage_routing_contract(
         errors.append("README.ru.md: missing usage-aware model-routing section")
     else:
         for token in [
+            "exact custom agent `openbuild-search-separate`",
+            "routing receipt",
+            "fallback_reason",
             "Поиск всегда сначала пытается использовать подтверждённый separate-usage route",
             "circuit breaker на текущий run",
             "не скрейпит приватную usage page",
@@ -820,6 +955,7 @@ def main() -> int:
         (SKILL / "references" / "tdd-workflow.md", "Minimality decision:"),
         (SKILL / "references" / "review-protocol.md", "Minimality assessment:"),
         (SKILL / "references" / "spec-template.md", "Minimality decision:"),
+        (SKILL / "references" / "spec-template.md", "Search routing receipt:"),
     ]:
         if token not in read_text(path, errors):
             fail(errors, f"{path.name}: missing minimality contract {token}")

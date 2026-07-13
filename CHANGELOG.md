@@ -6,10 +6,13 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-Target development version: `1.0.1`.
+Target development version: `1.0.2`.
 
 ### Changed
 
+- Repository discovery now requires an exact `openbuild-search-separate` custom-agent dispatch before the first non-trivial lookup; generic workers, task labels, and profile mentions no longer count as model selection.
+- Search fallback now uses a fixed observable failure vocabulary and emits a routing receipt with requested/configured/observed route metadata before any repository search.
+- Deterministic routing-trace fixtures reject root-first search, silent generic fallback, missing receipts, and unrecognized fallback reasons while preserving the existing circuit breaker and honest runtime-metadata limitations.
 - Reworked the GitHub-facing English and Russian documentation with native Mermaid diagrams for the end-to-end lifecycle, risk-matched model routing, and the single-writer TDD/handoff safety loop.
 - Added a compact command-to-outcome map so new users can choose `new`, `refine`, `run`, `full`, `auto`, or `setup-models` without reading the complete workflow reference first.
 - Risk-matched-model coding now selects fast, balanced, or strong/strongest writers from milestone risk while preserving the existing blind-spot Ready gate, `auto` routing, TDD red/green workflow, evidence-gated minimality, single-writer lease, root handoff, validation, versioning, and progressive review methods.

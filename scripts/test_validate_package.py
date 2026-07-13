@@ -16,6 +16,7 @@ from validate_package import (
     validate_changelog_contract,
     validate_implementation_delegation_contract,
     validate_release_docs_contract,
+    validate_search_dispatch_trace,
     validate_usage_routing_contract,
 )
 
@@ -231,10 +232,10 @@ class ChangelogContractTests(unittest.TestCase):
     def test_development_manifest_version_and_latest_release_are_documented(self) -> None:
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
         self.assertIn("## [0.4.0] - 2026-07-12", changelog)
-        self.assertEqual(validate_changelog_contract(changelog, "1.0.1"), [])
+        self.assertEqual(validate_changelog_contract(changelog, "1.0.2"), [])
 
-        mutated = changelog.replace("Target development version: `1.0.1`.", "Target development version: `next`.")
-        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "1.0.1")))
+        mutated = changelog.replace("Target development version: `1.0.2`.", "Target development version: `next`.")
+        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "1.0.2")))
 
     def test_released_version_is_pinned_in_both_install_channels(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -280,6 +281,38 @@ class UsageRoutingContractTests(unittest.TestCase):
         selection = "## Select the specification safely"
         skill_text = self.skill_text.replace(initialized, "__ROUTING_HEADING__").replace(selection, initialized).replace("__ROUTING_HEADING__", selection)
         self.assertTrue(any("must precede specification selection" in error for error in self.validate(skill_text=skill_text)))
+
+    def test_exact_named_search_agent_dispatch_precedes_repository_search(self) -> None:
+        skill_text = self.skill_text.replace(
+            "Spawn the custom agent named `openbuild-search-separate`",
+            "Attempt a suitable search worker",
+        )
+        self.assertTrue(any("exact agent dispatch" in error for error in self.validate(skill_text=skill_text)))
+
+        model_routing = self.model_routing.replace(
+            "select `openbuild-search-separate` by exact custom-agent name",
+            "prefer `openbuild-search-separate` when convenient",
+        )
+        self.assertTrue(any("exact agent dispatch" in error for error in self.validate(model_routing=model_routing)))
+
+        code_discovery = self.code_discovery.replace(
+            "before the root runs any new repository search command",
+            "early in repository discovery",
+        )
+        self.assertTrue(any("exact agent dispatch" in error for error in self.validate(code_discovery=code_discovery)))
+
+    def test_silent_generic_fallback_and_missing_receipt_are_rejected(self) -> None:
+        model_routing = self.model_routing.replace(
+            "profile-not-discoverable",
+            "profile issue",
+        )
+        self.assertTrue(any("fallback reason" in error for error in self.validate(model_routing=model_routing)))
+
+        discovery = self.code_discovery.replace(
+            "Search routing receipt",
+            "Search routing summary",
+        )
+        self.assertTrue(any("routing receipt" in error for error in self.validate(code_discovery=discovery)))
 
     def test_search_quota_failure_opens_one_run_circuit_breaker(self) -> None:
         model_routing = self.model_routing.replace("open a circuit breaker", "fall back")
@@ -345,8 +378,130 @@ class UsageRoutingContractTests(unittest.TestCase):
         readme = self.readme.replace("Search always attempts a confirmed separate-usage route first", "Search selects a suitable route")
         self.assertTrue(any("README.md" in error for error in self.validate(readme=readme)))
 
+        readme = self.readme.replace("exact custom agent `openbuild-search-separate`", "a suitable worker")
+        self.assertTrue(any("README.md" in error for error in self.validate(readme=readme)))
+
         readme_ru = self.readme_ru.replace("Поиск всегда сначала пытается использовать подтверждённый separate-usage route", "Поиск выбирает подходящий route")
         self.assertTrue(any("README.ru.md" in error for error in self.validate(readme_ru=readme_ru)))
+
+        readme_ru = self.readme_ru.replace("exact custom agent `openbuild-search-separate`", "generic worker")
+        self.assertTrue(any("README.ru.md" in error for error in self.validate(readme_ru=readme_ru)))
+
+
+class SearchDispatchTraceTests(unittest.TestCase):
+    def test_exact_named_agent_owns_first_search(self) -> None:
+        trace = [
+            {
+                "event": "search-dispatch",
+                "agent": "openbuild-search-separate",
+                "result": "selected",
+                "fallback_reason": "none",
+            },
+            {
+                "event": "search-routing-receipt",
+                "search_agent": "openbuild-search-separate",
+                "dispatch_method": "exact-custom-agent",
+                "configured_model": "separate-search-model",
+                "observed_agent": "openbuild-search-separate",
+                "observed_model": "unknown",
+                "pool": "separate",
+                "fallback_reason": "none",
+            },
+            {
+                "event": "repository-search",
+                "actor": "openbuild-search-separate",
+            },
+        ]
+
+        self.assertEqual(validate_search_dispatch_trace(trace), [])
+
+    def test_root_or_generic_search_cannot_silently_skip_exact_dispatch(self) -> None:
+        trace = [
+            {
+                "event": "repository-search",
+                "actor": "root",
+            },
+        ]
+
+        self.assertTrue(any("exact agent dispatch" in error for error in validate_search_dispatch_trace(trace)))
+
+    def test_fallback_requires_an_observable_allowed_reason(self) -> None:
+        trace = [
+            {
+                "event": "search-dispatch",
+                "agent": "openbuild-search-separate",
+                "result": "failed",
+                "fallback_reason": "unknown-problem",
+            },
+            {
+                "event": "search-routing-receipt",
+                "search_agent": "openbuild-search-separate",
+                "dispatch_method": "unavailable",
+                "configured_model": "separate-search-model",
+                "observed_agent": "unknown",
+                "observed_model": "unknown",
+                "pool": "unknown",
+                "fallback_reason": "unknown-problem",
+            },
+            {
+                "event": "repository-search",
+                "actor": "openbuild-search-fallback",
+            },
+        ]
+
+        self.assertTrue(any("allowed fallback reason" in error for error in validate_search_dispatch_trace(trace)))
+
+    def test_allowed_fallback_and_receipt_remain_consistent(self) -> None:
+        trace = [
+            {
+                "event": "search-dispatch",
+                "agent": "openbuild-search-separate",
+                "result": "failed",
+                "fallback_reason": "selector-unavailable",
+            },
+            {
+                "event": "search-routing-receipt",
+                "search_agent": "openbuild-search-separate",
+                "dispatch_method": "unavailable",
+                "configured_model": "separate-search-model",
+                "observed_agent": "unknown",
+                "observed_model": "unknown",
+                "pool": "unknown",
+                "fallback_reason": "selector-unavailable",
+            },
+            {
+                "event": "repository-search",
+                "actor": "openbuild-search-fallback",
+            },
+        ]
+
+        self.assertEqual(validate_search_dispatch_trace(trace), [])
+
+    def test_receipt_must_follow_the_dispatch_attempt(self) -> None:
+        trace = [
+            {
+                "event": "search-routing-receipt",
+                "search_agent": "openbuild-search-separate",
+                "dispatch_method": "exact-custom-agent",
+                "configured_model": "separate-search-model",
+                "observed_agent": "openbuild-search-separate",
+                "observed_model": "unknown",
+                "pool": "separate",
+                "fallback_reason": "none",
+            },
+            {
+                "event": "search-dispatch",
+                "agent": "openbuild-search-separate",
+                "result": "selected",
+                "fallback_reason": "none",
+            },
+            {
+                "event": "repository-search",
+                "actor": "openbuild-search-separate",
+            },
+        ]
+
+        self.assertTrue(any("must follow" in error for error in validate_search_dispatch_trace(trace)))
 
 
 if __name__ == "__main__":

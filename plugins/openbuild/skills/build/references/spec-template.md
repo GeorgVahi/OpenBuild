@@ -19,6 +19,7 @@ Use this as a flexible structure. Remove irrelevant sections and keep the docume
 - Routing mode: native-selector | configured-profiles | reasoning-ladder | role-only | generic-subagent | root-only
 - Discovery mode: delegated | mixed | root-fallback — <observed model/tier or unknown>
 - Search usage route: separate-pool | main-efficient | role-only | generic-subagent | root-fallback — <observed model/pool, first-attempt result, and circuit breaker>
+- Search routing receipt: <exact agent, dispatch method, configured/observed model, pool, result, and fallback reason>
 - Implementation model route: fast-profile | balanced-profile | strongest-profile | native-selector | risk-matched-root | blocked — <requested profile/tier, observed model or unknown, escalation, and exact blocker>
 
 ## 1. Outcome

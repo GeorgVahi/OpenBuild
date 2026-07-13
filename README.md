@@ -17,7 +17,7 @@ OpenBuild is self-contained. It does not require separate discovery, TDD, or rev
 
 > OpenBuild `0.4.0` is the current release. The immutable release tag is `v0.4.0`; pin it for reproducible installation or use `main` intentionally for unreleased changes.
 
-The manifest development version on `main` is `1.0.1`; the latest immutable release tag and GitHub Release remain synchronized at `0.4.0` until separately authorized publication.
+The manifest development version on `main` is `1.0.2`; the latest immutable release tag and GitHub Release remain synchronized at `0.4.0` until separately authorized publication.
 
 ## Workflow at a glance
 
@@ -253,7 +253,7 @@ A legacy specification marked `Ready` is not trusted blindly. If it lacks the cu
 
 ## How automatic code discovery works
 
-Before any `rg`, `rg --files`, file/symbol lookup, repository grep, dependency trace, route/test/config/schema search, or log scan, the root agent creates a compact search plan and routes it through the usage-pool order below. Workers return only an evidence map with `path:line`, symbol or route, a confirmed fact, relevance, negative results, and confidence.
+Before any `rg`, `rg --files`, file/symbol lookup, repository grep, dependency trace, route/test/config/schema search, or log scan, the root agent creates a compact search plan and dispatches the exact `openbuild-search-separate` custom agent. A direct per-spawn model selector wins when the runtime exposes one; otherwise Build selects the custom agent by exact name. A generic worker, descriptive task name, or profile mention is not accepted as model selection. Workers return only an evidence map with `path:line`, symbol or route, a confirmed fact, relevance, negative results, and confidence.
 
 The root agent remains the orchestrator: it deduplicates evidence, verifies already-known critical files and lines with targeted reads, makes product and architecture decisions, owns durable specification/version edits, validates, owns Git, and writes the final answer. A new grep or lookup returns to the search worker. Search workers never edit or decide architecture; implementation edits use the separate risk-matched single-writer lease described below.
 
@@ -264,10 +264,12 @@ flowchart TB
     R{"Task phase and evidence"}
 
     subgraph SEARCH["Search · read-only"]
-        S0["Compact search plan"] --> S1{"Confirmed separate route?"}
-        S1 -->|yes| S2["Separate-usage search profile"]
-        S1 -->|unavailable or quota failed| S3["Efficient main-pool fallback"]
+        S0["Compact search plan"] --> S1{"Exact separate-agent dispatch?"}
+        S1 -->|selected| S2["openbuild-search-separate"]
+        S1 -->|recorded failure| S5["Failure receipt + circuit breaker"]
+        S5 --> S3["Efficient main-pool fallback"]
         S3 --> S4["Explorer → generic worker → root"]
+        S2 --> S6["Routing receipt before first search"]
     end
 
     subgraph WRITE["Implementation · exactly one writer"]
@@ -286,7 +288,7 @@ flowchart TB
     end
 
     R --> S0
-    S2 --> W0
+    S6 --> W0
     S4 --> W0
     W4 --> V0
     V2 -->|finding| W0
@@ -298,13 +300,26 @@ flowchart TB
     classDef review fill:#3b0764,color:#faf5ff,stroke:#c084fc,stroke-width:1.5px;
     classDef done fill:#052e16,color:#ecfdf5,stroke:#34d399,stroke-width:2px;
     class R,S1,W0,V0,V2 decision;
-    class S0,S2,S3,S4 search;
+    class S0,S2,S3,S4,S5,S6 search;
     class W1,W2,W3,W4 write;
     class V1 review;
     class Z done;
 ```
 
-Search always attempts a confirmed separate-usage route first, normally `openbuild-search-separate` or an equivalent native selector. The current Spark preview is an official example of a separately limited, near-instant text model when the account and runtime expose it, but OpenBuild never pins that example universally. If the runtime reports quota exhaustion or model/profile unavailability, Build opens a circuit breaker for the current run and falls back once to `openbuild-search-fallback`: the minimum proven suitable main-pool search model at low/minimal supported reasoning. It then uses explorer, generic read-only subagent, and finally minimum root search. It does not scrape the private usage dashboard, guess remaining quota, or retry a failed separate route for every grep.
+Search always attempts a confirmed separate-usage route first, normally the exact custom agent `openbuild-search-separate` or an equivalent native selector. The current Spark preview is an official example of a separately limited, near-instant text model when the account and runtime expose it, but OpenBuild never pins that example universally. Before the first lookup, Build records the requested agent, dispatch method, configured and observed model, pool, result, and fallback reason. It may fall back only after `profile-not-discoverable`, `selector-unavailable`, `model-unavailable`, `quota-exhausted`, `spawn-failed`, or a selected worker's timeout/unusable evidence. It then opens the current-run circuit breaker and tries `openbuild-search-fallback`, explorer, a generic read-only subagent, and finally minimum root search. It does not scrape the private usage dashboard, guess remaining quota, or retry a failed separate route for every grep.
+
+```text
+search_agent: openbuild-search-separate
+dispatch_method: per-spawn-model | exact-custom-agent | unavailable
+configured_model: <profile/runtime value or unknown>
+observed_agent: <runtime value or unknown>
+observed_model: <runtime value or unknown>
+pool: separate | main | unknown
+dispatch_result: selected | failed
+fallback_reason: none | <recorded allowed reason>
+```
+
+This routing receipt is the primary acceptance signal. The account usage dashboard remains useful secondary evidence, but it does not replace an observable exact-agent dispatch.
 
 Code edits use a risk-matched writer while preserving the same Ready, TDD, minimality, single-writer, validation, and review gates at every tier. `openbuild-implementation-fast` handles low-risk Direct documentation, cosmetic, or mechanical work; `openbuild-implementation-balanced` handles medium-risk contained behavior with clear tests; and `openbuild-implementation-strongest` handles high or critical contracts, security, persistence, concurrency, permissions, privacy, and sensitive state. Missing model metadata alone does not block a configured low or medium route, but Build records it as `unknown` and never claims an observed switch or saving. High and critical work still require their strong/strongest floor.
 
@@ -431,7 +446,7 @@ You installed both channels. They use the same source but are separate local ins
 
 ### Model switching is reported as unavailable or unverified
 
-Run `$build setup-models`. Without a native selector or configured custom-agent profiles, OpenBuild cannot prove that search used a separate quota or that an observed model switch occurred. It can still use honest read-only fallbacks. For implementation, configured fast or balanced named profiles may proceed with runtime metadata recorded as `unknown`; high and critical milestones stop unless their required strong/strongest route can be selected.
+Run `$build setup-models`, reload Codex or start a new thread, and inspect the search routing receipt on the next Build run. Without a native selector or configured custom-agent profiles, OpenBuild cannot prove that search used a separate quota or that an observed model switch occurred. A generic subagent or task name does not count as selecting `openbuild-search-separate`; Build must report an explicit fallback reason instead. It can still use honest read-only fallbacks. For implementation, configured fast or balanced named profiles may proceed with runtime metadata recorded as `unknown`; high and critical milestones stop unless their required strong/strongest route can be selected.
 
 ### Build refuses to overwrite a specification
 
@@ -452,7 +467,7 @@ python -m unittest discover -s scripts -p "test_*.py" -v
 python scripts/validate_package.py
 ```
 
-The release process also runs the official Codex skill and plugin validators, clean plugin installation, standalone installation from the tagged GitHub path, forward-tests for `new`, `refine`, `run`, `auto`, duplicate-decision suppression, evidence-backed reopening, risk-adaptive critic closure, separate-pool search-first/circuit-breaker fallback, risk-matched writer selection and escalation, single-writer handoff, evidence-gated minimality, TDD-first remediation, and model-routing fallbacks, and a fresh full-diff review.
+The release process also runs the official Codex skill and plugin validators, clean plugin installation, standalone installation from the tagged GitHub path, forward-tests for `new`, `refine`, `run`, `auto`, duplicate-decision suppression, evidence-backed reopening, risk-adaptive critic closure, exact separate-agent dispatch, routing-receipt trace fixtures, circuit-breaker fallback, risk-matched writer selection and escalation, single-writer handoff, evidence-gated minimality, TDD-first remediation, and model-routing fallbacks, and a fresh full-diff review.
 
 Useful official references:
 

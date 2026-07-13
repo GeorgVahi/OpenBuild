@@ -17,15 +17,17 @@ Use this reference whenever Build delegates repository discovery, specification 
 
 Use this order before any repository grep, file/symbol lookup, dependency trace, route/test/config/schema search, or log scan:
 
-1. **Separate usage pool:** use a native selector or `openbuild-search-separate` profile whose exact model-to-pool mapping is confirmed by current official product guidance, runtime metadata, or the user. The current Spark preview is an example when the account/runtime exposes it; do not hard-code that example as a universal model ID.
+1. **Separate usage pool:** use a native selector or `openbuild-search-separate` profile whose exact model-to-pool mapping is confirmed by current official product guidance, runtime metadata, or the user. When a per-spawn model selector exists, bind the confirmed model directly; otherwise select `openbuild-search-separate` by exact custom-agent name. A generic subagent, task name, or profile mention does not count as selection. The current Spark preview is an example when the account/runtime exposes it; do not hard-code that example as a universal model ID.
 2. **Efficient main-pool fallback:** use `openbuild-search-fallback` or a native main-pool model confirmed suitable for read-heavy work, with the lowest supported reasoning effort that can satisfy the search brief.
 3. **Role-only fallback:** use a built-in read-heavy `explorer`; report the model and usage pool as unknown.
 4. **Generic subagent fallback:** send a strict read-only search brief; report model, pool, and savings as unknown.
 5. **Root fallback:** perform only the minimum targeted search needed to unblock the task and record that main-context usage was unavoidable.
 
-Attempt the separate-pool route once before the first search branch. If the runtime reports quota exhaustion, model/profile unavailability, or an unsupported capability, open a circuit breaker for the current Build run and use the next branch without retrying the same failed route for every grep. Reset it only on a new Build invocation, verified runtime-state change, or explicit user instruction. Do not scrape or infer remaining quota from the private usage dashboard; record only the selected profile/model and an observed runtime/quota result.
+Attempt the exact separate-pool dispatch once before the first search branch. Do not run the first repository search until it succeeds or fails with one recorded reason: `profile-not-discoverable`, `selector-unavailable`, `model-unavailable`, `quota-exhausted`, or `spawn-failed`. Use `worker-timeout` or `unusable-evidence` only after a selected worker actually runs. Then open a circuit breaker for the current Build run and use the next branch without retrying the same failed route for every grep. Reset it only on a new Build invocation, verified runtime-state change, or explicit user instruction. Do not scrape or infer remaining quota from the private usage dashboard; record only the selected profile/model and an observed runtime/quota result.
 
 Do not block `new`, `refine`, `run`, `full`, or `auto` merely because the separate pool is unavailable. Do not silently skip it when a confirmed route exists.
+
+Before the first repository search, emit a routing receipt with `search_agent`, `dispatch_method`, `configured_model`, `observed_agent`, `observed_model`, `pool`, `dispatch_result`, and `fallback_reason`. A configured model documents intent; runtime selection evidence documents what actually ran. Do not report a generic subagent as `openbuild-search-separate`, and do not report `fallback_reason: none` when the exact dispatch failed.
 
 Official Codex guidance documents a separate usage limit for the Spark preview and supports per-agent `model` and `model_reasoning_effort` configuration. Keep exact model assignments dynamic because availability and model names can change: [Codex pricing and usage limits](https://learn.chatgpt.com/docs/pricing#what-are-the-usage-limits-for-my-plan), [Codex subagents](https://learn.chatgpt.com/docs/agent-configuration/subagents#choosing-models-and-reasoning).
 
@@ -173,6 +175,7 @@ Search usage route: <separate-pool|main-efficient|role-only|generic-subagent|roo
 Search model/tier: <observed value or unknown>
 Separate-pool attempt: <used|unavailable|not configured; evidence and circuit-breaker state>
 Discovery branches: <objectives and worker count>
+Search routing receipt: <agent, dispatch method, configured/observed model, pool, result, fallback reason>
 Readiness critic depth: <perspectives, tiers, closure revision, and fallback>
 Implementation delegation: <root-only|bounded-worker|sequential-workers|blocked; requested writer profile/tier, observed value or unknown, escalation, and exact blocker if any>
 Writer-route evidence: <official/runtime/config/user mapping, exact requested profile, selection evidence, and limitations>
