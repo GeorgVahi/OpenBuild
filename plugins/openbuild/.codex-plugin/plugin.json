@@ -1,6 +1,6 @@
 {
   "name": "openbuild",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Evidence-grounded specifications with iterative blind-spot closure, separate-usage-pool-first search, risk-matched bounded implementation, TDD-first delivery, and progressive review for Codex.",
   "author": {
     "name": "GeorgVahi",

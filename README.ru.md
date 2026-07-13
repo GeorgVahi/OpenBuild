@@ -15,9 +15,17 @@ OpenBuild — workflow для Codex, который превращает иде�
 
 OpenBuild самодостаточен. Ему не нужны отдельные discovery-, TDD- или review-skills, telemetry, внешний сервис или фоновые сетевые процессы.
 
-> OpenBuild `0.4.0` — текущий релиз. Immutable release tag — `v0.4.0`; закрепляйте его для воспроизводимой установки или осознанно используйте `main` для ещё не выпущенных изменений.
+> OpenBuild `1.0.4` — текущий релиз. Immutable release tag — `v1.0.4`; закрепляйте его для воспроизводимой установки или осознанно используйте `main` для ещё не выпущенных изменений.
 
-Development version manifest на `main` — `1.0.3`; latest immutable release tag и GitHub Release остаются синхронизированы на `0.4.0` до отдельно авторизованной публикации.
+Plugin manifest, immutable release tag и GitHub Release синхронизированы на версии `1.0.4`.
+
+## Что вошло в 1.0.4
+
+- exact dispatch `openbuild-search-separate` до поиска по репозиторию, с наблюдаемым receipt и ограниченным circuit breaker для fallback;
+- exact risk-matched implementation profiles до правок кода: fast для low risk, balanced для medium и strongest для high/critical;
+- последовательный read-only review от risk floor задачи с переходом ровно на один доказанный tier только при оставшемся конкретном trigger;
+- автоматическое продолжение lifecycle, evidence-backed закрытие blind spots, TDD-first milestones, evidence-gated minimality и безопасная граница single-writer/root-handoff;
+- детерминированные contract- и trace-тесты routing, receipts, risk floors, reviewer escalation, versioning и двуязычной документации.
 
 ## Workflow в одной схеме
 
@@ -66,18 +74,18 @@ flowchart LR
 
 - Актуальная поверхность Codex с поддержкой skills. Установка plugins доступна в Codex CLI и поддерживаемых plugin-поверхностях.
 - Git, если Build должен создавать milestone-коммиты или проверять task diff.
-- Для `v0.4.0` нативно проверен Windows. Документация для macOS и Linux считается best-effort до отдельных нативных проверок.
+- Для `v1.0.4` нативно проверен Windows. Документация для macOS и Linux считается best-effort до отдельных нативных проверок.
 
-OpenBuild `0.4.0` поддерживает только Codex. Совместимость с Claude Code, Cursor, Gemini CLI и другими coding agents не заявляется.
+OpenBuild `1.0.4` поддерживает только Codex. Совместимость с Claude Code, Cursor, Gemini CLI и другими coding agents не заявляется.
 
 ## Установка как plugin — рекомендуется
 
 Plugin — основной канал распространения. Он даёт версионированную установку через marketplace и namespaced-вызов `$openbuild:build`.
 
-### Закреплённый релиз `v0.4.0`
+### Закреплённый релиз `v1.0.4`
 
 ```bash
-codex plugin marketplace add GeorgVahi/OpenBuild --ref v0.4.0
+codex plugin marketplace add GeorgVahi/OpenBuild --ref v1.0.4
 codex plugin add openbuild@openbuild
 ```
 
@@ -114,11 +122,11 @@ Versioned/tag-pinned marketplace закреплён за выбранным tag.
 ```bash
 codex plugin remove openbuild@openbuild
 codex plugin marketplace remove openbuild
-codex plugin marketplace add GeorgVahi/OpenBuild --ref v0.4.0
+codex plugin marketplace add GeorgVahi/OpenBuild --ref v1.0.4
 codex plugin add openbuild@openbuild
 ```
 
-Замените `v0.4.0` на нужный release tag.
+Замените `v1.0.4` на нужный release tag.
 
 ### Удаление plugin
 
@@ -132,10 +140,10 @@ codex plugin marketplace remove openbuild
 Standalone-установка даёт короткий вызов `$build`. Попросите предустановленный системный skill-installer установить canonical папку Build:
 
 ```text
-Используй $skill-installer и установи skill из https://github.com/GeorgVahi/OpenBuild/tree/v0.4.0/plugins/openbuild/skills/build
+Используй $skill-installer и установи skill из https://github.com/GeorgVahi/OpenBuild/tree/v1.0.4/plugins/openbuild/skills/build
 ```
 
-Чтобы проверить ещё не выпущенные изменения, используйте тот же путь с `/tree/main/`; для воспроизводимой tagged-установки оставьте `v0.4.0`.
+Чтобы проверить ещё не выпущенные изменения, используйте тот же путь с `/tree/main/`; для воспроизводимой tagged-установки оставьте `v1.0.4`.
 
 После установки начните новый Codex thread. Откройте `/skills` или введите `$`, убедитесь, что появился `build`, и вызовите:
 
