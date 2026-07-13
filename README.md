@@ -15,11 +15,11 @@ It packages one explicit skill, **Build**, with six modes:
 
 OpenBuild is self-contained. It does not require separate discovery, TDD, or review skills, telemetry, a hosted service, or background network access.
 
-> OpenBuild `2.0.0` is the current development version on `main`. The latest immutable release is `v1.1.1`; the `v2.0.0` tag and GitHub Release have not been published yet.
+> OpenBuild `2.0.1` is the current release. Its immutable release tag is `v2.0.1`; pin it for reproducible installation or use `main` intentionally for unreleased changes.
 
-The source manifest is `2.0.0`. Published `v1.1.1` artifacts remain immutable until a separately authorized `v2.0.0` release is created.
+The manifest packaged in the release commit, immutable tag, and GitHub Release are synchronized at `2.0.1`. Earlier `v1.1.1` artifacts remain immutable.
 
-## What changes in 2.0.0
+## What shipped in 2.0.1
 
 - all nine OpenBuild custom-agent IDs use the runtime-safe underscore grammar;
 - `agent_name` is the only profile selector, while `task_name` remains an independent task label;
@@ -86,27 +86,25 @@ flowchart LR
 
 - A current Codex surface that supports skills. Plugin installation is available in Codex CLI and supported plugin surfaces.
 - Git, when Build is expected to create milestone commits or review a task diff.
-- Windows unit, package, syntax, diff, and clean-artifact checks were completed for `v1.1.1`. Codex CLI install/runtime smoke was unavailable in the release environment; macOS and Linux remain unverified.
+- Windows unit, package, syntax, diff, clean-checkout, and independent-review checks were completed for `v2.0.1`. Codex CLI install/runtime smoke was unavailable in the release environment; macOS and Linux remain unverified.
 
-OpenBuild `2.0.0` and the latest published `1.1.1` release support Codex only. They do not claim compatibility with Claude Code, Cursor, Gemini CLI, or other coding agents.
+OpenBuild `2.0.1` and the earlier `1.1.1` release support Codex only. They do not claim compatibility with Claude Code, Cursor, Gemini CLI, or other coding agents.
 
 ## Install as a plugin — recommended
 
 The plugin is the primary distribution channel. It gives you versioned marketplace installation and the namespaced invocation `$openbuild:build`.
 
-### Pinned release `v1.1.1`
+### Current pinned release `v2.0.1`
 
 ```bash
-codex plugin marketplace add GeorgVahi/OpenBuild --ref v1.1.1
+codex plugin marketplace add GeorgVahi/OpenBuild --ref v2.0.1
 codex plugin add openbuild@openbuild
 ```
 
-### Planned `v2.0.0` pin
-
-Use this only after the `v2.0.0` tag is published; until then install `main` intentionally for development testing.
+### Previous pinned release `v1.1.1`
 
 ```bash
-codex plugin marketplace add GeorgVahi/OpenBuild --ref v2.0.0
+codex plugin marketplace add GeorgVahi/OpenBuild --ref v1.1.1
 codex plugin add openbuild@openbuild
 ```
 
@@ -143,11 +141,11 @@ A versioned/tag-pinned marketplace is fixed to its selected tag. To move from on
 ```bash
 codex plugin remove openbuild@openbuild
 codex plugin marketplace remove openbuild
-codex plugin marketplace add GeorgVahi/OpenBuild --ref v1.1.1
+codex plugin marketplace add GeorgVahi/OpenBuild --ref v2.0.1
 codex plugin add openbuild@openbuild
 ```
 
-Replace `v1.1.1` with the target release tag.
+Replace `v2.0.1` with the target release tag.
 
 ### Uninstall the plugin
 
@@ -161,12 +159,10 @@ codex plugin marketplace remove openbuild
 Standalone installation gives you the shorter `$build` invocation. Ask the preinstalled system skill installer to install the canonical Build folder:
 
 ```text
-Use $skill-installer to install the skill from https://github.com/GeorgVahi/OpenBuild/tree/v1.1.1/plugins/openbuild/skills/build
-
-After the 2.0 release is published, its pinned standalone path will be https://github.com/GeorgVahi/OpenBuild/tree/v2.0.0/plugins/openbuild/skills/build
+Use $skill-installer to install the skill from https://github.com/GeorgVahi/OpenBuild/tree/v2.0.1/plugins/openbuild/skills/build
 ```
 
-To test unreleased changes, use the same path with `/tree/main/`; keep `v1.1.1` for a reproducible tagged installation.
+To test unreleased changes, use the same path with `/tree/main/`; keep `v2.0.1` for a reproducible tagged installation.
 
 Start a new Codex thread after installation. Open `/skills` or type `$` and verify that `build` appears, then invoke:
 

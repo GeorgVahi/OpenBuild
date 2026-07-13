@@ -6,7 +6,7 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-Target version: `2.0.0`.
+## [2.0.1] - 2026-07-13
 
 ### Changed
 
@@ -105,7 +105,8 @@ Target version: `2.0.0`.
 - Codex plugin marketplace distribution and standalone skill installation path.
 - Complete English and Russian documentation.
 
-[Unreleased]: https://github.com/GeorgVahi/OpenBuild/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/GeorgVahi/OpenBuild/compare/v2.0.1...HEAD
+[2.0.1]: https://github.com/GeorgVahi/OpenBuild/compare/v1.1.1...v2.0.1
 [1.1.1]: https://github.com/GeorgVahi/OpenBuild/compare/v1.0.4...v1.1.1
 [1.0.4]: https://github.com/GeorgVahi/OpenBuild/compare/v0.4.0...v1.0.4
 [0.4.0]: https://github.com/GeorgVahi/OpenBuild/compare/v0.3.1...v0.4.0

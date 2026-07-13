@@ -15,11 +15,11 @@ OpenBuild — workflow для Codex, который превращает иде�
 
 OpenBuild самодостаточен. Ему не нужны отдельные discovery-, TDD- или review-skills, telemetry, внешний сервис или фоновые сетевые процессы.
 
-> OpenBuild `2.0.0` — текущая development-версия в `main`. Последний immutable release — `v1.1.1`; tag и GitHub Release `v2.0.0` ещё не опубликованы.
+> OpenBuild `2.0.1` — текущий релиз. Его immutable release tag — `v2.0.1`; закрепите его для воспроизводимой установки или осознанно используйте `main` для ещё не выпущенных изменений.
 
-Source manifest имеет версию `2.0.0`. Опубликованные artifacts `v1.1.1` остаются неизменными до отдельно разрешённого релиза `v2.0.0`.
+Manifest в release commit, immutable tag и GitHub Release синхронизированы на `2.0.1`. Предыдущие artifacts `v1.1.1` остаются неизменными.
 
-## Что меняется в 2.0.0
+## Что вошло в 2.0.1
 
 - все девять custom-agent IDs OpenBuild используют runtime-safe underscore grammar;
 - только `agent_name` выбирает profile, а `task_name` остаётся независимым task label;
@@ -86,27 +86,25 @@ flowchart LR
 
 - Актуальная поверхность Codex с поддержкой skills. Установка plugins доступна в Codex CLI и поддерживаемых plugin-поверхностях.
 - Git, если Build должен создавать milestone-коммиты или проверять task diff.
-- Для `v1.1.1` на Windows пройдены unit-, package-, syntax-, diff- и clean-artifact-проверки. Codex CLI install/runtime smoke был недоступен в release environment; macOS и Linux остаются непроверенными.
+- Для `v2.0.1` на Windows пройдены unit-, package-, syntax-, diff-, clean-checkout- и independent-review-проверки. Codex CLI install/runtime smoke был недоступен в release environment; macOS и Linux остаются непроверенными.
 
-OpenBuild `2.0.0` и последний опубликованный релиз `1.1.1` поддерживают только Codex. Совместимость с Claude Code, Cursor, Gemini CLI и другими coding agents не заявляется.
+OpenBuild `2.0.1` и предыдущий релиз `1.1.1` поддерживают только Codex. Совместимость с Claude Code, Cursor, Gemini CLI и другими coding agents не заявляется.
 
 ## Установка как plugin — рекомендуется
 
 Plugin — основной канал распространения. Он даёт версионированную установку через marketplace и namespaced-вызов `$openbuild:build`.
 
-### Закреплённый релиз `v1.1.1`
+### Текущий закреплённый релиз `v2.0.1`
 
 ```bash
-codex plugin marketplace add GeorgVahi/OpenBuild --ref v1.1.1
+codex plugin marketplace add GeorgVahi/OpenBuild --ref v2.0.1
 codex plugin add openbuild@openbuild
 ```
 
-### Планируемый pin `v2.0.0`
-
-Используйте его только после публикации tag `v2.0.0`; до этого для development testing осознанно устанавливайте `main`.
+### Предыдущий закреплённый релиз `v1.1.1`
 
 ```bash
-codex plugin marketplace add GeorgVahi/OpenBuild --ref v2.0.0
+codex plugin marketplace add GeorgVahi/OpenBuild --ref v1.1.1
 codex plugin add openbuild@openbuild
 ```
 
@@ -143,11 +141,11 @@ Versioned/tag-pinned marketplace закреплён за выбранным tag.
 ```bash
 codex plugin remove openbuild@openbuild
 codex plugin marketplace remove openbuild
-codex plugin marketplace add GeorgVahi/OpenBuild --ref v1.1.1
+codex plugin marketplace add GeorgVahi/OpenBuild --ref v2.0.1
 codex plugin add openbuild@openbuild
 ```
 
-Замените `v1.1.1` на нужный release tag.
+Замените `v2.0.1` на нужный release tag.
 
 ### Удаление plugin
 
@@ -161,12 +159,10 @@ codex plugin marketplace remove openbuild
 Standalone-установка даёт короткий вызов `$build`. Попросите предустановленный системный skill-installer установить canonical папку Build:
 
 ```text
-Используй $skill-installer и установи skill из https://github.com/GeorgVahi/OpenBuild/tree/v1.1.1/plugins/openbuild/skills/build
-
-После публикации релиза 2.0 его pinned standalone path будет https://github.com/GeorgVahi/OpenBuild/tree/v2.0.0/plugins/openbuild/skills/build
+Используй $skill-installer и установи skill из https://github.com/GeorgVahi/OpenBuild/tree/v2.0.1/plugins/openbuild/skills/build
 ```
 
-Чтобы проверить ещё не выпущенные изменения, используйте тот же путь с `/tree/main/`; для воспроизводимой tagged-установки оставьте `v1.1.1`.
+Чтобы проверить ещё не выпущенные изменения, используйте тот же путь с `/tree/main/`; для воспроизводимой tagged-установки оставьте `v2.0.1`.
 
 После установки начните новый Codex thread. Откройте `/skills` или введите `$`, убедитесь, что появился `build`, и вызовите:
 
