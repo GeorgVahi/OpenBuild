@@ -15,19 +15,17 @@ OpenBuild — workflow для Codex, который превращает иде�
 
 OpenBuild самодостаточен. Ему не нужны отдельные discovery-, TDD- или review-skills, telemetry, внешний сервис или фоновые сетевые процессы.
 
-> OpenBuild `1.0.4` — текущий релиз. Immutable release tag — `v1.0.4`; закрепляйте его для воспроизводимой установки или осознанно используйте `main` для ещё не выпущенных изменений.
+> OpenBuild `1.1.1` — текущий релиз. Immutable release tag — `v1.1.1`; закрепляйте его для воспроизводимой установки или осознанно используйте `main` для ещё не выпущенных изменений.
 
-Manifest в опубликованном artifact, immutable release tag и GitHub Release синхронизированы на версии `1.0.4`.
+Manifest в опубликованном artifact, immutable release tag и GitHub Release синхронизированы на версии `1.1.1`.
 
-Текущая development-версия в `main` — `1.1.0`; в ней добавлены decision-authority gates, и она не является immutable-релизом `v1.0.4`.
+## Что вошло в 1.1.1
 
-## Что вошло в 1.0.4
-
-- exact dispatch `openbuild-search-separate` до поиска по репозиторию, с наблюдаемым receipt и ограниченным circuit breaker для fallback;
-- exact risk-matched implementation profiles до правок кода: fast для low risk, balanced для medium и strongest для high/critical;
-- последовательный read-only review от risk floor задачи с переходом ровно на один доказанный tier только при оставшемся конкретном trigger;
-- автоматическое продолжение lifecycle, evidence-backed закрытие blind spots, TDD-first milestones, evidence-gated minimality и безопасная граница single-writer/root-handoff;
-- детерминированные contract- и trace-тесты routing, receipts, risk floors, reviewer escalation, versioning и двуязычной документации.
+- полная root-reachable карта связанных нормативных ТЗ с authority источников, provenance решений, editability, конфликтами и исходящими ссылками;
+- consequence-based decision authority: любой выбор, влияющий на продукт, остаётся за пользователем, а OpenBuild объясняет варианты, последствия, риски, затронутый scope и рекомендацию;
+- state machines конфликтов и reopen, которые отклоняют тихое предпочтение root, устаревшие ответы, неполное повторное применение и no-op при изменившемся outcome;
+- per-target decision application receipts и `Ready` gate, доказывающий, что каждая нормативная запись использует текущий подтверждённый пользователем outcome;
+- существующие контракты separate-pool discovery, risk-matched implementation, TDD, single-writer и progressive review сохранены.
 
 ## Workflow в одной схеме
 
@@ -81,18 +79,18 @@ flowchart LR
 
 - Актуальная поверхность Codex с поддержкой skills. Установка plugins доступна в Codex CLI и поддерживаемых plugin-поверхностях.
 - Git, если Build должен создавать milestone-коммиты или проверять task diff.
-- Для `v1.0.4` нативно проверен Windows. Документация для macOS и Linux считается best-effort до отдельных нативных проверок.
+- Для `v1.1.1` на Windows пройдены unit-, package-, syntax-, diff- и clean-artifact-проверки. Codex CLI install/runtime smoke был недоступен в release environment; macOS и Linux остаются непроверенными.
 
-OpenBuild `1.0.4` поддерживает только Codex. Совместимость с Claude Code, Cursor, Gemini CLI и другими coding agents не заявляется.
+OpenBuild `1.1.1` поддерживает только Codex. Совместимость с Claude Code, Cursor, Gemini CLI и другими coding agents не заявляется.
 
 ## Установка как plugin — рекомендуется
 
 Plugin — основной канал распространения. Он даёт версионированную установку через marketplace и namespaced-вызов `$openbuild:build`.
 
-### Закреплённый релиз `v1.0.4`
+### Закреплённый релиз `v1.1.1`
 
 ```bash
-codex plugin marketplace add GeorgVahi/OpenBuild --ref v1.0.4
+codex plugin marketplace add GeorgVahi/OpenBuild --ref v1.1.1
 codex plugin add openbuild@openbuild
 ```
 
@@ -129,11 +127,11 @@ Versioned/tag-pinned marketplace закреплён за выбранным tag.
 ```bash
 codex plugin remove openbuild@openbuild
 codex plugin marketplace remove openbuild
-codex plugin marketplace add GeorgVahi/OpenBuild --ref v1.0.4
+codex plugin marketplace add GeorgVahi/OpenBuild --ref v1.1.1
 codex plugin add openbuild@openbuild
 ```
 
-Замените `v1.0.4` на нужный release tag.
+Замените `v1.1.1` на нужный release tag.
 
 ### Удаление plugin
 
@@ -147,10 +145,10 @@ codex plugin marketplace remove openbuild
 Standalone-установка даёт короткий вызов `$build`. Попросите предустановленный системный skill-installer установить canonical папку Build:
 
 ```text
-Используй $skill-installer и установи skill из https://github.com/GeorgVahi/OpenBuild/tree/v1.0.4/plugins/openbuild/skills/build
+Используй $skill-installer и установи skill из https://github.com/GeorgVahi/OpenBuild/tree/v1.1.1/plugins/openbuild/skills/build
 ```
 
-Чтобы проверить ещё не выпущенные изменения, используйте тот же путь с `/tree/main/`; для воспроизводимой tagged-установки оставьте `v1.0.4`.
+Чтобы проверить ещё не выпущенные изменения, используйте тот же путь с `/tree/main/`; для воспроизводимой tagged-установки оставьте `v1.1.1`.
 
 После установки начните новый Codex thread. Откройте `/skills` или введите `$`, убедитесь, что появился `build`, и вызовите:
 

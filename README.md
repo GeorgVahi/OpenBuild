@@ -15,19 +15,17 @@ It packages one explicit skill, **Build**, with six modes:
 
 OpenBuild is self-contained. It does not require separate discovery, TDD, or review skills, telemetry, a hosted service, or background network access.
 
-> OpenBuild `1.0.4` is the current release. The immutable release tag is `v1.0.4`; pin it for reproducible installation or use `main` intentionally for unreleased changes.
+> OpenBuild `1.1.1` is the current release. The immutable release tag is `v1.1.1`; pin it for reproducible installation or use `main` intentionally for unreleased changes.
 
-The manifest packaged in the released artifact, immutable release tag, and GitHub Release are synchronized at `1.0.4`.
+The manifest packaged in the released artifact, immutable release tag, and GitHub Release are synchronized at `1.1.1`.
 
-The current `main` development version is `1.1.0`; it adds decision-authority gates and is not the immutable `v1.0.4` release.
+## What shipped in 1.1.1
 
-## What shipped in 1.0.4
-
-- exact `openbuild-search-separate` dispatch before repository discovery, with an observable receipt and bounded fallback circuit breaker;
-- exact risk-matched implementation profiles before code edits: fast for low risk, balanced for medium, and strongest for high or critical work;
-- sequential read-only review from the task's risk floor, escalating one proven tier at a time only when a concrete trigger remains;
-- automatic lifecycle resume, evidence-backed blind-spot closure, TDD-first milestones, evidence-gated minimality, and a single-writer/root-handoff safety boundary;
-- deterministic contract and trace tests for routing, receipts, risk floors, reviewer escalation, versioning, and bilingual documentation.
+- complete root-reachable maps of linked normative specifications, including source authority, decision provenance, editability, conflicts, and outgoing edges;
+- consequence-based decision authority: every product-impacting choice stays with the user, while OpenBuild explains options, consequences, risks, affected scope, and a recommendation;
+- conflict and reopen state machines that reject silent root preference, stale answers, incomplete reapplication, and changed-outcome no-ops;
+- per-target decision application receipts and a `Ready` gate that proves every normative write uses the current user-approved outcome;
+- the existing separate-pool discovery, risk-matched implementation, TDD, single-writer, and progressive-review contracts remain intact.
 
 ## Workflow at a glance
 
@@ -81,18 +79,18 @@ flowchart LR
 
 - A current Codex surface that supports skills. Plugin installation is available in Codex CLI and supported plugin surfaces.
 - Git, when Build is expected to create milestone commits or review a task diff.
-- Windows is verified for `v1.0.4`. macOS and Linux are documented as best-effort until native validation is completed.
+- Windows unit, package, syntax, diff, and clean-artifact checks were completed for `v1.1.1`. Codex CLI install/runtime smoke was unavailable in the release environment; macOS and Linux remain unverified.
 
-OpenBuild `1.0.4` supports Codex only. It does not claim compatibility with Claude Code, Cursor, Gemini CLI, or other coding agents.
+OpenBuild `1.1.1` supports Codex only. It does not claim compatibility with Claude Code, Cursor, Gemini CLI, or other coding agents.
 
 ## Install as a plugin — recommended
 
 The plugin is the primary distribution channel. It gives you versioned marketplace installation and the namespaced invocation `$openbuild:build`.
 
-### Pinned release `v1.0.4`
+### Pinned release `v1.1.1`
 
 ```bash
-codex plugin marketplace add GeorgVahi/OpenBuild --ref v1.0.4
+codex plugin marketplace add GeorgVahi/OpenBuild --ref v1.1.1
 codex plugin add openbuild@openbuild
 ```
 
@@ -129,11 +127,11 @@ A versioned/tag-pinned marketplace is fixed to its selected tag. To move from on
 ```bash
 codex plugin remove openbuild@openbuild
 codex plugin marketplace remove openbuild
-codex plugin marketplace add GeorgVahi/OpenBuild --ref v1.0.4
+codex plugin marketplace add GeorgVahi/OpenBuild --ref v1.1.1
 codex plugin add openbuild@openbuild
 ```
 
-Replace `v1.0.4` with the target release tag.
+Replace `v1.1.1` with the target release tag.
 
 ### Uninstall the plugin
 
@@ -147,10 +145,10 @@ codex plugin marketplace remove openbuild
 Standalone installation gives you the shorter `$build` invocation. Ask the preinstalled system skill installer to install the canonical Build folder:
 
 ```text
-Use $skill-installer to install the skill from https://github.com/GeorgVahi/OpenBuild/tree/v1.0.4/plugins/openbuild/skills/build
+Use $skill-installer to install the skill from https://github.com/GeorgVahi/OpenBuild/tree/v1.1.1/plugins/openbuild/skills/build
 ```
 
-To test unreleased changes, use the same path with `/tree/main/`; keep `v1.0.4` for a reproducible tagged installation.
+To test unreleased changes, use the same path with `/tree/main/`; keep `v1.1.1` for a reproducible tagged installation.
 
 Start a new Codex thread after installation. Open `/skills` or type `$` and verify that `build` appears, then invoke:
 
