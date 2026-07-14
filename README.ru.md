@@ -2,6 +2,8 @@
 
 [English version](README.md)
 
+![Workflow OpenBuild](plugins/openbuild/lib/Workflow-ru.png)
+
 OpenBuild — workflow для Codex, который превращает идею простыми словами или существующее ТЗ в проверенную по репозиторию спецификацию и, когда это запрошено, в протестированную реализацию с решениями продукта под контролем пользователя, автоматическим выбором этапа, итеративной критикой blind spots, separate-usage-pool-first поиском кода, risk-matched-model coding, ограниченными writers, evidence-gated minimality, TDD-first milestones и прогрессивным review.
 
 В plugin входит один явно вызываемый skill **Build** с шестью режимами:
@@ -13,11 +15,17 @@ OpenBuild — workflow для Codex, который превращает иде�
 - `auto` — определить цель и продолжить с первого незавершённого этапа;
 - `setup-models` — при желании настроить с отдельным разрешением профили search pools, fast/balanced/strong writers и read-only review.
 
-OpenBuild самодостаточен. Ему не нужны отдельные discovery-, TDD- или review-skills, telemetry, внешний сервис или фоновые сетевые процессы.
+OpenBuild самодостаточен. Ему не нужны отдельные discovery-, TDD- или review-skills, telemetry, внешний сервис или фоновые сетевые процессы. Для exact CLI agents всё же нужны host Codex CLI, сохранённый ChatGPT login и Python 3.11 или новее.
 
-> OpenBuild `2.1.0` — текущий релиз. Его immutable release tag — `v2.1.0`; закрепите его для воспроизводимой установки или осознанно используйте `main` для ещё не выпущенных изменений.
+> OpenBuild `2.1.1` — текущий релиз. Его immutable release tag — `v2.1.1`; закрепите его для воспроизводимой установки или осознанно используйте `main` для ещё не выпущенных изменений.
 
-Manifest в release commit, immutable tag и GitHub Release синхронизированы на `2.1.0`. Предыдущие artifacts `v2.0.1` и `v1.1.1` остаются неизменными.
+Manifest в release commit, immutable tag и GitHub Release синхронизированы на `2.1.1`. Предыдущие artifacts `v2.1.0`, `v2.0.1` и `v1.1.1` остаются неизменными.
+
+## Что вошло в 2.1.1
+
+- локализованные GitHub-ready схемы workflow, usage routing и delegation заменили соответствующие Mermaid-блоки;
+- каждый завершённый ответ Build показывает реальные logical agent runs, фактические model/effort по evidence или `unknown`, terminal outcome, работу и связь со спецификацией без приватных runtime-данных;
+- перед exact CLI dispatch появился явный checkpoint Python/Codex, permission-gated Windows-инструкция по установке и только ручная ChatGPT-аутентификация.
 
 ## Что вошло в 2.1.0
 
@@ -42,46 +50,6 @@ Manifest в release commit, immutable tag и GitHub Release синхронизи
 - per-target decision application receipts и `Ready` gate, доказывающий, что каждая нормативная запись использует текущий подтверждённый пользователем outcome;
 - существующие контракты separate-pool discovery, risk-matched implementation, TDD, single-writer и progressive review сохранены.
 
-## Workflow в одной схеме
-
-```mermaid
-flowchart LR
-    A["Идея или существующая спецификация"] --> B{"Явный режим или auto evidence"}
-    B -->|new / full| C["Исследование репозитория"]
-    B -->|refine| D["Сверка спецификации"]
-    B -->|run| E["Проверка готовности"]
-    B -->|auto| F["Первый незавершённый этап"]
-    C --> D
-    F --> C
-    F --> D
-    F --> E
-    D --> G["Карта источников ТЗ + blind spots"]
-    E --> G
-    G --> U{"Есть материальный продуктовый выбор?"}
-    U -->|да| P["Варианты + последствия + риски + рекомендация"]
-    P --> V["Решение пользователя"]
-    V --> R["Перестройка product map + application receipt"]
-    R --> H{"Ready gate"}
-    U -->|нет| H
-    H -->|есть gaps| G
-    H -->|покрыто| T{"Цель workflow"}
-    T -->|только спецификация| Q["Готовая спецификация"]
-    T -->|реализация| I["Реализация моделью по риску"]
-    I --> J["Focused и risk-based validation"]
-    J --> K["Progressive read-only review"]
-    K -->|actionable finding| I
-    K -->|принято| L["Complete record и scoped Git handoff"]
-
-    classDef input fill:#0f172a,color:#f8fafc,stroke:#38bdf8,stroke-width:2px;
-    classDef phase fill:#172554,color:#eff6ff,stroke:#60a5fa,stroke-width:1.5px;
-    classDef gate fill:#422006,color:#fffbeb,stroke:#f59e0b,stroke-width:2px;
-    classDef done fill:#052e16,color:#ecfdf5,stroke:#34d399,stroke-width:2px;
-    class A,B input;
-    class C,D,E,F,G,P,V,R,I,J,K phase;
-    class U,H,T gate;
-    class Q,L done;
-```
-
 | Цель | Команда | Где остановится |
 |---|---|---|
 | Создать или исправить спецификацию | `$build new …` / `$build refine BUILD.md` | `Ready` |
@@ -95,18 +63,36 @@ flowchart LR
 - Актуальная поверхность Codex с поддержкой skills. Установка plugins доступна в Codex CLI и поддерживаемых plugin-поверхностях.
 - Python 3.11 или новее для packaged explicit-model runner (`python` на Windows, обычно `python3` на POSIX).
 - Git, если Build должен создавать milestone-коммиты или проверять task diff.
-- Для `v2.1.0` на Windows пройдены unit-, package-, syntax-, diff-, clean-install-, real Codex CLI runtime-smoke- и independent-review-проверки. macOS и Linux остаются непроверенными.
+- Для `v2.1.1` на Windows пройдены unit-, package-, syntax-, diff-, clean-install-, real Codex CLI runtime-smoke- и independent-review-проверки. macOS и Linux остаются непроверенными.
 
-OpenBuild `2.1.0` и предыдущие релизы `2.0.1`/`1.1.1` поддерживают только Codex. Совместимость с Claude Code, Cursor, Gemini CLI и другими coding agents не заявляется.
+OpenBuild `2.1.1` и предыдущие релизы `2.1.0`/`2.0.1`/`1.1.1` поддерживают только Codex. Совместимость с Claude Code, Cursor, Gemini CLI и другими coding agents не заявляется.
+
+Перед первым exact CLI-agent dispatch выберите dependency preflight для host OS. В Windows проверьте обе зависимости:
+
+```powershell
+python --version
+codex --version
+```
+
+Python должен быть версии 3.11 или новее. Если команда недоступна, установите зависимость вручную и вернитесь после завершения либо отдельно и явно разрешите Build выполнить соответствующую точную команду:
+
+```powershell
+winget install -e --id Python.Python.3.12
+powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"
+```
+
+Эти команды установки через `winget` и PowerShell предназначены только для Windows. В POSIX сначала выполните `python3 --version`; используйте `python --version` только если `python3` недоступен. На любой платформе выполните `codex --version`. Если POSIX-зависимость отсутствует, Build даёт ручную platform-appropriate инструкцию по установке Python и Codex CLI; он не выбирает и не запускает package manager автоматически.
+
+Build обязан дождаться установки и повторить подходящую для ОС проверку Python вместе с `codex --version`. Аутентификация остаётся ручной: запустите `codex`, самостоятельно пройдите ChatGPT sign-in, затем проверьте `codex login status`. Build никогда не автоматизирует credentials. Если установка или вход отклонены либо недоступны, Build фиксирует ограничение и использует только честный поддерживаемый fallback.
 
 ## Установка как plugin — рекомендуется
 
 Plugin — основной канал распространения. Он даёт версионированную установку через marketplace и namespaced-вызов `$openbuild:build`.
 
-### Текущий закреплённый релиз `v2.1.0`
+### Текущий закреплённый релиз `v2.1.1`
 
 ```bash
-codex plugin marketplace add GeorgVahi/OpenBuild --ref v2.1.0
+codex plugin marketplace add GeorgVahi/OpenBuild --ref v2.1.1
 codex plugin add openbuild@openbuild
 ```
 
@@ -150,11 +136,11 @@ Versioned/tag-pinned marketplace закреплён за выбранным tag.
 ```bash
 codex plugin remove openbuild@openbuild
 codex plugin marketplace remove openbuild
-codex plugin marketplace add GeorgVahi/OpenBuild --ref v2.1.0
+codex plugin marketplace add GeorgVahi/OpenBuild --ref v2.1.1
 codex plugin add openbuild@openbuild
 ```
 
-Замените `v2.1.0` на нужный release tag.
+Замените `v2.1.1` на нужный release tag.
 
 ### Удаление plugin
 
@@ -168,10 +154,10 @@ codex plugin marketplace remove openbuild
 Standalone-установка даёт короткий вызов `$build`. Попросите предустановленный системный skill-installer установить canonical папку Build:
 
 ```text
-Используй $skill-installer и установи skill из https://github.com/GeorgVahi/OpenBuild/tree/v2.1.0/plugins/openbuild/skills/build
+Используй $skill-installer и установи skill из https://github.com/GeorgVahi/OpenBuild/tree/v2.1.1/plugins/openbuild/skills/build
 ```
 
-Чтобы проверить ещё не выпущенные изменения, используйте тот же путь с `/tree/main/`; для воспроизводимой tagged-установки оставьте `v2.1.0`.
+Чтобы проверить ещё не выпущенные изменения, используйте тот же путь с `/tree/main/`; для воспроизводимой tagged-установки оставьте `v2.1.1`.
 
 После установки начните новый Codex thread. Откройте `/skills` или введите `$`, убедитесь, что появился `build`, и вызовите:
 
@@ -303,56 +289,7 @@ Legacy-спецификация со статусом `Ready` не приним�
 
 ## Как работает usage-aware routing моделей
 
-```mermaid
-flowchart TB
-    R{"Этап задачи и evidence"}
-
-    subgraph SEARCH["Поиск · только чтение"]
-        S0["Короткий search plan"] --> S1{"Exact separate-agent dispatch?"}
-        S1 -->|selected| S2["openbuild_search_separate"]
-        S1 -->|зафиксированная ошибка| S5["Failure receipt + circuit breaker"]
-        S5 --> S3["Экономный main-pool fallback"]
-        S3 --> S4["Explorer → generic worker → root"]
-        S2 --> S6["Routing receipt до первого поиска"]
-    end
-
-    subgraph WRITE["Реализация · ровно один writer"]
-        W0{"Риск milestone"}
-        W0 -->|low| W1["openbuild_implementation_fast"]
-        W0 -->|medium| W2["openbuild_implementation_balanced"]
-        W0 -->|high / critical| W3["openbuild_implementation_strongest"]
-        W1 --> W4["Exact dispatch + routing receipt"]
-        W2 --> W4
-        W3 --> W4
-        W4 --> W5["Одинаковые Ready, TDD, minimality, lease и validation gates"]
-    end
-
-    subgraph REVIEW["Review · только чтение"]
-        V0{"Risk floor diff"} --> V1["Exact profile: fast / balanced / strong / strongest"]
-        V1 --> V2["Routing receipt + structured result"]
-        V2 --> V3{"ACCEPT без конкретного trigger?"}
-        V3 -->|нет| V4["Root adjudication, remediation и green validation"]
-        V4 --> V5["Только следующий доказанный tier"]
-        V5 --> V2
-    end
-
-    R --> S0
-    S6 --> W0
-    S4 --> W0
-    W5 --> V0
-    V3 -->|да| Z["Проверенное завершение"]
-
-    classDef decision fill:#422006,color:#fffbeb,stroke:#f59e0b,stroke-width:2px;
-    classDef search fill:#083344,color:#ecfeff,stroke:#22d3ee,stroke-width:1.5px;
-    classDef write fill:#172554,color:#eff6ff,stroke:#60a5fa,stroke-width:1.5px;
-    classDef review fill:#3b0764,color:#faf5ff,stroke:#c084fc,stroke-width:1.5px;
-    classDef done fill:#052e16,color:#ecfdf5,stroke:#34d399,stroke-width:2px;
-    class R,S1,W0,V0,V3 decision;
-    class S0,S2,S3,S4,S5,S6 search;
-    class W1,W2,W3,W4,W5 write;
-    class V1,V2,V4,V5 review;
-    class Z done;
-```
+![Usage-aware routing моделей](plugins/openbuild/lib/usage-ru.png)
 
 Поиск всегда сначала пытается использовать подтверждённый separate-usage route через `agent_runner.py`; primary route — exact custom agent `openbuild_search_separate`. Launcher требует сохранённую ChatGPT-аутентификацию, принудительно выбирает built-in OpenAI provider и ChatGPT login method, отклоняет redirects/custom OpenAI providers во всех user/project config layers, механически отключает stable multi-agent capability, сохраняет immutable snapshot prompt и пишет private profile/process-identity/JSONL/stderr/result/exit-code artifacts. Каталоги запусков используют mode `0700` на POSIX и protected current-user-only DACL на Windows; точные Linux/macOS creation identities не позволяют отправить group signal после переиспользования PID, а zombie-only POSIX groups корректно reaped без ложной liveness. `start` удерживает Codex stdin; Build записывает unactivated receipt и только затем вызывает `activate`, а прерванный вывод receipt очищает ещё не активированное дерево процессов. Активированный explorer выполняет repository search, после чего Build записывает его stopped terminal receipt до события `search-evidence-consumed`; terminal claim не может появиться раньше описываемого им поиска. Bounded timeout родительского `wait` или unknown liveness не являются terminal failure; fallback начинается только после completion, failure или `cancel`, положительно подтвердившего остановку всех запущенных процессов. Success и cancellation recovery требуют creation-bound exit code `0`, readable non-empty result и ровно одного финального JSONL event `turn.completed`. До первого lookup Build фиксирует requested agent, configured model и reasoning effort, pool, result, terminal event и fallback reason. После этого Build включает circuit breaker на текущий run и пробует direct native selector с явными model+effort, exact-name compatibility selector с observed model/effort `unknown`, `openbuild_search_fallback`, explorer, generic read-only subagent и минимальный root search. OpenBuild не скрейпит приватную usage page, не угадывает остаток quota и не повторяет неудачный route перед каждым grep.
 
@@ -373,6 +310,8 @@ fallback_reason: none | <зафиксированная допустимая п�
 ```
 
 Явный CLI argv вместе с terminal event `turn.completed` является primary operational acceptance signal. Это доказывает, что Codex принял выбранные model/effort, но не является криптографическим аудитом внутреннего provider routing. Account usage dashboard остаётся необязательным secondary evidence.
+
+Каждый завершённый ответ Build заканчивается разделом `Агенты`. Count включает только реально созданные logical runs: wrapper и его child `codex exec` считаются одним logical run, а pre-spawn dispatch failures перечисляются отдельно. В таблице есть строка для каждого созданного search, critic, implementation, review, native fallback или generic fallback run, включая unusable, cancelled и timed-out runs. Колонки: `Роль/задача`, `Фактические model/effort`, `Статус/outcome`, `Работа` и `Связь с AC/milestone/спецификацией`. Фактические model/effort берутся только из accepted explicit-dispatch или runtime evidence; иначе указывается `unknown`, даже если configured/requested model известна. Таблица не содержит приватных сведений о процессах, prompts, logs, usage и authentication.
 
 Code edits выполняет exact risk-matched writer при сохранении одинаковых Ready, TDD, minimality, single-writer, validation и review gates на каждом tier. До первой правки test или production code Build выдаёт single-writer lease, затем запускает `openbuild_implementation_fast` для low risk, `openbuild_implementation_balanced` для medium risk или `openbuild_implementation_strongest` для high/critical risk через `codex-exec-explicit-model --lease-id <id>`. Он записывает unactivated Implementation routing receipt до вызова `activate`, затем фиксирует matching lease/run-bound event `implementation-agent-activated` перед первой правкой; runner не может отправить task prompt раньше. Lease остаётся активным через все edits. Successful terminal receipt с `turn.completed`, exit code zero и valid result evidence обязан предшествовать run-bound event `implementation-handoff-accepted`, consumption результата и release. Matching failed/cancelled receipt требует complete independent failure evidence и положительно остановленных процессов, запрещает accepted handoff и разрешает release только при незавершённом milestone. Profile ID передаётся через `agent_name`; `task_name` остаётся отдельным task label. Generic worker, task label, упоминание profile или более сильный, чем запрошено, agent не считаются выбором route. High и critical work по-прежнему требуют своего strong/strongest floor.
 
@@ -406,37 +345,7 @@ Reviewers остаются read-only. Они проверяют red signal, owni
 
 ## Как работает адаптивная делегация реализации
 
-```mermaid
-flowchart LR
-    A["Root классифицирует milestone и risk"] --> B{"Ready и required tier доказаны?"}
-    B -->|нет| X["Остановиться и записать точный blocker"]
-    B -->|да| C["Dispatch exact risk profile + routing receipt"]
-
-    subgraph LEASE["Эксклюзивная writer lease · root не редактирует"]
-        C --> C1["Выдать одну bounded writer lease"]
-        C1 --> D["Red или primary signal"]
-        D --> E["Минимальная owner-layer правка"]
-        E --> F["Focused green validation"]
-        F --> G["Handoff diff, evidence и assumptions"]
-    end
-
-    G --> H["Root закрывает lease и перечитывает весь diff"]
-    H --> I["Независимая risk-based validation"]
-    I --> J["Progressive read-only review"]
-    J -->|confirmed finding| A
-    J -->|принято| K["Version, changelog и scoped Git action"]
-
-    classDef root fill:#0f172a,color:#f8fafc,stroke:#38bdf8,stroke-width:2px;
-    classDef gate fill:#422006,color:#fffbeb,stroke:#f59e0b,stroke-width:2px;
-    classDef worker fill:#172554,color:#eff6ff,stroke:#60a5fa,stroke-width:1.5px;
-    classDef stop fill:#450a0a,color:#fef2f2,stroke:#f87171,stroke-width:2px;
-    classDef done fill:#052e16,color:#ecfdf5,stroke:#34d399,stroke-width:2px;
-    class A,H,I,J root;
-    class B gate;
-    class C,C1,D,E,F,G worker;
-    class X stop;
-    class K done;
-```
+![Адаптивная делегация реализации](plugins/openbuild/lib/delegat-ru.png)
 
 После `Ready` каждый milestone выбирает `root-only`, `bounded-worker` или `sequential-workers`, выдаёт single-writer lease для exact minimum sufficient writer profile, запускает его с этим lease ID, записывает unactivated `running` receipt и затем вызывает `activate` до любой правки. Terminal receipt следует после worker edits и перед release lease. Reasoning effort масштабируется от low/minimal для механических правок до самого глубокого поддерживаемого для critical-задач. Worker используется только когда понятны owning files, acceptance criteria, red или primary signal и stop conditions; `root-only` ограничен документированными safety cases и требует, чтобы root удовлетворял выбранному tier. Недоступный required tier блокирует milestone, а не разрешает снижение risk floor.
 

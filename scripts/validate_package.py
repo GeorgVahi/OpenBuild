@@ -3078,6 +3078,210 @@ def validate_usage_routing_contract(
     return errors
 
 
+def validate_agent_usage_report_contract(
+    skill_text: str,
+    model_routing: str,
+    template_text: str,
+    readme: str,
+    readme_ru: str,
+) -> list[str]:
+    """Validate truthful logical-agent reporting and its CLI dependency boundary."""
+
+    errors: list[str] = []
+    ledger = markdown_section(skill_text, "## Maintain the agent activity ledger")
+    for token in [
+        "search, critic, implementation, review, native fallback, or generic fallback",
+        "wrapper and its child `codex exec` are one logical run",
+        "Pre-spawn dispatch failures do not increment the created-run count",
+        "unusable, cancelled, or timed out",
+        "accepted explicit-dispatch or runtime evidence",
+        "terminal status/outcome",
+        "AC, milestone, or specification-section mapping",
+        "PID, thread/run paths, raw prompts, logs, token/usage values, and authentication details",
+    ]:
+        if token not in ledger:
+            errors.append(f"SKILL.md agent usage ledger: missing {token}")
+
+    completion = markdown_section(skill_text, "## Complete the workflow")
+    for token in [
+        "Use `Agents` for an English response and `Агенты` for a Russian response.",
+        "actually created logical agent runs",
+        "pre-spawn dispatch failures separately",
+        "`Role/task`",
+        "`Actual model/effort`",
+        "`Status/outcome`",
+        "`Work`",
+        "`AC/milestone/spec mapping`",
+        "`unknown`",
+    ]:
+        if token not in completion:
+            errors.append(f"SKILL.md final agent usage: missing {token}")
+    if "`Agent usage`" in completion:
+        errors.append("SKILL.md localized agent heading: literal `Agent usage` title is not allowed")
+
+    template_ledger = markdown_section(template_text, "## 11. Agent activity ledger")
+    for token in [
+        "Created logical agent runs:",
+        "| Run | Created | Role/task | Actual model | Effort | Status/outcome | Work and specification mapping | Evidence |",
+        "wrapper and its child `codex exec` count as one logical run",
+        "Pre-spawn dispatch failures do not increment the created-run count",
+        "unusable, cancelled, or timed out",
+        "accepted explicit-dispatch or runtime evidence",
+        "configured or requested model is not the actual model",
+        "AC, milestone, or specification section",
+        "PID, thread ID, private run path, raw prompt, raw log, token or usage value, or authentication detail",
+        "Pre-spawn dispatch failures (not included in created count):",
+        "The final localized report uses `Agents` for English and `Агенты` for Russian.",
+    ]:
+        if token not in template_ledger:
+            errors.append(f"spec-template.md agent usage ledger: missing {token}")
+    if "`Agent usage`" in template_ledger:
+        errors.append("spec-template.md localized agent heading: literal `Agent usage` title is not allowed")
+
+    run_agents = markdown_section(skill_text, "## Run explicit-model agents")
+    dependency = markdown_section(model_routing, "## Exact-agent dependency checkpoint")
+    for token in ["`python --version`", "`codex --version`", "Python 3.11", "dependency checkpoint"]:
+        if token not in run_agents:
+            errors.append(f"SKILL.md dependency checkpoint: missing {token}")
+    for token in [
+        "On Windows, run `python --version`.",
+        "On POSIX, run `python3 --version` first and use `python --version` only as a fallback.",
+        "Run `codex --version` on every platform.",
+        "Only on Windows, show the exact commands",
+        "On POSIX, provide manual, platform-appropriate Python and Codex CLI installation guidance without choosing or running a package manager.",
+    ]:
+        if token not in run_agents:
+            errors.append(f"SKILL.md OS-aware dependency checkpoint: missing {token}")
+    for token in [
+        "`python --version`",
+        "`codex --version`",
+        "`winget install -e --id Python.Python.3.12`",
+        '`powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"`',
+        "separate explicit permission",
+        "Wait for installation",
+        "Authentication remains manual",
+        "`codex login status`",
+        "Never automate or request credentials",
+        "declined or unavailable",
+    ]:
+        if token not in dependency:
+            errors.append(f"model-routing.md dependency checkpoint: missing {token}")
+    for token in [
+        "On Windows, execute `python --version`.",
+        "On POSIX, execute `python3 --version` first and use `python --version` only as a fallback.",
+        "Execute `codex --version` on every platform",
+        "Show the `winget` and standalone PowerShell commands only on Windows.",
+        "On POSIX, provide manual, platform-appropriate Python and Codex CLI installation guidance without choosing or running a package manager.",
+        "OS-appropriate Python check plus `codex --version`",
+    ]:
+        if token not in dependency:
+            errors.append(f"model-routing.md OS-aware dependency checkpoint: missing {token}")
+
+    readme_requirements = markdown_section(readme, "## Requirements")
+    readme_ru_requirements = markdown_section(readme_ru, "## Требования")
+    for label, text, tokens in [
+        (
+            "README.md",
+            readme_requirements,
+            [
+                "python --version",
+                "codex --version",
+                "winget install -e --id Python.Python.3.12",
+                'powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"',
+                "separately and explicitly authorize Build",
+                "Authentication remains manual",
+                "codex login status",
+                "Build never automates credentials",
+            ],
+        ),
+        (
+            "README.ru.md",
+            readme_ru_requirements,
+            [
+                "python --version",
+                "codex --version",
+                "winget install -e --id Python.Python.3.12",
+                'powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"',
+                "отдельно и явно разрешите Build",
+                "Аутентификация остаётся ручной",
+                "codex login status",
+                "Build никогда не автоматизирует credentials",
+            ],
+        ),
+    ]:
+        for token in tokens:
+            if token not in text:
+                errors.append(f"{label} dependency checkpoint: missing {token}")
+
+    for label, text, tokens in [
+        (
+            "README.md",
+            readme_requirements,
+            [
+                "Those `winget` and PowerShell install commands are Windows-only.",
+                "On POSIX, run `python3 --version` first; use `python --version` only if `python3` is unavailable.",
+                "Run `codex --version` on every platform.",
+                "does not choose or run a package manager automatically",
+                "OS-appropriate Python check plus `codex --version`",
+            ],
+        ),
+        (
+            "README.ru.md",
+            readme_ru_requirements,
+            [
+                "команды установки через `winget` и PowerShell предназначены только для Windows",
+                "В POSIX сначала выполните `python3 --version`; используйте `python --version` только если `python3` недоступен.",
+                "На любой платформе выполните `codex --version`.",
+                "не выбирает и не запускает package manager автоматически",
+                "подходящую для ОС проверку Python вместе с `codex --version`",
+            ],
+        ),
+    ]:
+        for token in tokens:
+            if token not in text:
+                errors.append(f"{label} OS-aware dependency checkpoint: missing {token}")
+
+    image_contracts = [
+        ("README.md", readme, "[Русская версия](README.ru.md)", "plugins/openbuild/lib/Workflow-en.png", "## How usage-aware model routing works", "plugins/openbuild/lib/usage-en.png", "## How adaptive implementation delegation works", "plugins/openbuild/lib/delegat-en.png"),
+        ("README.ru.md", readme_ru, "[English version](README.md)", "plugins/openbuild/lib/Workflow-ru.png", "## Как работает usage-aware routing моделей", "plugins/openbuild/lib/usage-ru.png", "## Как работает адаптивная делегация реализации", "plugins/openbuild/lib/delegat-ru.png"),
+    ]
+    for label, text, language_link, workflow_image, usage_heading, usage_image, delegation_heading, delegation_image in image_contracts:
+        language_position = text.find(language_link)
+        after_language = text[language_position + len(language_link) :] if language_position >= 0 else ""
+        if language_position < 0 or not re.match(
+            rf"\s*!\[[^\]]+\]\({re.escape(workflow_image)}\)", after_language
+        ):
+            errors.append(f"{label} README image contract: workflow image must follow H1/language navigation")
+        for heading, image_path in [(usage_heading, usage_image), (delegation_heading, delegation_image)]:
+            section = markdown_section(text, heading)
+            if image_path not in section:
+                errors.append(f"{label} README image contract: {heading} missing {image_path}")
+            if "```mermaid" in section:
+                errors.append(f"{label} replaced Mermaid remains in {heading}")
+    if "## Workflow at a glance" in readme or "```mermaid" in readme.split("| Goal |", 1)[0]:
+        errors.append("README.md replaced Mermaid workflow remains")
+    if "## Workflow в одной схеме" in readme_ru or "```mermaid" in readme_ru.split("| Цель |", 1)[0]:
+        errors.append("README.ru.md replaced Mermaid workflow remains")
+
+    readme_usage = markdown_section(readme, "## How usage-aware model routing works")
+    for token in ["`Agents`", "actually created logical runs", "Actual model/effort", "Status/outcome", "AC/milestone/spec mapping", "accepted explicit-dispatch or runtime evidence", "`unknown`"]:
+        if token not in readme_usage:
+            errors.append(f"README.md agent usage: missing {token}")
+    readme_ru_usage = markdown_section(readme_ru, "## Как работает usage-aware routing моделей")
+    for token in ["`Агенты`", "реально созданные logical runs", "Фактические model/effort", "Статус/outcome", "AC/milestone/спецификацией", "accepted explicit-dispatch или runtime evidence", "`unknown`"]:
+        if token not in readme_ru_usage:
+            errors.append(f"README.ru.md agent usage: missing {token}")
+
+    for label, text, tokens in [
+        ("README.md", readme, ["self-contained", "host Codex CLI", "saved ChatGPT login", "Python 3.11"]),
+        ("README.ru.md", readme_ru, ["самодостаточен", "host Codex CLI", "сохранённый ChatGPT login", "Python 3.11"]),
+    ]:
+        for token in tokens:
+            if token not in text:
+                errors.append(f"{label} agent usage prerequisites: missing {token}")
+    return errors
+
+
 def validate_json(path: Path, errors: list[str]) -> dict:
     text = read_text(path, errors)
     try:
@@ -3299,8 +3503,8 @@ def public_text_files() -> list[Path]:
 
 def main() -> int:
     args = sys.argv[1:]
-    if any(arg != "--commit-gate" for arg in args) or len(args) > 1:
-        print("Usage: python scripts/validate_package.py [--commit-gate]")
+    if args not in ([], ["--commit-gate"], ["--no-commit-gate"]):
+        print("Usage: python scripts/validate_package.py [--commit-gate|--no-commit-gate]")
         return 2
     commit_gate = "--commit-gate" in args
     errors: list[str] = []
@@ -3516,6 +3720,15 @@ def main() -> int:
             code_discovery_text,
             implementation_delegation_text,
             review_protocol_text,
+            readme,
+            readme_ru,
+        )
+    )
+    errors.extend(
+        validate_agent_usage_report_contract(
+            skill_text,
+            model_routing_text,
+            template_text,
             readme,
             readme_ru,
         )

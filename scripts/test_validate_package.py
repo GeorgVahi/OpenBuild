@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import sys
 import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from validate_package import (
     BLINDSPOT_PROTOCOL,
@@ -18,6 +22,7 @@ from validate_package import (
     migration_plan_id,
     migration_supported_mappings,
     validate_auto_routing_contract,
+    validate_agent_usage_report_contract,
     validate_blindspot_contract,
     validate_changelog_contract,
     validate_decision_authority_trace,
@@ -324,18 +329,18 @@ class ChangelogContractTests(unittest.TestCase):
     def test_release_manifest_version_and_latest_release_are_documented(self) -> None:
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
         self.assertIn("## [0.4.0] - 2026-07-12", changelog)
-        self.assertEqual(validate_changelog_contract(changelog, "2.1.0"), [])
+        self.assertEqual(validate_changelog_contract(changelog, "2.1.1"), [])
 
-        mutated = changelog.replace("## [2.1.0] - 2026-07-13", "## [next] - 2026-07-13")
-        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "2.1.0")))
+        mutated = changelog.replace("## [2.1.1] - 2026-07-14", "## [next] - 2026-07-14")
+        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "2.1.1")))
 
     def test_released_version_is_pinned_in_both_install_channels(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         readme_ru = (ROOT / "README.ru.md").read_text(encoding="utf-8")
-        self.assertEqual(validate_release_docs_contract(readme, readme_ru, "2.1.0"), [])
+        self.assertEqual(validate_release_docs_contract(readme, readme_ru, "2.1.1"), [])
 
-        mutated = readme.replace("--ref v2.1.0", "--ref main")
-        self.assertTrue(any("README.md" in error for error in validate_release_docs_contract(mutated, readme_ru, "2.1.0")))
+        mutated = readme.replace("--ref v2.1.1", "--ref main")
+        self.assertTrue(any("README.md" in error for error in validate_release_docs_contract(mutated, readme_ru, "2.1.1")))
 
 
 class DecisionAuthorityTraceTests(unittest.TestCase):
@@ -1321,6 +1326,7 @@ class UsageRoutingContractTests(unittest.TestCase):
         self.review_protocol = REVIEW_PROTOCOL.read_text(encoding="utf-8")
         self.readme = (ROOT / "README.md").read_text(encoding="utf-8")
         self.readme_ru = (ROOT / "README.ru.md").read_text(encoding="utf-8")
+        self.template_text = (SKILL / "references" / "spec-template.md").read_text(encoding="utf-8")
 
     def validate(self, **overrides: str) -> list[str]:
         return validate_usage_routing_contract(
@@ -1332,6 +1338,169 @@ class UsageRoutingContractTests(unittest.TestCase):
             overrides.get("readme", self.readme),
             overrides.get("readme_ru", self.readme_ru),
         )
+
+    def validate_agent_usage(self, **overrides: str) -> list[str]:
+        return validate_agent_usage_report_contract(
+            overrides.get("skill_text", self.skill_text),
+            overrides.get("model_routing", self.model_routing),
+            overrides.get("template_text", self.template_text),
+            overrides.get("readme", self.readme),
+            overrides.get("readme_ru", self.readme_ru),
+        )
+
+    def test_agent_usage_ledger_counts_created_logical_runs_without_hiding_failures(self) -> None:
+        self.assertEqual(self.validate_agent_usage(), [])
+
+        for token, replacement in [
+            ("search, critic, implementation, review, native fallback, or generic fallback", "selected agent runs"),
+            ("wrapper and its child `codex exec` are one logical run", "wrapper and child are separate runs"),
+            ("Pre-spawn dispatch failures do not increment the created-run count", "Dispatch failures increment the count"),
+            ("unusable, cancelled, or timed out", "failed"),
+        ]:
+            with self.subTest(token=token):
+                skill_text = self.skill_text.replace(token, replacement)
+                self.assertTrue(
+                    any("agent usage" in error for error in self.validate_agent_usage(skill_text=skill_text))
+                )
+
+    def test_agent_usage_reports_actual_evidence_work_mapping_and_privacy(self) -> None:
+        self.assertEqual(self.validate_agent_usage(), [])
+
+        for token, replacement in [
+            ("accepted explicit-dispatch or runtime evidence", "configured profile"),
+            ("configured or requested model is not the actual model", "configured model is the actual model"),
+            ("AC, milestone, or specification section", "task"),
+            ("PID, thread ID, private run path, raw prompt, raw log, token or usage value, or authentication detail", "private runtime details"),
+        ]:
+            with self.subTest(token=token):
+                template_text = self.template_text.replace(token, replacement)
+                self.assertTrue(
+                    any("agent usage" in error for error in self.validate_agent_usage(template_text=template_text))
+                )
+
+    def test_exact_agent_dependency_checkpoint_and_manual_auth_are_required(self) -> None:
+        self.assertEqual(self.validate_agent_usage(), [])
+
+        mutations = [
+            ("skill_text", "`python --version`", "check Python"),
+            ("skill_text", "`codex --version`", "check Codex"),
+            ("model_routing", "`winget install -e --id Python.Python.3.12`", "install Python"),
+            (
+                "model_routing",
+                '`powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"`',
+                "install Codex CLI",
+            ),
+            ("model_routing", "`codex login status`", "check login"),
+            ("model_routing", "Authentication remains manual", "Automate authentication"),
+            ("model_routing", "separate explicit permission", "implicit permission"),
+        ]
+        for field, token, replacement in mutations:
+            with self.subTest(field=field, token=token):
+                value = getattr(self, field).replace(token, replacement)
+                self.assertTrue(
+                    any("dependency checkpoint" in error for error in self.validate_agent_usage(**{field: value}))
+                )
+
+    def test_dependency_checkpoint_is_os_aware(self) -> None:
+        self.assertEqual(self.validate_agent_usage(), [])
+
+        mutations = [
+            ("skill_text", "On Windows, run `python --version`.", "Run `python --version`."),
+            (
+                "skill_text",
+                "On POSIX, run `python3 --version` first and use `python --version` only as a fallback.",
+                "On POSIX, run `python --version`.",
+            ),
+            ("skill_text", "Run `codex --version` on every platform.", "Run `codex --version`."),
+            (
+                "model_routing",
+                "Show the `winget` and standalone PowerShell commands only on Windows.",
+                "Show the install commands on every platform.",
+            ),
+            (
+                "model_routing",
+                "On POSIX, provide manual, platform-appropriate Python and Codex CLI installation guidance without choosing or running a package manager.",
+                "On POSIX, choose a package manager automatically.",
+            ),
+            (
+                "readme",
+                "On POSIX, run `python3 --version` first; use `python --version` only if `python3` is unavailable.",
+                "On POSIX, run `python --version`.",
+            ),
+            (
+                "readme_ru",
+                "В POSIX сначала выполните `python3 --version`; используйте `python --version` только если `python3` недоступен.",
+                "В POSIX выполните `python --version`.",
+            ),
+        ]
+        for field, token, replacement in mutations:
+            with self.subTest(field=field, token=token):
+                value = getattr(self, field).replace(token, replacement)
+                self.assertTrue(
+                    any(
+                        "OS-aware dependency checkpoint" in error
+                        for error in self.validate_agent_usage(**{field: value})
+                    )
+                )
+
+    def test_readmes_use_all_six_localized_images_without_replaced_mermaid(self) -> None:
+        self.assertEqual(self.validate_agent_usage(), [])
+
+        for field, token in [
+            ("readme", "plugins/openbuild/lib/Workflow-en.png"),
+            ("readme_ru", "plugins/openbuild/lib/Workflow-ru.png"),
+            ("readme", "plugins/openbuild/lib/usage-en.png"),
+            ("readme_ru", "plugins/openbuild/lib/usage-ru.png"),
+            ("readme", "plugins/openbuild/lib/delegat-en.png"),
+            ("readme_ru", "plugins/openbuild/lib/delegat-ru.png"),
+        ]:
+            with self.subTest(field=field, token=token):
+                value = getattr(self, field).replace(token, "plugins/openbuild/lib/missing.png")
+                self.assertTrue(
+                    any("README image contract" in error for error in self.validate_agent_usage(**{field: value}))
+                )
+
+        readme = self.readme.replace(
+            "![Usage-aware model routing](plugins/openbuild/lib/usage-en.png)",
+            "![Usage-aware model routing](plugins/openbuild/lib/usage-en.png)\n\n```mermaid\ngraph LR\nA-->B\n```",
+        )
+        self.assertTrue(any("replaced Mermaid" in error for error in self.validate_agent_usage(readme=readme)))
+
+    def test_bilingual_final_agent_tables_describe_the_same_truthful_columns(self) -> None:
+        self.assertEqual(self.validate_agent_usage(), [])
+
+        readme = self.readme.replace("Actual model/effort", "Configured model/effort")
+        self.assertTrue(any("README.md agent usage" in error for error in self.validate_agent_usage(readme=readme)))
+
+        readme_ru = self.readme_ru.replace("Фактические model/effort", "Настроенные model/effort")
+        self.assertTrue(any("README.ru.md agent usage" in error for error in self.validate_agent_usage(readme_ru=readme_ru)))
+
+    def test_final_agent_heading_is_localized_to_the_response_language(self) -> None:
+        self.assertEqual(self.validate_agent_usage(), [])
+
+        for field, token, replacement in [
+            (
+                "skill_text",
+                "Use `Agents` for an English response and `Агенты` for a Russian response.",
+                "Use `Agent usage` for every response.",
+            ),
+            (
+                "template_text",
+                "The final localized report uses `Agents` for English and `Агенты` for Russian.",
+                "The final report uses `Agent usage` for every language.",
+            ),
+        ]:
+            with self.subTest(field=field):
+                value = getattr(self, field).replace(token, replacement)
+                self.assertTrue(
+                    any(
+                        "localized agent heading" in error
+                        for error in self.validate_agent_usage(**{field: value})
+                    )
+                )
+
+        self.assertNotIn("`Agent usage`", self.skill_text)
+        self.assertNotIn("`Agent usage`", self.template_text)
 
     def test_separate_usage_search_precedes_main_pool_fallback(self) -> None:
         self.assertEqual(self.validate(), [])

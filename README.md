@@ -2,6 +2,8 @@
 
 [Русская версия](README.ru.md)
 
+![OpenBuild workflow](plugins/openbuild/lib/Workflow-en.png)
+
 OpenBuild is a Codex workflow for turning a plain-language idea or an existing specification into a repository-grounded plan and, when requested, a tested implementation with user-owned product decisions, automatic phase routing, iterative blind-spot critique, separate-usage-pool-first code search, risk-matched-model coding, bounded writers, evidence-gated minimality, TDD-first milestones, and progressive review.
 
 It packages one explicit skill, **Build**, with six modes:
@@ -13,11 +15,17 @@ It packages one explicit skill, **Build**, with six modes:
 - `auto` — infer the target and resume at the first incomplete phase;
 - `setup-models` — optionally configure permission-gated search-pool, fast/balanced/strong writer, and read-only review profiles.
 
-OpenBuild is self-contained. It does not require separate discovery, TDD, or review skills, telemetry, a hosted service, or background network access.
+OpenBuild is self-contained. It does not require separate discovery, TDD, or review skills, telemetry, a hosted service, or background network access. Exact CLI agents do require the host Codex CLI, a saved ChatGPT login, and Python 3.11 or newer.
 
-> OpenBuild `2.1.0` is the current release. Its immutable release tag is `v2.1.0`; pin it for reproducible installation or use `main` intentionally for unreleased changes.
+> OpenBuild `2.1.1` is the current release. Its immutable release tag is `v2.1.1`; pin it for reproducible installation or use `main` intentionally for unreleased changes.
 
-The manifest packaged in the release commit, immutable tag, and GitHub Release are synchronized at `2.1.0`. Earlier `v2.0.1` and `v1.1.1` artifacts remain immutable.
+The manifest packaged in the release commit, immutable tag, and GitHub Release are synchronized at `2.1.1`. Earlier `v2.1.0`, `v2.0.1`, and `v1.1.1` artifacts remain immutable.
+
+## What shipped in 2.1.1
+
+- localized GitHub-ready workflow, usage-routing, and delegation diagrams replace the matching Mermaid blocks;
+- every completed Build response reports the real logical agent runs, actual model/effort evidence or `unknown`, terminal outcome, work, and specification mapping without exposing private runtime details;
+- exact CLI dispatch now has an explicit Python/Codex dependency checkpoint, permission-gated Windows installation guidance, and manual ChatGPT authentication.
 
 ## What shipped in 2.1.0
 
@@ -42,46 +50,6 @@ The manifest packaged in the release commit, immutable tag, and GitHub Release a
 - per-target decision application receipts and a `Ready` gate that proves every normative write uses the current user-approved outcome;
 - the existing separate-pool discovery, risk-matched implementation, TDD, single-writer, and progressive-review contracts remain intact.
 
-## Workflow at a glance
-
-```mermaid
-flowchart LR
-    A["Idea or existing specification"] --> B{"Explicit mode or auto evidence"}
-    B -->|new / full| C["Repository discovery"]
-    B -->|refine| D["Specification reconciliation"]
-    B -->|run| E["Readiness audit"]
-    B -->|auto| F["First incomplete phase"]
-    C --> D
-    F --> C
-    F --> D
-    F --> E
-    D --> G["Specification source map + blind spots"]
-    E --> G
-    G --> U{"Material product choice?"}
-    U -->|yes| P["Options + consequences + risks + recommendation"]
-    P --> V["User decision"]
-    V --> R["Rebuild product map + application receipt"]
-    R --> H{"Ready gate"}
-    U -->|no| H
-    H -->|gaps| G
-    H -->|covered| T{"Workflow target"}
-    T -->|specification only| Q["Ready specification"]
-    T -->|implementation| I["Risk-matched implementation"]
-    I --> J["Focused and risk-based validation"]
-    J --> K["Progressive read-only review"]
-    K -->|actionable finding| I
-    K -->|accepted| L["Complete record and scoped Git handoff"]
-
-    classDef input fill:#0f172a,color:#f8fafc,stroke:#38bdf8,stroke-width:2px;
-    classDef phase fill:#172554,color:#eff6ff,stroke:#60a5fa,stroke-width:1.5px;
-    classDef gate fill:#422006,color:#fffbeb,stroke:#f59e0b,stroke-width:2px;
-    classDef done fill:#052e16,color:#ecfdf5,stroke:#34d399,stroke-width:2px;
-    class A,B input;
-    class C,D,E,F,G,P,V,R,I,J,K phase;
-    class U,H,T gate;
-    class Q,L done;
-```
-
 | Goal | Command | Stops at |
 |---|---|---|
 | Create or repair a specification | `$build new …` / `$build refine BUILD.md` | `Ready` |
@@ -95,18 +63,36 @@ flowchart LR
 - A current Codex surface that supports skills. Plugin installation is available in Codex CLI and supported plugin surfaces.
 - Python 3.11 or newer for the packaged explicit-model runner (`python` on Windows, commonly `python3` on POSIX).
 - Git, when Build is expected to create milestone commits or review a task diff.
-- Windows unit, package, syntax, diff, clean-install, real Codex CLI runtime-smoke, and independent-review checks were completed for `v2.1.0`. macOS and Linux remain unverified.
+- Windows unit, package, syntax, diff, clean-install, real Codex CLI runtime-smoke, and independent-review checks were completed for `v2.1.1`. macOS and Linux remain unverified.
 
-OpenBuild `2.1.0` and the earlier `2.0.1`/`1.1.1` releases support Codex only. They do not claim compatibility with Claude Code, Cursor, Gemini CLI, or other coding agents.
+OpenBuild `2.1.1` and the earlier `2.1.0`/`2.0.1`/`1.1.1` releases support Codex only. They do not claim compatibility with Claude Code, Cursor, Gemini CLI, or other coding agents.
+
+Before the first exact CLI-agent dispatch, choose the dependency preflight for the host OS. On Windows, check both dependencies:
+
+```powershell
+python --version
+codex --version
+```
+
+Python must report 3.11 or newer. If either command is unavailable, install it manually and return after it completes, or separately and explicitly authorize Build to run the applicable exact command:
+
+```powershell
+winget install -e --id Python.Python.3.12
+powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"
+```
+
+Those `winget` and PowerShell install commands are Windows-only. On POSIX, run `python3 --version` first; use `python --version` only if `python3` is unavailable. Run `codex --version` on every platform. If a POSIX dependency is missing, Build provides manual, platform-appropriate Python and Codex CLI installation guidance; it does not choose or run a package manager automatically.
+
+Build must wait for installation and repeat the OS-appropriate Python check plus `codex --version`. Authentication remains manual: run `codex`, complete the ChatGPT sign-in yourself, and then verify `codex login status`. Build never automates credentials. If installation or authentication is declined or unavailable, it records the limitation and uses only an honest supported fallback.
 
 ## Install as a plugin — recommended
 
 The plugin is the primary distribution channel. It gives you versioned marketplace installation and the namespaced invocation `$openbuild:build`.
 
-### Current pinned release `v2.1.0`
+### Current pinned release `v2.1.1`
 
 ```bash
-codex plugin marketplace add GeorgVahi/OpenBuild --ref v2.1.0
+codex plugin marketplace add GeorgVahi/OpenBuild --ref v2.1.1
 codex plugin add openbuild@openbuild
 ```
 
@@ -150,11 +136,11 @@ A versioned/tag-pinned marketplace is fixed to its selected tag. To move from on
 ```bash
 codex plugin remove openbuild@openbuild
 codex plugin marketplace remove openbuild
-codex plugin marketplace add GeorgVahi/OpenBuild --ref v2.1.0
+codex plugin marketplace add GeorgVahi/OpenBuild --ref v2.1.1
 codex plugin add openbuild@openbuild
 ```
 
-Replace `v2.1.0` with the target release tag.
+Replace `v2.1.1` with the target release tag.
 
 ### Uninstall the plugin
 
@@ -168,10 +154,10 @@ codex plugin marketplace remove openbuild
 Standalone installation gives you the shorter `$build` invocation. Ask the preinstalled system skill installer to install the canonical Build folder:
 
 ```text
-Use $skill-installer to install the skill from https://github.com/GeorgVahi/OpenBuild/tree/v2.1.0/plugins/openbuild/skills/build
+Use $skill-installer to install the skill from https://github.com/GeorgVahi/OpenBuild/tree/v2.1.1/plugins/openbuild/skills/build
 ```
 
-To test unreleased changes, use the same path with `/tree/main/`; keep `v2.1.0` for a reproducible tagged installation.
+To test unreleased changes, use the same path with `/tree/main/`; keep `v2.1.1` for a reproducible tagged installation.
 
 Start a new Codex thread after installation. Open `/skills` or type `$` and verify that `build` appears, then invoke:
 
@@ -303,56 +289,7 @@ The root agent remains the orchestrator: it deduplicates evidence, verifies alre
 
 ## How usage-aware model routing works
 
-```mermaid
-flowchart TB
-    R{"Task phase and evidence"}
-
-    subgraph SEARCH["Search · read-only"]
-        S0["Compact search plan"] --> S1{"Exact separate-agent dispatch?"}
-        S1 -->|selected| S2["openbuild_search_separate"]
-        S1 -->|recorded failure| S5["Failure receipt + circuit breaker"]
-        S5 --> S3["Efficient main-pool fallback"]
-        S3 --> S4["Explorer → generic worker → root"]
-        S2 --> S6["Routing receipt before first search"]
-    end
-
-    subgraph WRITE["Implementation · exactly one writer"]
-        W0{"Milestone risk"}
-        W0 -->|low| W1["openbuild_implementation_fast"]
-        W0 -->|medium| W2["openbuild_implementation_balanced"]
-        W0 -->|high / critical| W3["openbuild_implementation_strongest"]
-        W1 --> W4["Exact dispatch + routing receipt"]
-        W2 --> W4
-        W3 --> W4
-        W4 --> W5["Same Ready, TDD, minimality, lease and validation gates"]
-    end
-
-    subgraph REVIEW["Review · read-only"]
-        V0{"Diff risk floor"} --> V1["Exact profile: fast / balanced / strong / strongest"]
-        V1 --> V2["Routing receipt + structured result"]
-        V2 --> V3{"Accept with no concrete trigger?"}
-        V3 -->|no| V4["Root adjudication, remediation and green validation"]
-        V4 --> V5["Next proven tier only"]
-        V5 --> V2
-    end
-
-    R --> S0
-    S6 --> W0
-    S4 --> W0
-    W5 --> V0
-    V3 -->|yes| Z["Verified completion"]
-
-    classDef decision fill:#422006,color:#fffbeb,stroke:#f59e0b,stroke-width:2px;
-    classDef search fill:#083344,color:#ecfeff,stroke:#22d3ee,stroke-width:1.5px;
-    classDef write fill:#172554,color:#eff6ff,stroke:#60a5fa,stroke-width:1.5px;
-    classDef review fill:#3b0764,color:#faf5ff,stroke:#c084fc,stroke-width:1.5px;
-    classDef done fill:#052e16,color:#ecfdf5,stroke:#34d399,stroke-width:2px;
-    class R,S1,W0,V0,V3 decision;
-    class S0,S2,S3,S4,S5,S6 search;
-    class W1,W2,W3,W4,W5 write;
-    class V1,V2,V4,V5 review;
-    class Z done;
-```
+![Usage-aware model routing](plugins/openbuild/lib/usage-en.png)
 
 Search always attempts a confirmed separate-usage route first through `agent_runner.py`; the primary route is the exact custom agent `openbuild_search_separate`. The launcher requires saved ChatGPT authentication, forces the built-in OpenAI provider and ChatGPT login method, rejects redirects/custom OpenAI providers across user and project config layers, disables the stable multi-agent capability, snapshots the prompt, and records private profile/process-identity/JSONL/stderr/result/exit-code artifacts. Run directories use mode `0700` on POSIX and a protected current-user-only DACL on Windows; Linux/macOS process creation identities are precise enough to reject PID reuse before group signalling, and zombie-only POSIX groups are reaped without false liveness. `start` holds Codex stdin; Build records its unactivated receipt and only then calls `activate`, and an interrupted receipt write cleans up the still-unactivated process tree. The activated explorer performs the repository search, then Build records its stopped terminal receipt before `search-evidence-consumed`; a terminal claim can never be fabricated before the search it describes. A bounded parent wait timeout or unknown liveness is non-terminal; fallback starts only after completion, failure, or explicit `cancel` positively confirms every started process stopped. Success and cancellation recovery both require a creation-bound exit code of zero, a readable non-empty result, and exactly one final `turn.completed` JSONL event. Before the first lookup, Build records the requested agent, configured model and reasoning effort, pool, result, terminal event, and fallback reason. It then opens the current-run circuit breaker and tries an exposed direct model-plus-effort native selector, an exact-name compatibility selector with observed model/effort `unknown`, `openbuild_search_fallback`, an explorer, a generic read-only subagent, and finally minimum root search. It does not scrape the private usage dashboard, guess remaining quota, or retry a failed route for every grep.
 
@@ -373,6 +310,8 @@ fallback_reason: none | <recorded allowed reason>
 ```
 
 The explicit CLI argv plus terminal `turn.completed` is the primary operational acceptance signal. It proves that Codex accepted the requested model/effort selection; it is not a cryptographic audit of provider-internal routing. The account usage dashboard remains optional secondary evidence.
+
+Every completed Build response ends with an `Agents` section. Its count includes only actually created logical runs: the wrapper and its child `codex exec` are one logical run, while pre-spawn dispatch failures are listed separately. One table row is included for every created search, critic, implementation, review, native fallback, or generic fallback run, including unusable, cancelled, and timed-out runs. The columns are `Role/task`, `Actual model/effort`, `Status/outcome`, `Work`, and `AC/milestone/spec mapping`. Actual model/effort comes only from accepted explicit-dispatch or runtime evidence; otherwise it is `unknown`, even when a configured or requested model is known. The table omits private process, prompt, log, usage, and authentication data.
 
 Code edits use an exact risk-matched writer while preserving the same Ready, TDD, minimality, single-writer, validation, and review gates at every tier. Before the first test or production edit, Build acquires the single-writer lease, then starts `openbuild_implementation_fast` for low risk, `openbuild_implementation_balanced` for medium risk, or `openbuild_implementation_strongest` for high/critical risk through `codex-exec-explicit-model --lease-id <id>`. It records the unactivated Implementation routing receipt before calling `activate`, then records the matching lease/run-bound `implementation-agent-activated` event before the first edit; the runner cannot send the task prompt earlier. The lease remains active through all edits. A successful terminal receipt with `turn.completed`, exit code zero, and valid result evidence must precede the run-bound `implementation-handoff-accepted` event, result consumption, and release. A matching failed/cancelled receipt needs complete independent failure evidence and all processes positively stopped, forbids accepted handoff, and permits release only while the milestone stays incomplete. The profile ID travels in `agent_name`; `task_name` remains a separate task label. A generic worker, task label, profile mention, or stronger-than-requested agent does not count; high and critical work still require their strong/strongest floor.
 
@@ -406,37 +345,7 @@ Reviewers stay read-only. They audit the red signal, owning layer, focused green
 
 ## How adaptive implementation delegation works
 
-```mermaid
-flowchart LR
-    A["Root classifies milestone and risk"] --> B{"Ready and required tier proven?"}
-    B -->|no| X["Stop and record the exact blocker"]
-    B -->|yes| C["Dispatch exact risk profile + routing receipt"]
-
-    subgraph LEASE["Exclusive writer lease · root pauses edits"]
-        C --> C1["Issue one bounded writer lease"]
-        C1 --> D["Red or primary signal"]
-        D --> E["Minimum owner-layer change"]
-        E --> F["Focused green validation"]
-        F --> G["Diff, evidence and assumptions handoff"]
-    end
-
-    G --> H["Root releases lease and rereads full diff"]
-    H --> I["Independent risk-based validation"]
-    I --> J["Progressive read-only review"]
-    J -->|confirmed finding| A
-    J -->|accepted| K["Version, changelog and scoped Git action"]
-
-    classDef root fill:#0f172a,color:#f8fafc,stroke:#38bdf8,stroke-width:2px;
-    classDef gate fill:#422006,color:#fffbeb,stroke:#f59e0b,stroke-width:2px;
-    classDef worker fill:#172554,color:#eff6ff,stroke:#60a5fa,stroke-width:1.5px;
-    classDef stop fill:#450a0a,color:#fef2f2,stroke:#f87171,stroke-width:2px;
-    classDef done fill:#052e16,color:#ecfdf5,stroke:#34d399,stroke-width:2px;
-    class A,H,I,J root;
-    class B gate;
-    class C,C1,D,E,F,G worker;
-    class X stop;
-    class K done;
-```
+![Adaptive implementation delegation](plugins/openbuild/lib/delegat-en.png)
 
 After `Ready`, each milestone selects `root-only`, `bounded-worker`, or `sequential-workers`, acquires the single-writer lease for the exact minimum sufficient writer profile, starts it with that lease ID, records the unactivated `running` receipt, and then calls `activate` before any edit. The terminal receipt follows worker edits and precedes lease release. Reasoning effort scales from low/minimal for mechanical changes to the deepest supported effort for critical work. A worker is used only when the owning files, acceptance criteria, red or primary signal, and stop conditions are clear; `root-only` remains limited to documented safety cases and requires the root to satisfy the selected tier. An unavailable required tier blocks that milestone instead of authorizing a risk-floor downgrade.
 

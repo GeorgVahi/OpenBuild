@@ -1,6 +1,6 @@
 {
   "name": "openbuild",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "Evidence-grounded specifications with user-owned product decisions, iterative blind-spot closure, bounded implementation, TDD-first delivery, and progressive review for Codex.",
   "author": {
     "name": "GeorgVahi",

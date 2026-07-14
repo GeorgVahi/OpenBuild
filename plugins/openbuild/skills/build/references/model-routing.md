@@ -27,6 +27,21 @@ Start with `agent_runner.py start`, retain and record its unactivated running re
 
 If the explicit runner fails, record one of `profile-not-discoverable`, `profile-incomplete`, `cli-unavailable`, `chatgpt-auth-unavailable`, `model-unavailable`, `quota-exhausted`, `sandbox-mismatch`, `runner-failed`, `spawn-failed`, `worker-timeout`, or `unusable-evidence`. `worker-timeout` is valid only after `cancel` records the worker PID, whether Codex started, its PID when present, and confirms every started process stopped; `unusable-evidence` is valid only after a completed result. A native spawn is next only when its callable schema directly exposes both model and reasoning effort; otherwise an exact custom-agent `agent_name` is a compatibility fallback with observed model/effort recorded as `unknown`, never as proof of switching.
 
+## Exact-agent dependency checkpoint
+
+Before the first exact CLI dispatch in a Build run, select the preflight by host OS. On Windows, execute `python --version`. On POSIX, execute `python3 --version` first and use `python --version` only as a fallback. Execute `codex --version` on every platform; Python must be 3.11 or newer. If either check fails, stop before agent creation.
+
+Show the `winget` and standalone PowerShell commands only on Windows.
+
+```powershell
+winget install -e --id Python.Python.3.12
+powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"
+```
+
+The exact Windows commands are `winget install -e --id Python.Python.3.12` and `powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"`; do not substitute another installer silently. On POSIX, provide manual, platform-appropriate Python and Codex CLI installation guidance without choosing or running a package manager.
+
+Offer two paths: the user installs manually and replies after completion, or Build runs an applicable displayed command only with separate explicit permission. Wait for installation and rerun the OS-appropriate Python check plus `codex --version`. Authentication remains manual: ask the user to run `codex`, complete ChatGPT sign-in personally, and then verify `codex login status`. Never automate or request credentials. When installation/auth is declined or unavailable, record the dependency checkpoint and route through the first honest supported fallback; never claim an exact CLI agent was created.
+
 ## Search usage-pool order
 
 Use this order before any repository grep, file/symbol lookup, dependency trace, route/test/config/schema search, or log scan:

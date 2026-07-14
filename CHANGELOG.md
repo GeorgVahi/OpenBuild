@@ -6,6 +6,19 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.1.1] - 2026-07-14
+
+### Added
+
+- Added localized GitHub-ready workflow, usage-routing, and adaptive-delegation images to both READMEs, plus an OS-aware Python 3.11/Codex CLI dependency checkpoint: Windows gets permission-gated exact install commands, while POSIX gets manual platform-appropriate guidance without automatic package-manager selection; ChatGPT authentication remains manual.
+- Added a durable agent activity ledger and a localized final report headed `Agents` in English or `Агенты` in Russian for every created search, critic, implementation, review, native fallback, and generic fallback logical run, with evidence-backed actual model/effort or `unknown`, terminal outcome, factual work, and acceptance/specification mapping.
+
+### Changed
+
+- Replaced the six matching Mermaid diagrams with the supplied image assets and documented truthful created-run counting, pre-spawn failures, wrapper/`codex exec` identity, unusable outcomes, and privacy boundaries.
+- Corrected the Russian review-cycle arrows and both delegation diagrams so the public visuals preserve remediation-to-review escalation and acquire the writer lease before exact dispatch.
+- Deterministic contract validation now mutation-tests the agent report, dependency checkpoint, bilingual image placement, and removal of the replaced Mermaid blocks while preserving blind-spot closure, `auto`, the separate usage pool, Risk-matched-model coding, the single-writer lease, TDD, minimality, and progressive review contracts.
+
 ## [2.1.0] - 2026-07-13
 
 ### Added
@@ -139,7 +152,8 @@ The project follows [Semantic Versioning](https://semver.org/).
 - Codex plugin marketplace distribution and standalone skill installation path.
 - Complete English and Russian documentation.
 
-[Unreleased]: https://github.com/GeorgVahi/OpenBuild/compare/v2.1.0...HEAD
+[Unreleased]: https://github.com/GeorgVahi/OpenBuild/compare/v2.1.1...HEAD
+[2.1.1]: https://github.com/GeorgVahi/OpenBuild/compare/v2.1.0...v2.1.1
 [2.1.0]: https://github.com/GeorgVahi/OpenBuild/compare/v2.0.1...v2.1.0
 [2.0.1]: https://github.com/GeorgVahi/OpenBuild/compare/v1.1.1...v2.0.1
 [1.1.1]: https://github.com/GeorgVahi/OpenBuild/compare/v1.0.4...v1.1.1

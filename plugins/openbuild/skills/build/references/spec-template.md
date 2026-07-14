@@ -206,7 +206,23 @@ Non-blocking assumptions:
 
 - <assumption and how it will be verified>.
 
-## 11. Execution and validation log
+## 11. Agent activity ledger
+
+Created logical agent runs: `<count>`.
+
+| Run | Created | Role/task | Actual model | Effort | Status/outcome | Work and specification mapping | Evidence |
+|---|---|---|---|---|---|---|---|
+| A-001 | yes | <search/critic/implementation/review/native fallback/generic fallback and task> | <accepted actual value or unknown> | <accepted actual value or unknown> | <terminal status and usable/unusable/cancelled/timeout outcome> | <short factual work; AC, milestone, or specification section, or none> | <accepted non-private evidence> |
+
+Create a row only after the logical agent run exists. A wrapper and its child `codex exec` count as one logical run. Pre-spawn dispatch failures do not increment the created-run count; list normalized failures separately when they affected routing or fallback. Keep every created terminal run visible even when unusable, cancelled, or timed out.
+
+Actual model and effort require accepted explicit-dispatch or runtime evidence; otherwise record `unknown`. A configured or requested model is not the actual model. Do not include any PID, thread ID, private run path, raw prompt, raw log, token or usage value, or authentication detail.
+
+Pre-spawn dispatch failures (not included in created count): <profile/route -> normalized reason, or none>.
+
+The final localized report uses `Agents` for English and `Агенты` for Russian. It states the created logical-run count and renders one row per ledger entry with role/task, actual model/effort, status/outcome, work, and AC/milestone/spec mapping.
+
+## 12. Execution and validation log
 
 ### YYYY-MM-DD — <stage>
 
