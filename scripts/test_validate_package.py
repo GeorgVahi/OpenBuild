@@ -340,19 +340,19 @@ class ImplementationDelegationContractTests(unittest.TestCase):
 class ChangelogContractTests(unittest.TestCase):
     def test_release_manifest_version_and_latest_release_are_documented(self) -> None:
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-        self.assertEqual(validate_changelog_contract(changelog, "2.1.2"), [])
+        self.assertEqual(validate_changelog_contract(changelog, "2.1.3"), [])
         self.assertNotIn("## [2.1.1]", changelog)
 
-        mutated = changelog.replace("## [2.1.2] - 2026-07-14", "## [next] - 2026-07-14")
-        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "2.1.2")))
+        mutated = changelog.replace("## [2.1.3] - 2026-07-14", "## [next] - 2026-07-14")
+        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "2.1.3")))
 
     def test_released_version_is_pinned_in_both_install_channels(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         readme_ru = (ROOT / "README.ru.md").read_text(encoding="utf-8")
-        self.assertEqual(validate_release_docs_contract(readme, readme_ru, "2.1.2"), [])
+        self.assertEqual(validate_release_docs_contract(readme, readme_ru, "2.1.3"), [])
 
-        mutated = readme.replace("--ref v2.1.2", "--ref main")
-        self.assertTrue(any("README.md" in error for error in validate_release_docs_contract(mutated, readme_ru, "2.1.2")))
+        mutated = readme.replace("--ref v2.1.3", "--ref main")
+        self.assertTrue(any("README.md" in error for error in validate_release_docs_contract(mutated, readme_ru, "2.1.3")))
 
 
 class DecisionAuthorityTraceTests(unittest.TestCase):

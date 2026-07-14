@@ -4,7 +4,21 @@
 
 OpenBuild is an explicit Codex workflow that can take a plain-language task or an existing specification from repository discovery through implementation, validation, and review. The default route is automatic: invoke Build, describe the outcome, and let it choose the first incomplete phase.
 
-Current release: `2.1.2` ([pinned skill source](https://github.com/GeorgVahi/OpenBuild/tree/v2.1.2/plugins/openbuild/skills/build)).
+Current release: `2.1.3` ([pinned skill source](https://github.com/GeorgVahi/OpenBuild/tree/v2.1.3/plugins/openbuild/skills/build)).
+
+## Diagrams
+
+### Workflow
+
+![OpenBuild workflow](plugins/openbuild/lib/Workflow-en.png)
+
+### Exact model routing
+
+![Exact model routing](plugins/openbuild/lib/usage-v2-en.png)
+
+### Implementation delegation
+
+![Adaptive implementation delegation](plugins/openbuild/lib/delegat-en.png)
 
 ## Requirements
 
@@ -27,7 +41,7 @@ codex plugin marketplace remove openbuild
 Add the latest pinned release and install it:
 
 ```powershell
-codex plugin marketplace add GeorgVahi/OpenBuild --ref v2.1.2
+codex plugin marketplace add GeorgVahi/OpenBuild --ref v2.1.3
 codex plugin add openbuild@openbuild
 ```
 
