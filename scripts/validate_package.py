@@ -19,8 +19,21 @@ BLINDSPOT_PROTOCOL = SKILL / "references" / "blindspot-protocol.md"
 IMPLEMENTATION_DELEGATION = SKILL / "references" / "implementation-delegation.md"
 REVIEW_PROTOCOL = SKILL / "references" / "review-protocol.md"
 AGENT_RUNNER = SKILL / "scripts" / "agent_runner.py"
-PACKAGED_SEARCH_PROFILE = SKILL / "profiles" / "openbuild_search_separate.toml"
 PACKAGED_SEARCH_MODEL = "gpt-5.3-codex-spark"
+PACKAGED_AGENT_DEFAULTS = {
+    "openbuild_search_separate": (PACKAGED_SEARCH_MODEL, "low", "read-only"),
+    "openbuild_implementation_fast": ("gpt-5.6-terra", "low", "workspace-write"),
+    "openbuild_implementation_balanced": ("gpt-5.6-terra", "medium", "workspace-write"),
+    "openbuild_implementation_strongest": ("gpt-5.6-sol", "xhigh", "workspace-write"),
+    "openbuild_review_fast": ("gpt-5.6-luna", "low", "read-only"),
+    "openbuild_review_balanced": ("gpt-5.6-terra", "medium", "read-only"),
+    "openbuild_review_strong": ("gpt-5.6-sol", "high", "read-only"),
+    "openbuild_review_strongest": ("gpt-5.6-sol", "xhigh", "read-only"),
+}
+PACKAGED_AGENT_PROFILES = {
+    name: SKILL / "profiles" / f"{name}.toml" for name in PACKAGED_AGENT_DEFAULTS
+}
+PACKAGED_SEARCH_PROFILE = PACKAGED_AGENT_PROFILES["openbuild_search_separate"]
 PACKAGED_SEARCH_INSTRUCTIONS = (
     "You are the already-delegated read-only Explorer. Do not spawn or delegate to another agent.\n\n"
     "When code discovery, broad rg, route or symbol lookup, owner mapping, or cross-file evidence gathering is needed:\n"
@@ -52,7 +65,7 @@ REQUIRED = [
     SKILL / "references" / "model-routing.md",
     REVIEW_PROTOCOL,
     AGENT_RUNNER,
-    PACKAGED_SEARCH_PROFILE,
+    *PACKAGED_AGENT_PROFILES.values(),
     SKILL / "references" / "tdd-workflow.md",
     SKILL / "references" / "versioning.md",
     ROOT / "scripts" / "test_validate_package.py",
@@ -79,7 +92,6 @@ SEARCH_DISPATCH_FAILURES = {
     "profile-incomplete",
     "cli-unavailable",
     "chatgpt-auth-unavailable",
-    "selector-unavailable",
     "model-unavailable",
     "quota-exhausted",
     "sandbox-mismatch",
@@ -88,11 +100,7 @@ SEARCH_DISPATCH_FAILURES = {
     "worker-timeout",
     "unusable-evidence",
 }
-EXACT_DISPATCH_METHODS = {
-    "codex-exec-explicit-model",
-    "per-spawn-model",
-    "exact-custom-agent",
-}
+EXACT_DISPATCH_METHODS = {"codex-exec-explicit-model"}
 IMPLEMENTATION_AGENT_BY_RISK = {
     "low": ("fast", "openbuild_implementation_fast"),
     "medium": ("balanced", "openbuild_implementation_balanced"),
@@ -122,7 +130,6 @@ REVIEW_ESCALATION_REASONS = {
     "complexity-floor",
 }
 CANONICAL_AGENT_IDS = {
-    "openbuild_search_fallback": "openbuild-search-fallback",
     "openbuild_implementation_fast": "openbuild-implementation-fast",
     "openbuild_implementation_balanced": "openbuild-implementation-balanced",
     "openbuild_implementation_strongest": "openbuild-implementation-strongest",
@@ -224,6 +231,11 @@ def explicit_failure_evidence_is_valid(receipt: dict[str, object]) -> bool:
         exit_evidence in {"missing", "malformed", "identity-mismatch"}
         or (exit_evidence == "valid" and exit_code is not None and exit_code != 0)
         or result_evidence in {"missing", "empty", "invalid"}
+        or (
+            receipt.get("fallback_reason") == "unusable-evidence"
+            and receipt.get("terminal_event") == "turn.completed"
+            and explicit_success_evidence_is_valid(receipt)
+        )
     )
 
 
@@ -266,46 +278,6 @@ def validate_explicit_terminal_evidence(
     return errors
 
 
-def validate_prior_terminal_runner_failure(
-    receipts: list[dict[str, object]],
-    *,
-    label: str,
-    bindings: dict[str, object],
-) -> list[str]:
-    """Require a creation-bound stopped explicit-runner failure before native fallback."""
-
-    errors: list[str] = []
-    failures = [
-        receipt
-        for receipt in receipts
-        if receipt.get("dispatch_method") == "codex-exec-explicit-model"
-        and receipt.get("run_status") == "failed"
-    ]
-    if len(failures) != 1:
-        return [f"{label}: native selection requires one prior terminal runner failure"]
-    failure = failures[0]
-    for field, expected in bindings.items():
-        if failure.get(field) != expected:
-            errors.append(f"{label}: prior runner failure changed route binding {field}")
-    errors.extend(validate_explicit_terminal_evidence(failure, label=label))
-    if (
-        failure.get("dispatch_result") != "failed"
-        or failure.get("fallback_reason") not in SEARCH_DISPATCH_FAILURES
-        or failure.get("process_tree_stopped") is not True
-    ):
-        errors.append(
-            f"{label}: prior terminal runner failure must be failed with an allowed reason and stopped process tree"
-        )
-    terminal_event = failure.get("terminal_event")
-    if terminal_event not in {None, "none", "turn.failed", "turn.completed"}:
-        errors.append(f"{label}: prior terminal runner failure has invalid terminal event")
-    if terminal_event == "turn.completed" and not explicit_failure_evidence_is_valid(failure):
-        errors.append(
-            f"{label}: prior runner turn.completed needs independent exit/result failure evidence"
-        )
-    return errors
-
-
 def validate_packaged_search_profile(profile: dict[str, object]) -> list[str]:
     """Lock the portable Spark profile and its discovery instruction exactly."""
 
@@ -323,6 +295,32 @@ def validate_packaged_search_profile(profile: dict[str, object]) -> list[str]:
         errors.append(
             "openbuild_search_separate.toml: developer_instructions must match the exact canonical Explorer contract"
         )
+    return errors
+
+
+def validate_packaged_agent_profile(
+    agent_name: str,
+    profile: dict[str, object],
+) -> list[str]:
+    """Lock every zero-setup role to its reviewed concrete tuple."""
+
+    model, effort, sandbox = PACKAGED_AGENT_DEFAULTS[agent_name]
+    errors: list[str] = []
+    expected = {
+        "name": agent_name,
+        "model": model,
+        "model_reasoning_effort": effort,
+        "sandbox_mode": sandbox,
+    }
+    for field, value in expected.items():
+        if profile.get(field) != value:
+            errors.append(f"{agent_name}.toml: {field} must be {value!r}")
+    for field in ("description", "developer_instructions"):
+        value = profile.get(field)
+        if not isinstance(value, str) or not value.strip():
+            errors.append(f"{agent_name}.toml: {field} must be non-empty")
+    if agent_name == SEARCH_AGENT:
+        errors.extend(validate_packaged_search_profile(profile))
     return errors
 
 
@@ -355,6 +353,11 @@ def validate_search_dispatch_trace(events: list[dict[str, str]]) -> list[str]:
     if not lookup_indices:
         return ["search dispatch trace: missing repository-search event"]
     lookup_index = lookup_indices[0]
+    all_dispatch_indices = [
+        index
+        for index, event in enumerate(events)
+        if event.get("event") == "search-dispatch"
+    ]
     dispatch_indices = [
         index
         for index, event in enumerate(events[:lookup_index])
@@ -363,6 +366,11 @@ def validate_search_dispatch_trace(events: list[dict[str, str]]) -> list[str]:
     if not dispatch_indices:
         return ["search dispatch trace: exact agent dispatch must precede repository search"]
     dispatch_index = dispatch_indices[0]
+    if len(all_dispatch_indices) != 1:
+        errors.append(
+            "search dispatch trace: exactly one discovery dispatch is allowed; "
+            "failed discovery cannot create a replacement agent"
+        )
     dispatch = events[dispatch_index]
     agent_name = dispatch.get("agent_name", "")
     task_name = dispatch.get("task_name", "")
@@ -458,8 +466,10 @@ def validate_search_dispatch_trace(events: list[dict[str, str]]) -> list[str]:
             errors.append("search dispatch trace: terminal failed receipt must confirm the process tree stopped")
         if consumption_events:
             errors.append("search dispatch trace: failed worker evidence cannot be consumed")
-        if events[lookup_index].get("actor") == SEARCH_AGENT:
-            errors.append("search dispatch trace: a failed initial dispatch cannot own the fallback search")
+        if events[lookup_index].get("actor") != "root":
+            errors.append(
+                "search dispatch trace: failed discovery must transition directly to root recovery"
+            )
         if fallback_reason == "worker-timeout":
             confirmations = [
                 event
@@ -490,74 +500,25 @@ def validate_search_dispatch_trace(events: list[dict[str, str]]) -> list[str]:
         return errors
     running_index, running = running_receipts[-1]
     validate_common_receipt(running)
-    if running.get("dispatch_method") == "codex-exec-explicit-model":
-        if (
-            running.get("configured_model") != PACKAGED_SEARCH_MODEL
-            or running.get("model_reasoning_effort") != "low"
-        ):
-            errors.append(
-                "search dispatch trace: primary packaged runner must use fixed Spark model and low effort"
-            )
-    else:
-        packaged_failures = [
-            (index, receipt)
-            for index, receipt in prior_receipts
-            if index < running_index
-            and receipt.get("dispatch_method") == "codex-exec-explicit-model"
-            and receipt.get("configured_model") == PACKAGED_SEARCH_MODEL
-            and receipt.get("model_reasoning_effort") == "low"
-            and receipt.get("run_status") == "failed"
-        ]
-        if not packaged_failures:
-            errors.append(
-                "search dispatch trace: native selected search requires a prior terminal packaged runner failure"
-            )
-        else:
-            _, packaged_failure = packaged_failures[-1]
-            validate_common_receipt(packaged_failure)
-            errors.extend(
-                validate_explicit_terminal_evidence(
-                    packaged_failure,
-                    label="search dispatch trace packaged runner",
-                )
-            )
-            if (
-                packaged_failure.get("dispatch_result") != "failed"
-                or packaged_failure.get("fallback_reason") not in SEARCH_DISPATCH_FAILURES
-                or packaged_failure.get("process_tree_stopped") is not True
-            ):
-                errors.append(
-                    "search dispatch trace: native selection requires a stopped terminal packaged runner failure"
-                )
-            terminal_event = packaged_failure.get("terminal_event")
-            if terminal_event not in {None, "none", "turn.failed", "turn.completed"}:
-                errors.append(
-                    "search dispatch trace: packaged runner failure has invalid terminal event"
-                )
-            if (
-                terminal_event == "turn.completed"
-                and not explicit_failure_evidence_is_valid(packaged_failure)
-            ):
-                errors.append(
-                    "search dispatch trace: packaged runner turn.completed needs independent failure evidence"
-                )
-            if packaged_failure.get("sandbox") != "read-only":
-                errors.append("search dispatch trace: packaged runner failure must preserve read-only sandbox")
-        if running.get("dispatch_method") == "per-spawn-model" and (
-            running.get("configured_model") in {None, "", "unknown", "unobservable"}
-            or running.get("model_reasoning_effort") in {None, "", "unknown", "unobservable"}
-        ):
-            errors.append(
-                "search dispatch trace: per-spawn native fallback requires direct model and reasoning effort"
-            )
+    if running.get("dispatch_method") != "codex-exec-explicit-model":
+        errors.append("search dispatch trace: selected search requires the explicit CLI runner")
+    if (
+        running.get("configured_model") != PACKAGED_SEARCH_MODEL
+        or running.get("model_reasoning_effort") != "low"
+    ):
+        errors.append(
+            "search dispatch trace: primary packaged runner must use fixed Spark model and low effort"
+        )
     if running.get("dispatch_result") != "selected" or running.get("fallback_reason") not in {"", "none"}:
         errors.append("search dispatch trace: running receipt must preserve selected routing")
     if running.get("activated") is not False or running.get("terminal_event") not in {None, "none"}:
         errors.append("search dispatch trace: pre-search receipt must be unactivated and non-terminal")
     if running.get("process_tree_stopped") is not False:
         errors.append("search dispatch trace: running receipt cannot claim a stopped process tree")
-    if running.get("pool") != "separate":
-        errors.append("search dispatch trace: selected exact agent must record the confirmed separate pool")
+    if running.get("pool") not in {"separate", "main", "unknown"}:
+        errors.append(
+            "search dispatch trace: pool is reporting metadata and must be separate, main, or unknown"
+        )
     if running.get("sandbox") != "read-only":
         errors.append("search dispatch trace: selected search worker must be read-only")
     for field in ("run_dir", "worker_pid", "worker_process_identity", "codex_pid", "codex_process_identity"):
@@ -607,8 +568,10 @@ def validate_search_dispatch_trace(events: list[dict[str, str]]) -> list[str]:
             ]
             if len(activations) != 1:
                 errors.append("search dispatch trace: activated failed worker needs one matching activation event")
-        if events[lookup_index].get("actor") == SEARCH_AGENT:
-            errors.append("search dispatch trace: failed worker cannot own the fallback repository search")
+        if events[lookup_index].get("actor") != "root":
+            errors.append(
+                "search dispatch trace: failed discovery must transition directly to root recovery"
+            )
         if consumption_events:
             errors.append("search dispatch trace: failed worker evidence cannot be consumed")
         if fallback_reason == "worker-timeout":
@@ -730,6 +693,15 @@ def validate_search_dispatch_trace(events: list[dict[str, str]]) -> list[str]:
             errors.append("search dispatch trace: failed turn.completed needs independent exit/result failure evidence")
         if consumption_events:
             errors.append("search dispatch trace: failed worker evidence cannot be consumed")
+        post_terminal_searches = [
+            event
+            for event in events[terminal_index + 1 :]
+            if event.get("event") == "repository-search"
+        ]
+        if any(event.get("actor") != "root" for event in post_terminal_searches):
+            errors.append(
+                "search dispatch trace: post-terminal failed discovery permits only root-owned recovery"
+            )
         if terminal.get("fallback_reason") == "worker-timeout":
             confirmations = [
                 event
@@ -1674,6 +1646,21 @@ def validate_implementation_dispatch_trace(events: list[dict[str, str]]) -> list
     dispatches = [event for event in prior_events if event.get("event") == "implementation-dispatch"]
     if not dispatches:
         return ["implementation dispatch trace: exact writer dispatch must precede every code edit"]
+    if len(dispatches) != 1 or len(lease_events) != 1:
+        errors.append(
+            "implementation dispatch trace: failed or replaced writer route blocks replacement dispatch and edits"
+        )
+
+    failed_prewrite_receipts = [
+        event
+        for event in prior_events
+        if event.get("event") == "implementation-routing-receipt"
+        and event.get("run_status") in {"failed", "cancelled"}
+    ]
+    if failed_prewrite_receipts:
+        errors.append(
+            "implementation dispatch trace: failed writer route blocks replacement dispatch and edits"
+        )
 
     dispatch = dispatches[-1]
     risk = dispatch.get("risk", "")
@@ -1758,32 +1745,6 @@ def validate_implementation_dispatch_trace(events: list[dict[str, str]]) -> list
             errors.append("implementation dispatch trace: explicit-model receipt needs model_reasoning_effort")
         if receipt.get("terminal_event") not in {None, "none"}:
             errors.append("implementation dispatch trace: running receipt must not claim terminal completion")
-    else:
-        prior_receipts = [
-            prior_receipt
-            for index, prior_receipt in receipt_events
-            if index < receipt_index
-        ]
-        errors.extend(
-            validate_prior_terminal_runner_failure(
-                prior_receipts,
-                label="implementation dispatch trace",
-                bindings={
-                    "risk": risk,
-                    "requested_agent": expected_agent,
-                    "task_name": task_name,
-                    "requested_tier": expected_tier,
-                    "lease": lease_id,
-                },
-            )
-        )
-        if dispatch_method == "per-spawn-model" and (
-            receipt.get("configured_model") in {None, "", "unknown", "unobservable"}
-            or receipt.get("model_reasoning_effort") in {None, "", "unknown", "unobservable"}
-        ):
-            errors.append(
-                "implementation dispatch trace: per-spawn native fallback requires direct model and reasoning effort"
-            )
     if receipt.get("run_status") != "running":
         errors.append("implementation dispatch trace: pre-write receipt must be running")
     if receipt.get("activated") is not False:
@@ -2160,32 +2121,6 @@ def validate_review_escalation_trace(events: list[dict[str, str]]) -> list[str]:
                 errors.append(
                     "review escalation trace: primary explicit runner cannot follow an earlier routing receipt"
                 )
-        else:
-            prior_receipts = [
-                prior_receipt
-                for offset, prior_receipt in receipts
-                if offset < running_offset
-            ]
-            errors.extend(
-                validate_prior_terminal_runner_failure(
-                    prior_receipts,
-                    label="review escalation trace",
-                    bindings={
-                        "diff_revision": diff_revision,
-                        "risk_floor": expected_start,
-                        "requested_agent": expected_agent,
-                        "task_name": task_name,
-                        "requested_tier": tier,
-                    },
-                )
-            )
-            if dispatch_method == "per-spawn-model" and (
-                running.get("configured_model") in {None, "", "unknown", "unobservable"}
-                or running.get("model_reasoning_effort") in {None, "", "unknown", "unobservable"}
-            ):
-                errors.append(
-                    "review escalation trace: per-spawn native fallback requires direct model and reasoning effort"
-                )
         if running.get("activated") is not False or running.get("terminal_event") not in {None, "none"}:
             errors.append("review escalation trace: running receipt must be unactivated and non-terminal")
         if running.get("process_tree_stopped") is not False:
@@ -2341,20 +2276,6 @@ def validate_auto_routing_contract(
             errors.append(f"blindspot-protocol.md lifecycle routing: missing {token}")
     if "auto mode" not in metadata_text:
         errors.append("agents/openai.yaml: default prompt must select auto mode")
-    readme_routing = markdown_section(readme, "## How automatic phase routing works")
-    if not readme_routing:
-        errors.append("README.md: missing automatic phase-routing section")
-    else:
-        for token in ["workflow target", "the first incomplete phase", "Explicit modes and paths", "legacy specification", "complete acceptance evidence"]:
-            if token not in readme_routing:
-                errors.append(f"README.md automatic phase routing: missing {token}")
-    readme_ru_routing = markdown_section(readme_ru, "## Как работает автоматический выбор этапа")
-    if not readme_ru_routing:
-        errors.append("README.ru.md: missing automatic phase-routing section")
-    else:
-        for token in ["цель workflow", "первый незавершённый этап", "Явные режимы и пути", "Legacy-спецификация", "полному acceptance evidence"]:
-            if token not in readme_ru_routing:
-                errors.append(f"README.ru.md automatic phase routing: missing {token}")
     return errors
 
 
@@ -2558,42 +2479,6 @@ def validate_blindspot_contract(
         if token not in critic_result:
             errors.append(f"blindspot-protocol.md critic result: missing {token}")
 
-    readme_blindspots = markdown_section(readme, "## How blind-spot critique works")
-    if not readme_blindspots:
-        errors.append("README.md: missing blind-spot critique section")
-    else:
-        for token in [
-            "Build is a bridge between user intent and code",
-            "product-impact test",
-            "stable `D-###` IDs",
-            "stable `T-###` IDs",
-            "normative specification",
-            "decision application receipt",
-            "A resolved ID is a locked constraint",
-            "Reopening is allowed only",
-            "same critic perspective/tier",
-            "not a claim of literal omniscience",
-        ]:
-            if token not in readme_blindspots:
-                errors.append(f"README.md blind-spot critique: missing {token}")
-    readme_ru_blindspots = markdown_section(readme_ru, "## Как работает критика blind spots")
-    if not readme_ru_blindspots:
-        errors.append("README.ru.md: missing blind-spot critique section")
-    else:
-        for token in [
-            "Build — мост между намерением пользователя и кодом",
-            "Product-impact test",
-            "стабильные IDs `D-###`",
-            "стабильные IDs `T-###`",
-            "нормативную спецификацию",
-            "decision application receipt",
-            "Решённый ID становится зафиксированным ограничением",
-            "Переоткрытие допустимо только",
-            "одна perspective/tier не повторяется",
-            "не заявление о буквальном всеведении",
-        ]:
-            if token not in readme_ru_blindspots:
-                errors.append(f"README.ru.md blind-spot critique: missing {token}")
     return errors
 
 
@@ -2630,7 +2515,7 @@ def validate_implementation_delegation_contract(
             errors.append(f"implementation-delegation.md delegation modes: missing {token}")
 
     worker = markdown_section(protocol_text, "## Worker contract")
-    for token in ["specification", "version", "stage, commit, push", "product or architecture decisions", "stop before all test and production code edits"]:
+    for token in ["specification", "version", "stage, commit, push", "product or architecture decisions", "stop before further test and production code edits"]:
         if token not in worker:
             errors.append(f"implementation-delegation.md worker contract: missing {token}")
 
@@ -2643,6 +2528,7 @@ def validate_implementation_delegation_contract(
         "version/changelog/documentation",
         "progressive review",
         "Git exclusively root-owned",
+        "Do not repair that milestone through the root or a replacement lease",
     ]:
         if token not in handoff:
             errors.append(f"implementation-delegation.md root handoff: missing {token}")
@@ -2656,20 +2542,9 @@ def validate_implementation_delegation_contract(
     edit_position = tdd_steps.find("Under that lease, add or modify the test")
     if route_position < 0 or edit_position < 0 or route_position >= edit_position:
         errors.append("tdd-workflow.md: risk-matched writer route and lease must precede every test code edit")
-    readme_delegation = markdown_section(readme, "## How adaptive implementation delegation works")
-    if not readme_delegation:
-        errors.append("README.md: missing adaptive implementation-delegation section")
-    else:
-        for token in ["one active writer", "exact allowed files", "The root does not edit", "strictly sequentially"]:
-            if token not in readme_delegation:
-                errors.append(f"README.md adaptive implementation delegation: missing {token}")
-    readme_ru_delegation = markdown_section(readme_ru, "## Как работает адаптивная делегация реализации")
-    if not readme_ru_delegation:
-        errors.append("README.ru.md: missing adaptive implementation-delegation section")
-    else:
-        for token in ["одновременно пишет только один агент", "точный список разрешённых файлов", "root не редактирует", "строго последовательно"]:
-            if token not in readme_ru_delegation:
-                errors.append(f"README.ru.md adaptive implementation delegation: missing {token}")
+    for token in ["keep the milestone blocked", "create no replacement writer"]:
+        if token not in tdd_steps:
+            errors.append(f"tdd-workflow.md: failed exact writer recovery contract missing {token}")
     return errors
 
 
@@ -2699,12 +2574,11 @@ def validate_changelog_contract(changelog: str, version: str) -> list[str]:
         return errors
 
     for token in [
-        "blind-spot",
-        "single-writer",
-        "`auto`",
-        "separate usage pool",
-        "Risk-matched-model coding",
-        "Deterministic contract validation",
+        "packaged defaults",
+        "`codex-exec-explicit-model`",
+        "project → user → packaged",
+        "unknown-model agent routes",
+        "README",
     ]:
         if token not in current_section:
             errors.append(f"{current_label}: missing current workflow note {token}")
@@ -2736,12 +2610,13 @@ def validate_usage_routing_contract(
 
     explicit_discovery = markdown_section(skill_text, "## Explicit Code Discovery Delegation")
     for token in [
-        "first use `tool_search` to expose multi-agent tools if they are not already visible",
-        "spawn a read-only `explorer` subagent with `model: gpt-5.3-codex-spark`",
-        "delegate repository search, `rg`, `Get-Content`, and local file reading to that subagent",
+        "only through `scripts/agent_runner.py`",
+        "immutable packaged `openbuild_search_separate` profile",
+        "pinned to `gpt-5.3-codex-spark`, low reasoning, and read-only sandbox",
         "compact evidence map with `path:line`, symbol/route, snippet/signature, and why it matters",
-        "do targeted main-process reads only after the subagent result",
-        "Fallback to local `rg` only when subagents are unavailable, the search is trivial, or the relevant file is already known",
+        "Do not call a native Explorer or any other agent API",
+        "create no replacement agent",
+        "minimum targeted root search",
     ]:
         if token not in explicit_discovery:
             errors.append(f"SKILL.md explicit code discovery delegation: missing {token}")
@@ -2749,15 +2624,12 @@ def validate_usage_routing_contract(
     search_preflight = markdown_section(skill_text, "## Initialize search routing")
     for token in [
         "Before locating a specification",
-        "separate-pool circuit-breaker",
-        "every repository lookup",
-        "any new file/symbol/grep lookup",
-        "Spawn the custom agent named `openbuild_search_separate`",
+        "exact-runner circuit-breaker state",
+        "start the custom agent named `openbuild_search_separate`",
         "scripts/agent_runner.py",
-        "codex-exec-explicit-model",
-        "A generic subagent, a descriptive task name",
-        "exact dispatch succeeds or returns an allowed fallback reason",
-        "Use a native spawn only after the launcher records an allowed terminal failure",
+        "codex exec -m <model> -c model_reasoning_effort=<effort>",
+        "before the root runs `rg`",
+        "create no replacement agent",
     ]:
         if token not in search_preflight:
             category = "exact agent dispatch" if "agent" in token or "exact dispatch" in token else "search preflight"
@@ -2771,9 +2643,9 @@ def validate_usage_routing_contract(
     skill_discovery = markdown_section(skill_text, "## Discover repository evidence")
     for token in [
         "before any repository grep",
-        "dispatch the exact confirmed separate-usage search agent first",
-        "main-pool model",
-        "root search only",
+        "dispatch the exact packaged search agent first",
+        "create no replacement agent",
+        "minimum targeted root search",
     ]:
         if token not in skill_discovery:
             errors.append(f"SKILL.md usage routing: missing {token}")
@@ -2784,20 +2656,15 @@ def validate_usage_routing_contract(
 
     search_order = markdown_section(model_routing, "## Search usage-pool order")
     for token in [
-        "**Separate usage pool:**",
+        "**Exact Spark route:**",
         "openbuild_search_separate",
-        "**Efficient main-pool fallback:**",
-        "openbuild_search_fallback",
+        "**Root recovery:**",
         "open a circuit breaker",
         "without retrying the same failed route for every grep",
         "Do not scrape or infer remaining quota",
         "Do not silently skip it",
-        "select `openbuild_search_separate` by exact custom-agent name",
-        "`agent_name`",
-        "`task_name`",
-        "generic subagent, task name, or profile mention does not count as selection",
+        "Do not create another search agent",
         "profile-not-discoverable",
-        "selector-unavailable",
         "model-unavailable",
         "quota-exhausted",
         "spawn-failed",
@@ -2821,16 +2688,10 @@ def validate_usage_routing_contract(
             else:
                 category = "search usage-pool order"
             errors.append(f"model-routing.md {category}: missing {token}")
-    ordered_search_tokens = [
-        "**Separate usage pool:**",
-        "**Efficient main-pool fallback:**",
-        "**Role-only fallback:**",
-        "**Generic subagent fallback:**",
-        "**Root fallback:**",
-    ]
+    ordered_search_tokens = ["**Exact Spark route:**", "**Root recovery:**"]
     search_positions = [search_order.find(token) for token in ordered_search_tokens]
     if any(position < 0 for position in search_positions) or search_positions != sorted(search_positions):
-        errors.append("model-routing.md search usage-pool order: separate pool must precede every fallback branch")
+        errors.append("model-routing.md search order: exact Spark must precede root recovery")
 
     implementation_route = markdown_section(model_routing, "## Implementation worker routing")
     for token in [
@@ -2839,11 +2700,10 @@ def validate_usage_routing_contract(
         "openbuild_implementation_balanced",
         "openbuild_implementation_strongest",
         "Escalate only on evidence",
-        "Missing model/tier metadata alone does not block low or medium implementation",
-        "High work still requires a confirmed strong route",
-        "critical work requires the strongest proven route",
-        "stop before every test or production code edit",
-        "rather than silently lowering the risk floor",
+        "Every created implementation agent must have concrete model, effort, and sandbox evidence",
+        "stop before further test or production edits",
+        "Before every test or production code edit",
+        "rather than lowering the risk floor",
         "acquire the single-writer lease for the exact selected profile",
         "`running` Implementation routing receipt",
         "implementation-agent-activated",
@@ -2892,7 +2752,6 @@ def validate_usage_routing_contract(
     setup = markdown_section(model_routing, "## `$build setup-models`")
     for token in [
         "openbuild_search_separate",
-        "openbuild_search_fallback",
         "openbuild_implementation_fast",
         "openbuild_implementation_balanced",
         "openbuild_implementation_strongest",
@@ -2928,12 +2787,11 @@ def validate_usage_routing_contract(
     for token in [
         "`rg --files`",
         "openbuild_search_separate",
-        "openbuild_search_fallback",
         "new grep or lookup",
         "circuit breaker",
         "do not pay for repeated failed attempts",
         "before the root runs any new repository search command",
-        "generic spawn or task label",
+        "create no replacement agent",
         "agent_runner.py",
         "codex-exec-explicit-model",
         "turn.completed",
@@ -2941,6 +2799,17 @@ def validate_usage_routing_contract(
         if token not in mandatory_search:
             category = "exact agent dispatch" if "root runs" in token or "generic spawn" in token else "usage routing"
             errors.append(f"code-discovery.md {category}: missing {token}")
+
+    model_claims = markdown_section(code_discovery, "## Model and savings claims")
+    for token in [
+        "immutable packaged `openbuild_search_separate` exact-runner route is mandatory",
+        "create no other discovery agent",
+        "targeted root recovery",
+    ]:
+        if token not in model_claims:
+            errors.append(f"code-discovery.md exact discovery contract: missing {token}")
+    if "openbuild-discovery" in code_discovery:
+        errors.append("code-discovery.md: legacy openbuild-discovery route is not allowed")
 
     routing_receipt = markdown_section(code_discovery, "## Search routing receipt")
     for token in [
@@ -2970,13 +2839,11 @@ def validate_usage_routing_contract(
         "openbuild_implementation_balanced",
         "openbuild_implementation_strongest",
         "Read-only search/discovery",
-        "Missing model/tier metadata alone does not block low or medium implementation",
-        "For high work require a confirmed strong route",
-        "for critical work require the strongest proven route",
-        "stop before all test and production code edits",
+        "Every created implementation run requires concrete model, effort, and sandbox evidence",
+        "`high` | exact `openbuild_implementation_strongest` profile",
+        "`critical` | exact `openbuild_implementation_strongest` profile",
+        "stop before further test and production code edits",
         "Dispatch that exact profile before every test or production code edit",
-        "`agent_name`",
-        "`task_name`",
         "Implementation routing receipt",
         "codex_exit_evidence:",
         "implementation-handoff-accepted",
@@ -3007,74 +2874,13 @@ def validate_usage_routing_contract(
         "result_evidence:",
         "task_name:",
         "sandbox: <read-only",
-        "A configured profile with unobservable model metadata may satisfy low or medium selection",
-        "High and critical floors still require proven strong/strongest capability",
+        "concrete model/effort plus valid exit/result evidence",
+        "creates no replacement reviewer",
         "exact non-terminal evidence tuple",
     ]:
         if token not in review_dispatch:
             errors.append(f"review-protocol.md exact reviewer routing: missing {token}")
 
-    readme_usage = markdown_section(readme, "## How usage-aware model routing works")
-    if not readme_usage:
-        errors.append("README.md: missing usage-aware model-routing section")
-    else:
-        for token in [
-            "Search always attempts a confirmed separate-usage route first",
-            "exact custom agent `openbuild_search_separate`",
-            "routing receipt",
-            "fallback_reason",
-            "current-run circuit breaker",
-            "does not scrape the private usage dashboard",
-            "risk-matched writer",
-            "openbuild_implementation_fast",
-            "openbuild_implementation_balanced",
-            "Implementation routing receipt",
-            "implementation-handoff-accepted",
-            "Progressive review uses the same `agent_name`/`task_name` separation",
-            "openbuild_review_balanced",
-            "openbuild_review_strongest",
-            "Review routing receipt",
-            "review-agent-activated",
-            "creation-bound exit code zero",
-            "valid result evidence",
-            "fast → balanced → strong → strongest",
-            "Escalation",
-            "model_reasoning_effort",
-            "search-evidence-consumed",
-        ]:
-            if token not in readme_usage:
-                errors.append(f"README.md usage-aware model routing: missing {token}")
-
-    readme_ru_usage = markdown_section(readme_ru, "## Как работает usage-aware routing моделей")
-    if not readme_ru_usage:
-        errors.append("README.ru.md: missing usage-aware model-routing section")
-    else:
-        for token in [
-            "exact custom agent `openbuild_search_separate`",
-            "routing receipt",
-            "fallback_reason",
-            "Поиск всегда сначала пытается использовать подтверждённый separate-usage route",
-            "circuit breaker на текущий run",
-            "не скрейпит приватную usage page",
-            "risk-matched writer",
-            "openbuild_implementation_fast",
-            "openbuild_implementation_balanced",
-            "Implementation routing receipt",
-            "implementation-handoff-accepted",
-            "Progressive review применяет то же разделение `agent_name`/`task_name`",
-            "openbuild_review_balanced",
-            "openbuild_review_strongest",
-            "Review routing receipt",
-            "review-agent-activated",
-            "creation-bound exit code zero",
-            "valid result evidence",
-            "fast → balanced → strong → strongest",
-            "Эскалация",
-            "model_reasoning_effort",
-            "search-evidence-consumed",
-        ]:
-            if token not in readme_ru_usage:
-                errors.append(f"README.ru.md usage-aware model routing: missing {token}")
     return errors
 
 
@@ -3090,12 +2896,12 @@ def validate_agent_usage_report_contract(
     errors: list[str] = []
     ledger = markdown_section(skill_text, "## Maintain the agent activity ledger")
     for token in [
-        "search, critic, implementation, review, native fallback, or generic fallback",
+        "search, critic, implementation, or review agent through the exact runner",
         "wrapper and its child `codex exec` are one logical run",
         "Pre-spawn dispatch failures do not increment the created-run count",
         "unusable, cancelled, or timed out",
-        "accepted explicit-dispatch or runtime evidence",
-        "terminal status/outcome",
+        "actual model and reasoning effort from the exact runner receipt",
+        "terminal and semantic outcome",
         "AC, milestone, or specification-section mapping",
         "PID, thread/run paths, raw prompts, logs, token/usage values, and authentication details",
     ]:
@@ -3112,7 +2918,7 @@ def validate_agent_usage_report_contract(
         "`Status/outcome`",
         "`Work`",
         "`AC/milestone/spec mapping`",
-        "`unknown`",
+        "Every created-agent row comes from an exact runner receipt",
     ]:
         if token not in completion:
             errors.append(f"SKILL.md final agent usage: missing {token}")
@@ -3126,8 +2932,8 @@ def validate_agent_usage_report_contract(
         "wrapper and its child `codex exec` count as one logical run",
         "Pre-spawn dispatch failures do not increment the created-run count",
         "unusable, cancelled, or timed out",
-        "accepted explicit-dispatch or runtime evidence",
-        "configured or requested model is not the actual model",
+        "accepted explicit-runner receipt",
+        "Never create an agent row from a requested label or unverified native dispatch",
         "AC, milestone, or specification section",
         "PID, thread ID, private run path, raw prompt, raw log, token or usage value, or authentication detail",
         "Pre-spawn dispatch failures (not included in created count):",
@@ -3177,108 +2983,70 @@ def validate_agent_usage_report_contract(
         if token not in dependency:
             errors.append(f"model-routing.md OS-aware dependency checkpoint: missing {token}")
 
-    readme_requirements = markdown_section(readme, "## Requirements")
-    readme_ru_requirements = markdown_section(readme_ru, "## Требования")
-    for label, text, tokens in [
-        (
-            "README.md",
-            readme_requirements,
-            [
-                "python --version",
-                "codex --version",
-                "winget install -e --id Python.Python.3.12",
-                'powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"',
-                "separately and explicitly authorize Build",
-                "Authentication remains manual",
-                "codex login status",
-                "Build never automates credentials",
-            ],
-        ),
-        (
-            "README.ru.md",
-            readme_ru_requirements,
-            [
-                "python --version",
-                "codex --version",
-                "winget install -e --id Python.Python.3.12",
-                'powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"',
-                "отдельно и явно разрешите Build",
-                "Аутентификация остаётся ручной",
-                "codex login status",
-                "Build никогда не автоматизирует credentials",
-            ],
-        ),
-    ]:
-        for token in tokens:
-            if token not in text:
-                errors.append(f"{label} dependency checkpoint: missing {token}")
-
-    for label, text, tokens in [
-        (
-            "README.md",
-            readme_requirements,
-            [
-                "Those `winget` and PowerShell install commands are Windows-only.",
-                "On POSIX, run `python3 --version` first; use `python --version` only if `python3` is unavailable.",
-                "Run `codex --version` on every platform.",
-                "does not choose or run a package manager automatically",
-                "OS-appropriate Python check plus `codex --version`",
-            ],
-        ),
-        (
-            "README.ru.md",
-            readme_ru_requirements,
-            [
-                "команды установки через `winget` и PowerShell предназначены только для Windows",
-                "В POSIX сначала выполните `python3 --version`; используйте `python --version` только если `python3` недоступен.",
-                "На любой платформе выполните `codex --version`.",
-                "не выбирает и не запускает package manager автоматически",
-                "подходящую для ОС проверку Python вместе с `codex --version`",
-            ],
-        ),
-    ]:
-        for token in tokens:
-            if token not in text:
-                errors.append(f"{label} OS-aware dependency checkpoint: missing {token}")
-
-    image_contracts = [
-        ("README.md", readme, "[Русская версия](README.ru.md)", "plugins/openbuild/lib/Workflow-en.png", "## How usage-aware model routing works", "plugins/openbuild/lib/usage-en.png", "## How adaptive implementation delegation works", "plugins/openbuild/lib/delegat-en.png"),
-        ("README.ru.md", readme_ru, "[English version](README.md)", "plugins/openbuild/lib/Workflow-ru.png", "## Как работает usage-aware routing моделей", "plugins/openbuild/lib/usage-ru.png", "## Как работает адаптивная делегация реализации", "plugins/openbuild/lib/delegat-ru.png"),
+    install_commands = [
+        "codex plugin remove openbuild@openbuild",
+        "codex plugin marketplace remove openbuild",
+        "codex plugin marketplace add GeorgVahi/OpenBuild --ref v",
+        "codex plugin add openbuild@openbuild",
     ]
-    for label, text, language_link, workflow_image, usage_heading, usage_image, delegation_heading, delegation_image in image_contracts:
-        language_position = text.find(language_link)
-        after_language = text[language_position + len(language_link) :] if language_position >= 0 else ""
-        if language_position < 0 or not re.match(
-            rf"\s*!\[[^\]]+\]\({re.escape(workflow_image)}\)", after_language
-        ):
-            errors.append(f"{label} README image contract: workflow image must follow H1/language navigation")
-        for heading, image_path in [(usage_heading, usage_image), (delegation_heading, delegation_image)]:
-            section = markdown_section(text, heading)
-            if image_path not in section:
-                errors.append(f"{label} README image contract: {heading} missing {image_path}")
-            if "```mermaid" in section:
-                errors.append(f"{label} replaced Mermaid remains in {heading}")
-    if "## Workflow at a glance" in readme or "```mermaid" in readme.split("| Goal |", 1)[0]:
-        errors.append("README.md replaced Mermaid workflow remains")
-    if "## Workflow в одной схеме" in readme_ru or "```mermaid" in readme_ru.split("| Цель |", 1)[0]:
-        errors.append("README.ru.md replaced Mermaid workflow remains")
-
-    readme_usage = markdown_section(readme, "## How usage-aware model routing works")
-    for token in ["`Agents`", "actually created logical runs", "Actual model/effort", "Status/outcome", "AC/milestone/spec mapping", "accepted explicit-dispatch or runtime evidence", "`unknown`"]:
-        if token not in readme_usage:
-            errors.append(f"README.md agent usage: missing {token}")
-    readme_ru_usage = markdown_section(readme_ru, "## Как работает usage-aware routing моделей")
-    for token in ["`Агенты`", "реально созданные logical runs", "Фактические model/effort", "Статус/outcome", "AC/milestone/спецификацией", "accepted explicit-dispatch или runtime evidence", "`unknown`"]:
-        if token not in readme_ru_usage:
-            errors.append(f"README.ru.md agent usage: missing {token}")
-
     for label, text, tokens in [
-        ("README.md", readme, ["self-contained", "host Codex CLI", "saved ChatGPT login", "Python 3.11"]),
-        ("README.ru.md", readme_ru, ["самодостаточен", "host Codex CLI", "сохранённый ChatGPT login", "Python 3.11"]),
+        (
+            "README.md",
+            readme,
+            [
+                "[Русская версия](README.ru.md)",
+                "Python 3.11 or newer",
+                "saved ChatGPT login",
+                "$openbuild:build",
+                "## Exact model-routed agents",
+                "Native Explorer",
+                "unknown model metadata",
+                "## Progressive review",
+            ],
+        ),
+        (
+            "README.ru.md",
+            readme_ru,
+            [
+                "[English version](README.md)",
+                "Python 3.11 или новее",
+                "сохранённым входом через ChatGPT",
+                "$openbuild:build",
+                "## Агенты с точным выбором модели",
+                "Native Explorer",
+                "неизвестной моделью",
+                "## Progressive review",
+            ],
+        ),
     ]:
         for token in tokens:
             if token not in text:
-                errors.append(f"{label} agent usage prerequisites: missing {token}")
+                errors.append(f"{label} concise public contract: missing {token}")
+        observed_commands = [
+            line.strip()
+            for line in text.splitlines()
+            if line.strip().startswith("codex plugin ")
+        ]
+        normalized_commands = [
+            re.sub(r"--ref v\S+", "--ref v", command) for command in observed_commands
+        ]
+        if normalized_commands != install_commands:
+            errors.append(f"{label}: installation must contain exactly the four supported commands")
+        if len(text.splitlines()) > 140:
+            errors.append(f"{label}: concise public README exceeds 140 lines")
+
+    for forbidden_heading in [
+        "How blind-spot critique works",
+        "Как работает критика blind spots",
+        "How TDD-first implementation works",
+        "Как работает TDD-first реализация",
+        "How evidence-gated minimality works",
+        "Как работает evidence-gated minimality",
+        "What shipped in",
+        "Что вошло в",
+    ]:
+        if forbidden_heading in readme or forbidden_heading in readme_ru:
+            errors.append(f"public README retains removed verbose section {forbidden_heading}")
     return errors
 
 
@@ -3621,13 +3389,14 @@ def main() -> int:
         if token not in runner_text:
             fail(errors, f"agent_runner.py: missing explicit-model contract {token}")
     fixed_search_resolution = runner_text.find('if agent_name == "openbuild_search_separate":')
-    custom_scope_resolution = runner_text.find(
-        'scopes = [repo.resolve() / ".codex" / "agents", codex_home.resolve() / "agents"]'
-    )
+    custom_scope_resolution = runner_text.find("scopes = [", fixed_search_resolution)
+    packaged_default_resolution = runner_text.find("PACKAGED_PROFILE_DIR,", custom_scope_resolution)
     if (
         fixed_search_resolution < 0
         or custom_scope_resolution < 0
+        or packaged_default_resolution < 0
         or fixed_search_resolution > custom_scope_resolution
+        or packaged_default_resolution < custom_scope_resolution
     ):
         fail(
             errors,
@@ -3640,35 +3409,24 @@ def main() -> int:
     if windows_job_position < 0 or worker_auth_position < 0 or windows_job_position > worker_auth_position:
         fail(errors, "agent_runner.py: Windows Job Object must exist before worker auth subprocess")
 
-    packaged_profile_text = read_text(PACKAGED_SEARCH_PROFILE, errors)
-    try:
-        packaged_profile = tomllib.loads(packaged_profile_text)
-    except tomllib.TOMLDecodeError as exc:
-        fail(errors, f"openbuild_search_separate.toml: invalid TOML ({exc})")
-        packaged_profile = {}
-    errors.extend(validate_packaged_search_profile(packaged_profile))
+    for agent_name, profile_path in PACKAGED_AGENT_PROFILES.items():
+        profile_text = read_text(profile_path, errors)
+        try:
+            packaged_profile = tomllib.loads(profile_text)
+        except tomllib.TOMLDecodeError as exc:
+            fail(errors, f"{profile_path.name}: invalid TOML ({exc})")
+            packaged_profile = {}
+        errors.extend(validate_packaged_agent_profile(agent_name, packaged_profile))
 
     readme = read_text(ROOT / "README.md", errors)
     readme_ru = read_text(ROOT / "README.ru.md", errors)
     required_docs_tokens = [
-        "codex plugin marketplace add",
+        "codex plugin remove openbuild@openbuild",
+        "codex plugin marketplace remove openbuild",
+        "codex plugin marketplace add GeorgVahi/OpenBuild --ref v",
         "codex plugin add openbuild@openbuild",
         "$openbuild:build",
-        "$build new",
-        "$build refine",
-        "$build run",
-        "$build full",
-        "$build auto",
-        "$build setup-models",
-        "$skill-installer",
-        "openbuild-discovery",
-        "openbuild_search_separate",
-        "openbuild_search_fallback",
-        "openbuild_implementation_fast",
-        "openbuild_implementation_balanced",
-        "openbuild_implementation_strongest",
-        "openbuild_review_fast",
-        "TDD-first",
+        "codex exec",
         "CONTRIBUTING.md",
     ]
     for token in required_docs_tokens:
@@ -3678,15 +3436,12 @@ def main() -> int:
             fail(errors, f"README.ru.md: missing documented token {token}")
 
     required_doc_sections = [
-        ("## How automatic phase routing works", "## Как работает автоматический выбор этапа"),
-        ("## How automatic code discovery works", "## Как работает автоматический поиск по коду"),
-        ("## How usage-aware model routing works", "## Как работает usage-aware routing моделей"),
-        ("## How blind-spot critique works", "## Как работает критика blind spots"),
-        ("## How TDD-first implementation works", "## Как работает TDD-first реализация"),
-        ("## How adaptive implementation delegation works", "## Как работает адаптивная делегация реализации"),
-        ("## How evidence-gated minimality works", "## Как работает evidence-gated minimality"),
-        ("## How progressive review works", "## Как работает progressive review"),
-        ("## Git and safety policy", "## Git и безопасность"),
+        ("## Requirements", "## Требования"),
+        ("## Install or update", "## Установка или обновление"),
+        ("## Usage", "## Использование"),
+        ("## Exact model-routed agents", "## Агенты с точным выбором модели"),
+        ("## Progressive review", "## Progressive review"),
+        ("## Repository and Git behavior", "## Репозиторий и Git"),
     ]
     for english, russian in required_doc_sections:
         if english not in readme:
@@ -3736,16 +3491,7 @@ def main() -> int:
 
     if "TZ.md" not in read_text(ROOT / ".gitignore", errors).splitlines():
         fail(errors, ".gitignore: local TZ.md must be ignored")
-    if "## [0.2.0] - 2026-07-10" not in read_text(ROOT / "CHANGELOG.md", errors):
-        fail(errors, "CHANGELOG.md: missing 0.2.0 release entry")
-    if "## [0.3.1] - 2026-07-12" not in read_text(ROOT / "CHANGELOG.md", errors):
-        fail(errors, "CHANGELOG.md: missing 0.3.1 release entry")
-    if "## [0.4.0] - 2026-07-12" not in read_text(ROOT / "CHANGELOG.md", errors):
-        fail(errors, "CHANGELOG.md: missing 0.4.0 release entry")
     changelog = read_text(ROOT / "CHANGELOG.md", errors)
-    for token in ["openbuild-discovery", "TDD-first", "minimality", "version impact"]:
-        if token not in changelog:
-            fail(errors, f"CHANGELOG.md: missing historical contract {token}")
     if isinstance(version, str) and not contains_exact_version(changelog, version):
         fail(errors, f"CHANGELOG.md: current plugin version {version} is not documented")
     if isinstance(version, str):
@@ -3798,13 +3544,21 @@ def main() -> int:
         for marker in forbidden:
             if marker in text:
                 fail(errors, f"{relative}: forbidden marker {marker!r}")
-        model_scan_text = text.replace(PACKAGED_SEARCH_MODEL, "")
+        model_scan_text = text
+        for packaged_model, _, _ in PACKAGED_AGENT_DEFAULTS.values():
+            model_scan_text = model_scan_text.replace(packaged_model, "")
         if fixed_model.search(model_scan_text):
             fail(errors, f"{relative}: fixed model slug is not allowed")
         assignment = active_model_assignment.search(text)
-        if assignment and path != ROOT / "scripts" / "test_agent_runner.py" and not (
-            path == PACKAGED_SEARCH_PROFILE and assignment.group(1) == PACKAGED_SEARCH_MODEL
-        ):
+        packaged_assignment = next(
+            (
+                assignment.group(1) == PACKAGED_AGENT_DEFAULTS[agent_name][0]
+                for agent_name, profile_path in PACKAGED_AGENT_PROFILES.items()
+                if path == profile_path
+            ),
+            False,
+        ) if assignment else False
+        if assignment and path != ROOT / "scripts" / "test_agent_runner.py" and not packaged_assignment:
             fail(errors, f"{relative}: active fixed model assignment is not allowed ({assignment.group(1)!r})")
         if path.suffix.lower() == ".md":
             validate_local_links(path, text, errors)

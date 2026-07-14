@@ -10,6 +10,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from validate_package import (
     BLINDSPOT_PROTOCOL,
+    CANONICAL_AGENT_IDS,
+    EXACT_DISPATCH_METHODS,
     IMPLEMENTATION_DELEGATION,
     PACKAGED_SEARCH_INSTRUCTIONS,
     PACKAGED_SEARCH_MODEL,
@@ -35,6 +37,35 @@ from validate_package import (
     validate_search_dispatch_trace,
     validate_usage_routing_contract,
 )
+
+
+class RunnerOnlyRoutingContractTests(unittest.TestCase):
+    def test_only_explicit_cli_dispatch_is_accepted(self) -> None:
+        self.assertEqual(EXACT_DISPATCH_METHODS, {"codex-exec-explicit-model"})
+
+    def test_deprecated_unknown_agent_routes_are_absent_from_runtime_contract(self) -> None:
+        self.assertNotIn("openbuild_search_fallback", CANONICAL_AGENT_IDS)
+        paths = [
+            SKILL / "SKILL.md",
+            SKILL / "references" / "code-discovery.md",
+            SKILL / "references" / "model-routing.md",
+            SKILL / "references" / "implementation-delegation.md",
+            SKILL / "references" / "review-protocol.md",
+            ROOT / "scripts" / "validate_package.py",
+        ]
+        combined = "\n".join(path.read_text(encoding="utf-8") for path in paths)
+        for token in [
+            "openbuild_search_fallback",
+            "per-spawn-model",
+            "exact-custom-agent",
+            "role-only",
+            "generic-subagent",
+            "configured-unverified",
+            "selector-unavailable",
+            "tier-unproven",
+        ]:
+            with self.subTest(token=token):
+                self.assertNotIn(token, combined)
 
 
 class PerCommitVersionGateTests(unittest.TestCase):
@@ -122,22 +153,9 @@ class BlindspotWorkflowContractTests(unittest.TestCase):
         mutated = self.protocol_text.replace("Do not increment it for audit metadata", "Increment it for audit metadata")
         self.assertTrue(any("adaptive critic loop" in error for error in self.validate(protocol_text=mutated)))
 
-    def test_blindspot_docs_explain_dedup_and_closure(self) -> None:
-        readme = self.readme.replace("A resolved ID is a locked constraint", "A resolved ID is recorded")
-        self.assertTrue(any("README.md" in error for error in self.validate(readme=readme)))
-
-        readme_ru = self.readme_ru.replace("Решённый ID становится зафиксированным ограничением", "Решённый ID записывается")
-        self.assertTrue(any("README.ru.md" in error for error in self.validate(readme_ru=readme_ru)))
-
-    def test_blindspot_contract_is_present_in_template_and_both_readmes(self) -> None:
+    def test_blindspot_contract_is_present_in_internal_template(self) -> None:
         template = self.template_text.replace("Evidence or decision", "Evidence")
         self.assertTrue(any("coverage ledger" in error for error in self.validate(template_text=template)))
-
-        readme = self.readme.replace("## How blind-spot critique works", "## Specification checks")
-        self.assertTrue(any("README.md" in error for error in self.validate(readme=readme)))
-
-        readme_ru = self.readme_ru.replace("## Как работает критика blind spots", "## Проверка спецификации")
-        self.assertTrue(any("README.ru.md" in error for error in self.validate(readme_ru=readme_ru)))
 
     def test_linked_normative_sources_are_mapped_before_synthesis(self) -> None:
         skill = self.skill_text.replace("every in-scope normative file", "selected files")
@@ -217,8 +235,6 @@ class BlindspotWorkflowContractTests(unittest.TestCase):
         )
         self.assertTrue(any("application gate" in error for error in self.validate(protocol_text=protocol)))
 
-        readme = self.readme.replace("decision application receipt", "change summary")
-        self.assertTrue(any("README.md" in error for error in self.validate(readme=readme)))
 
 
 class AutoRoutingContractTests(unittest.TestCase):
@@ -248,15 +264,13 @@ class AutoRoutingContractTests(unittest.TestCase):
         metadata = self.metadata_text.replace("auto mode", "full mode")
         self.assertTrue(any("openai.yaml" in error for error in self.validate(metadata_text=metadata)))
 
-    def test_lifecycle_matrix_and_public_explanation_are_required(self) -> None:
+    def test_lifecycle_matrix_is_required(self) -> None:
         protocol = self.protocol_text.replace("| `In progress` |", "| `Active` |")
         self.assertTrue(any("lifecycle routing" in error for error in self.validate(protocol_text=protocol)))
 
         protocol = self.protocol_text.replace("full acceptance set", "primary signal only")
         self.assertTrue(any("lifecycle routing" in error for error in self.validate(protocol_text=protocol)))
 
-        readme = self.readme.replace("the first incomplete phase", "a suitable phase")
-        self.assertTrue(any("README.md" in error for error in self.validate(readme=readme)))
 
 
 class ImplementationDelegationContractTests(unittest.TestCase):
@@ -290,7 +304,7 @@ class ImplementationDelegationContractTests(unittest.TestCase):
         mutated = self.protocol_text.replace("one active writer", "an active writer")
         self.assertTrue(any("single-writer" in error for error in self.validate(protocol_text=mutated)))
 
-    def test_delegation_contract_is_present_in_model_tdd_and_docs(self) -> None:
+    def test_delegation_contract_is_present_in_model_and_tdd(self) -> None:
         model_routing = self.model_routing.replace("Implementation worker", "Implementation helper")
         self.assertTrue(any("model-routing.md" in error for error in self.validate(model_routing=model_routing)))
 
@@ -302,45 +316,43 @@ class ImplementationDelegationContractTests(unittest.TestCase):
         tdd_workflow = self.tdd_workflow.replace(route, "__EDIT_ORDER__").replace(edit, route).replace("__EDIT_ORDER__", edit)
         self.assertTrue(any("must precede every test code edit" in error for error in self.validate(tdd_workflow=tdd_workflow)))
 
-        readme = self.readme.replace(
-            "## How adaptive implementation delegation works",
-            "## Implementation delegation",
-        )
-        self.assertTrue(any("README.md" in error for error in self.validate(readme=readme)))
-
-        readme_ru = self.readme_ru.replace(
-            "## Как работает адаптивная делегация реализации",
-            "## Делегация реализации",
-        )
-        self.assertTrue(any("README.ru.md" in error for error in self.validate(readme_ru=readme_ru)))
-
-    def test_delegation_modes_root_handoff_and_docs_body_are_required(self) -> None:
+    def test_delegation_modes_and_root_handoff_are_required(self) -> None:
         protocol = self.protocol_text.replace("`sequential-workers`", "`multiple-workers`")
         self.assertTrue(any("delegation modes" in error for error in self.validate(protocol_text=protocol)))
 
         protocol = self.protocol_text.replace("Git exclusively root-owned", "Git controlled")
         self.assertTrue(any("root handoff" in error for error in self.validate(protocol_text=protocol)))
 
-        readme = self.readme.replace("one active writer", "an active writer")
-        self.assertTrue(any("README.md" in error for error in self.validate(readme=readme)))
+        protocol = self.protocol_text.replace(
+            "Do not repair that milestone through the root or a replacement lease",
+            "Repair that milestone through a new route",
+        )
+        self.assertTrue(any("root handoff" in error for error in self.validate(protocol_text=protocol)))
+
+        tdd_workflow = self.tdd_workflow.replace(
+            "keep the milestone blocked, and create no replacement writer",
+            "select a fallback writer",
+        )
+        self.assertTrue(any("failed exact writer recovery" in error for error in self.validate(tdd_workflow=tdd_workflow)))
+
 
 
 class ChangelogContractTests(unittest.TestCase):
     def test_release_manifest_version_and_latest_release_are_documented(self) -> None:
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-        self.assertIn("## [0.4.0] - 2026-07-12", changelog)
-        self.assertEqual(validate_changelog_contract(changelog, "2.1.1"), [])
+        self.assertEqual(validate_changelog_contract(changelog, "2.1.2"), [])
+        self.assertNotIn("## [2.1.1]", changelog)
 
-        mutated = changelog.replace("## [2.1.1] - 2026-07-14", "## [next] - 2026-07-14")
-        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "2.1.1")))
+        mutated = changelog.replace("## [2.1.2] - 2026-07-14", "## [next] - 2026-07-14")
+        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "2.1.2")))
 
     def test_released_version_is_pinned_in_both_install_channels(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         readme_ru = (ROOT / "README.ru.md").read_text(encoding="utf-8")
-        self.assertEqual(validate_release_docs_contract(readme, readme_ru, "2.1.1"), [])
+        self.assertEqual(validate_release_docs_contract(readme, readme_ru, "2.1.2"), [])
 
-        mutated = readme.replace("--ref v2.1.1", "--ref main")
-        self.assertTrue(any("README.md" in error for error in validate_release_docs_contract(mutated, readme_ru, "2.1.1")))
+        mutated = readme.replace("--ref v2.1.2", "--ref main")
+        self.assertTrue(any("README.md" in error for error in validate_release_docs_contract(mutated, readme_ru, "2.1.2")))
 
 
 class DecisionAuthorityTraceTests(unittest.TestCase):
@@ -1352,7 +1364,7 @@ class UsageRoutingContractTests(unittest.TestCase):
         self.assertEqual(self.validate_agent_usage(), [])
 
         for token, replacement in [
-            ("search, critic, implementation, review, native fallback, or generic fallback", "selected agent runs"),
+            ("search, critic, implementation, or review agent through the exact runner", "selected agent runs"),
             ("wrapper and its child `codex exec` are one logical run", "wrapper and child are separate runs"),
             ("Pre-spawn dispatch failures do not increment the created-run count", "Dispatch failures increment the count"),
             ("unusable, cancelled, or timed out", "failed"),
@@ -1367,8 +1379,8 @@ class UsageRoutingContractTests(unittest.TestCase):
         self.assertEqual(self.validate_agent_usage(), [])
 
         for token, replacement in [
-            ("accepted explicit-dispatch or runtime evidence", "configured profile"),
-            ("configured or requested model is not the actual model", "configured model is the actual model"),
+            ("accepted explicit-runner receipt", "configured profile"),
+            ("Never create an agent row from a requested label or unverified native dispatch", "Configured labels are accepted"),
             ("AC, milestone, or specification section", "task"),
             ("PID, thread ID, private run path, raw prompt, raw log, token or usage value, or authentication detail", "private runtime details"),
         ]:
@@ -1422,16 +1434,6 @@ class UsageRoutingContractTests(unittest.TestCase):
                 "On POSIX, provide manual, platform-appropriate Python and Codex CLI installation guidance without choosing or running a package manager.",
                 "On POSIX, choose a package manager automatically.",
             ),
-            (
-                "readme",
-                "On POSIX, run `python3 --version` first; use `python --version` only if `python3` is unavailable.",
-                "On POSIX, run `python --version`.",
-            ),
-            (
-                "readme_ru",
-                "В POSIX сначала выполните `python3 --version`; используйте `python --version` только если `python3` недоступен.",
-                "В POSIX выполните `python --version`.",
-            ),
         ]
         for field, token, replacement in mutations:
             with self.subTest(field=field, token=token):
@@ -1443,37 +1445,23 @@ class UsageRoutingContractTests(unittest.TestCase):
                     )
                 )
 
-    def test_readmes_use_all_six_localized_images_without_replaced_mermaid(self) -> None:
+    def test_readmes_are_concise_and_use_exact_four_install_commands(self) -> None:
         self.assertEqual(self.validate_agent_usage(), [])
 
         for field, token in [
-            ("readme", "plugins/openbuild/lib/Workflow-en.png"),
-            ("readme_ru", "plugins/openbuild/lib/Workflow-ru.png"),
-            ("readme", "plugins/openbuild/lib/usage-en.png"),
-            ("readme_ru", "plugins/openbuild/lib/usage-ru.png"),
-            ("readme", "plugins/openbuild/lib/delegat-en.png"),
-            ("readme_ru", "plugins/openbuild/lib/delegat-ru.png"),
+            ("readme", "codex plugin remove openbuild@openbuild"),
+            ("readme_ru", "codex plugin marketplace remove openbuild"),
         ]:
             with self.subTest(field=field, token=token):
-                value = getattr(self, field).replace(token, "plugins/openbuild/lib/missing.png")
+                value = getattr(self, field).replace(token, "")
                 self.assertTrue(
-                    any("README image contract" in error for error in self.validate_agent_usage(**{field: value}))
+                    any("exactly the four supported commands" in error for error in self.validate_agent_usage(**{field: value}))
                 )
 
-        readme = self.readme.replace(
-            "![Usage-aware model routing](plugins/openbuild/lib/usage-en.png)",
-            "![Usage-aware model routing](plugins/openbuild/lib/usage-en.png)\n\n```mermaid\ngraph LR\nA-->B\n```",
-        )
-        self.assertTrue(any("replaced Mermaid" in error for error in self.validate_agent_usage(readme=readme)))
-
-    def test_bilingual_final_agent_tables_describe_the_same_truthful_columns(self) -> None:
-        self.assertEqual(self.validate_agent_usage(), [])
-
-        readme = self.readme.replace("Actual model/effort", "Configured model/effort")
-        self.assertTrue(any("README.md agent usage" in error for error in self.validate_agent_usage(readme=readme)))
-
-        readme_ru = self.readme_ru.replace("Фактические model/effort", "Настроенные model/effort")
-        self.assertTrue(any("README.ru.md agent usage" in error for error in self.validate_agent_usage(readme_ru=readme_ru)))
+        readme = self.readme + "\n## How TDD-first implementation works\n" + ("\n" * 150)
+        errors = self.validate_agent_usage(readme=readme)
+        self.assertTrue(any("removed verbose section" in error for error in errors))
+        self.assertTrue(any("exceeds 140 lines" in error for error in errors))
 
     def test_final_agent_heading_is_localized_to_the_response_language(self) -> None:
         self.assertEqual(self.validate_agent_usage(), [])
@@ -1502,16 +1490,16 @@ class UsageRoutingContractTests(unittest.TestCase):
         self.assertNotIn("`Agent usage`", self.skill_text)
         self.assertNotIn("`Agent usage`", self.template_text)
 
-    def test_separate_usage_search_precedes_main_pool_fallback(self) -> None:
+    def test_exact_spark_search_precedes_root_recovery(self) -> None:
         self.assertEqual(self.validate(), [])
 
-        model_routing = self.model_routing.replace("**Separate usage pool:**", "**Search worker:**")
+        model_routing = self.model_routing.replace("**Exact Spark route:**", "**Search worker:**")
         self.assertTrue(any("search usage-pool" in error for error in self.validate(model_routing=model_routing)))
 
-        separate = "**Separate usage pool:**"
-        efficient = "**Efficient main-pool fallback:**"
-        model_routing = self.model_routing.replace(separate, "__SEARCH_ORDER__").replace(efficient, separate).replace("__SEARCH_ORDER__", efficient)
-        self.assertTrue(any("separate pool must precede" in error for error in self.validate(model_routing=model_routing)))
+        exact = "**Exact Spark route:**"
+        recovery = "**Root recovery:**"
+        model_routing = self.model_routing.replace(exact, "__SEARCH_ORDER__").replace(recovery, exact).replace("__SEARCH_ORDER__", recovery)
+        self.assertTrue(any("exact Spark must precede root recovery" in error for error in self.validate(model_routing=model_routing)))
 
     def test_explicit_cli_runner_is_packaged_and_is_the_primary_dispatch(self) -> None:
         self.assertTrue((SKILL / "scripts" / "agent_runner.py").is_file())
@@ -1566,7 +1554,6 @@ class UsageRoutingContractTests(unittest.TestCase):
         )
         for profile in [
             "openbuild_search_separate",
-            "openbuild_search_fallback",
             "openbuild_implementation_fast",
             "openbuild_implementation_balanced",
             "openbuild_implementation_strongest",
@@ -1591,22 +1578,22 @@ class UsageRoutingContractTests(unittest.TestCase):
 
     def test_exact_named_search_agent_dispatch_precedes_repository_search(self) -> None:
         skill_text = self.skill_text.replace(
-            "Spawn the custom agent named `openbuild_search_separate`",
+            "start the custom agent named `openbuild_search_separate`",
             "Attempt a suitable search worker",
         )
         self.assertTrue(any("exact agent dispatch" in error for error in self.validate(skill_text=skill_text)))
-
-        model_routing = self.model_routing.replace(
-            "select `openbuild_search_separate` by exact custom-agent name",
-            "prefer `openbuild_search_separate` when convenient",
-        )
-        self.assertTrue(any("exact agent dispatch" in error for error in self.validate(model_routing=model_routing)))
 
         code_discovery = self.code_discovery.replace(
             "before the root runs any new repository search command",
             "early in repository discovery",
         )
         self.assertTrue(any("exact agent dispatch" in error for error in self.validate(code_discovery=code_discovery)))
+
+        code_discovery = self.code_discovery.replace(
+            "create no other discovery agent",
+            "use legacy `openbuild-discovery` when needed",
+        )
+        self.assertTrue(any("legacy openbuild-discovery" in error for error in self.validate(code_discovery=code_discovery)))
 
     def test_silent_generic_fallback_and_missing_receipt_are_rejected(self) -> None:
         model_routing = self.model_routing.replace(
@@ -1683,48 +1670,23 @@ class UsageRoutingContractTests(unittest.TestCase):
         self.assertTrue(any("implementation routing" in error for error in self.validate(model_routing=model_routing)))
 
         implementation = self.implementation.replace(
-            "Missing model/tier metadata alone does not block low or medium implementation",
-            "Missing model/tier metadata blocks implementation",
+            "Every created implementation run requires concrete model, effort, and sandbox evidence",
+            "Implementation may use an unverified label",
         )
         self.assertTrue(any("implementation-delegation.md" in error for error in self.validate(implementation=implementation)))
 
     def test_high_and_critical_writer_floors_cannot_be_relaxed(self) -> None:
-        model_routing = self.model_routing.replace(
-            "High work still requires a confirmed strong route",
-            "High work may use any configured route",
-        )
-        self.assertTrue(any("implementation routing" in error for error in self.validate(model_routing=model_routing)))
-
-        model_routing = self.model_routing.replace(
-            "critical work requires the strongest proven route",
-            "critical work may use a merely configured route",
-        )
-        self.assertTrue(any("implementation routing" in error for error in self.validate(model_routing=model_routing)))
-
         implementation = self.implementation.replace(
-            "For high work require a confirmed strong route",
-            "For high work allow any configured route",
+            "`high` | exact `openbuild_implementation_strongest` profile",
+            "`high` | any configured profile",
         )
         self.assertTrue(any("implementation-delegation.md" in error for error in self.validate(implementation=implementation)))
 
         implementation = self.implementation.replace(
-            "for critical work require the strongest proven route",
-            "for critical work allow a merely configured route",
+            "`critical` | exact `openbuild_implementation_strongest` profile",
+            "`critical` | any configured profile",
         )
         self.assertTrue(any("implementation-delegation.md" in error for error in self.validate(implementation=implementation)))
-
-    def test_usage_routing_is_explained_in_both_readmes(self) -> None:
-        readme = self.readme.replace("Search always attempts a confirmed separate-usage route first", "Search selects a suitable route")
-        self.assertTrue(any("README.md" in error for error in self.validate(readme=readme)))
-
-        readme = self.readme.replace("exact custom agent `openbuild_search_separate`", "a suitable worker")
-        self.assertTrue(any("README.md" in error for error in self.validate(readme=readme)))
-
-        readme_ru = self.readme_ru.replace("Поиск всегда сначала пытается использовать подтверждённый separate-usage route", "Поиск выбирает подходящий route")
-        self.assertTrue(any("README.ru.md" in error for error in self.validate(readme_ru=readme_ru)))
-
-        readme_ru = self.readme_ru.replace("exact custom agent `openbuild_search_separate`", "generic worker")
-        self.assertTrue(any("README.ru.md" in error for error in self.validate(readme_ru=readme_ru)))
 
 
 class SearchDispatchTraceTests(unittest.TestCase):
@@ -1743,7 +1705,7 @@ class SearchDispatchTraceTests(unittest.TestCase):
             "terminal_event": "none",
             "activated": False,
             "run_status": "running",
-            "pool": "separate",
+            "pool": "unknown",
             "dispatch_result": "selected",
             "fallback_reason": "none",
             "process_tree_stopped": False,
@@ -1793,7 +1755,7 @@ class SearchDispatchTraceTests(unittest.TestCase):
         ]
 
     @staticmethod
-    def failed_trace(reason: str = "selector-unavailable") -> list[dict[str, object]]:
+    def failed_trace(reason: str = "cli-unavailable") -> list[dict[str, object]]:
         return [
             {
                 "event": "search-dispatch",
@@ -1825,7 +1787,7 @@ class SearchDispatchTraceTests(unittest.TestCase):
                 "codex_pid": "none",
                 "codex_process_identity": "none",
             },
-            {"event": "repository-search", "actor": "openbuild_search_fallback"},
+            {"event": "repository-search", "actor": "root"},
         ]
 
     @classmethod
@@ -1857,8 +1819,26 @@ class SearchDispatchTraceTests(unittest.TestCase):
                 "codex_stopped": True,
             },
             terminal,
-            {"event": "repository-search", "actor": "openbuild_search_fallback"},
+            {"event": "repository-search", "actor": "root"},
         ]
+
+    @classmethod
+    def unusable_after_search_trace(cls, actor: str) -> list[dict[str, object]]:
+        trace = cls.selected_trace()
+        trace[4].update(
+            {
+                "run_status": "failed",
+                "terminal_event": "turn.completed",
+                "dispatch_result": "failed",
+                "fallback_reason": "unusable-evidence",
+                "codex_exit_evidence": "valid",
+                "codex_exit_code": 0,
+                "result_evidence": "valid",
+            }
+        )
+        trace.pop()
+        trace.append({"event": "repository-search", "actor": actor})
+        return trace
 
     def test_canonical_agent_name_is_separate_from_task_name(self) -> None:
         trace = self.selected_trace()
@@ -1911,60 +1891,51 @@ class SearchDispatchTraceTests(unittest.TestCase):
 
         self.assertTrue(any("allowed fallback reason" in error for error in validate_search_dispatch_trace(trace)))
 
-    def test_allowed_fallback_and_receipt_remain_consistent(self) -> None:
+    def test_allowed_root_recovery_and_receipt_remain_consistent(self) -> None:
         trace = self.failed_trace()
         self.assertEqual(validate_search_dispatch_trace(trace), [])
 
-    def test_native_selected_search_requires_a_prior_terminal_packaged_runner_failure(self) -> None:
+    def test_failed_search_cannot_dispatch_a_replacement_agent(self) -> None:
+        trace = self.failed_trace()
+        trace.insert(
+            -1,
+            {
+                "event": "search-dispatch",
+                "agent_name": "openbuild_search_replacement",
+                "task_name": "replacement_fixture",
+                "result": "selected",
+                "fallback_reason": "none",
+            },
+        )
+
+        errors = validate_search_dispatch_trace(trace)
+        self.assertTrue(any("cannot create a replacement agent" in error for error in errors))
+
+    def test_exact_runner_does_not_require_confirmed_pool_metadata(self) -> None:
+        trace = self.selected_trace()
+        trace[1]["pool"] = "unknown"
+        trace[4]["pool"] = "unknown"
+
+        self.assertEqual(validate_search_dispatch_trace(trace), [])
+
+    def test_semantically_unusable_search_transitions_to_root_recovery(self) -> None:
+        trace = self.unusable_after_search_trace("root")
+
+        self.assertEqual(validate_search_dispatch_trace(trace), [])
+
+    def test_post_terminal_failed_search_rejects_replacement_actor(self) -> None:
+        trace = self.unusable_after_search_trace("replacement")
+
+        errors = validate_search_dispatch_trace(trace)
+        self.assertTrue(any("only root-owned recovery" in error for error in errors))
+
+    def test_native_selected_search_is_rejected(self) -> None:
         trace = self.selected_trace()
         trace[1]["dispatch_method"] = "per-spawn-model"
         trace[4]["dispatch_method"] = "per-spawn-model"
 
         errors = validate_search_dispatch_trace(trace)
-        self.assertTrue(any("packaged runner" in error for error in errors))
-
-    def test_native_selected_search_accepts_a_prior_terminal_packaged_runner_failure(self) -> None:
-        trace = self.selected_trace()
-        runner_failure = trace[1] | {
-            "dispatch_method": "codex-exec-explicit-model",
-            "configured_model": "gpt-5.3-codex-spark",
-            "terminal_event": "turn.failed",
-            "run_status": "failed",
-            "dispatch_result": "failed",
-            "fallback_reason": "runner-failed",
-            "process_tree_stopped": True,
-            "run_dir": "C:/runs/search-runner-failed",
-            "worker_pid": "101",
-            "worker_process_identity": "worker-created-0",
-            "codex_pid": "202",
-            "codex_process_identity": "codex-created-0",
-            "codex_exit_evidence": "valid",
-            "codex_exit_code": 1,
-            "result_evidence": "missing",
-        }
-        trace.insert(1, runner_failure)
-        trace[2]["dispatch_method"] = "per-spawn-model"
-        trace[5]["dispatch_method"] = "per-spawn-model"
-
-        self.assertEqual(validate_search_dispatch_trace(trace), [])
-
-        unknown_selector = [dict(event) for event in trace]
-        for receipt in (unknown_selector[2], unknown_selector[5]):
-            receipt["configured_model"] = "unknown"
-            receipt["model_reasoning_effort"] = "unknown"
-        self.assertTrue(
-            any(
-                "direct model and reasoning effort" in error
-                for error in validate_search_dispatch_trace(unknown_selector)
-            )
-        )
-
-        writable = [dict(event) for event in trace]
-        for receipt in (writable[2], writable[5]):
-            receipt["sandbox"] = "workspace-write"
-        self.assertTrue(
-            any("read-only" in error for error in validate_search_dispatch_trace(writable))
-        )
+        self.assertTrue(any("invalid dispatch method" in error for error in errors))
 
     def test_failed_explicit_dispatch_accepts_turn_failed_before_fallback(self) -> None:
         trace = self.failed_trace("model-unavailable")
@@ -2128,22 +2099,22 @@ class ProfileMigrationTraceTests(unittest.TestCase):
         }[action]
         entry: dict[str, object] = {
             "scope": "user",
-            "source_path": "openbuild-search-fallback.toml",
-            "target_path": "openbuild_search_fallback.toml",
+            "source_path": "openbuild-implementation-fast.toml",
+            "target_path": "openbuild_implementation_fast.toml",
             "root_fingerprint": "d" * 64,
-            "legacy_name": "openbuild-search-fallback",
-            "target_name": "openbuild_search_fallback",
+            "legacy_name": "openbuild-implementation-fast",
+            "target_name": "openbuild_implementation_fast",
             "source_sha256": "a" * 64,
             "target_sha256": target_sha256,
             "rendered_sha256": "b" * 64,
             "exact_diff": (
-                '-name = "openbuild-search-fallback"\n'
-                '+name = "openbuild_search_fallback"'
+                '-name = "openbuild-implementation-fast"\n'
+                '+name = "openbuild_implementation_fast"'
             ),
             "action": action,
         }
         entry["entry_id"] = migration_entry_id(entry)
-        detected = ["openbuild-search-fallback"]
+        detected = ["openbuild-implementation-fast"]
         preview: dict[str, object] = {
             "event": "profile-migration-preview",
             "supported_mappings": migration_supported_mappings(),
@@ -2420,39 +2391,54 @@ class ImplementationDispatchTraceTests(unittest.TestCase):
             any("workspace-write" in error for error in validate_implementation_dispatch_trace(trace))
         )
 
-    def test_native_writer_requires_a_prior_terminal_runner_failure_and_direct_effort(self) -> None:
+    def test_native_writer_is_rejected(self) -> None:
         trace = self.valid_trace()
         for receipt in (trace[2], trace[5]):
             receipt["dispatch_method"] = "per-spawn-model"
-            receipt["model_reasoning_effort"] = ""
 
         errors = validate_implementation_dispatch_trace(trace)
-        self.assertTrue(any("prior terminal runner failure" in error for error in errors))
-        self.assertTrue(any("direct model and reasoning effort" in error for error in errors))
+        self.assertTrue(any("exact dispatch method" in error for error in errors))
 
-    def test_native_writer_accepts_a_bound_stopped_terminal_runner_failure(self) -> None:
+    def test_failed_writer_cannot_be_replaced_before_edit(self) -> None:
         trace = self.valid_trace()
-        runner_failure = trace[2] | {
-            "run_status": "failed",
-            "terminal_event": "turn.failed",
-            "activated": False,
-            "dispatch_result": "failed",
-            "fallback_reason": "runner-failed",
-            "process_tree_stopped": True,
-            "run_dir": "C:/runs/M1-runner-failed",
-            "worker_pid": "101",
-            "worker_process_identity": "worker-created-0",
-            "codex_pid": "202",
-            "codex_process_identity": "codex-created-0",
-            "codex_exit_evidence": "valid",
-            "codex_exit_code": 1,
-            "result_evidence": "missing",
-        }
-        trace.insert(2, runner_failure)
-        for receipt in (trace[3], trace[6]):
-            receipt["dispatch_method"] = "per-spawn-model"
+        failed_receipt = dict(trace[2])
+        failed_receipt.update(
+            {
+                "lease": "M0",
+                "task_name": "failed_fixture",
+                "run_dir": "C:/runs/M0",
+                "run_status": "failed",
+                "terminal_event": "turn.failed",
+                "activated": True,
+                "process_tree_stopped": True,
+                "dispatch_result": "failed",
+                "fallback_reason": "runner-failed",
+                "codex_exit_evidence": "valid",
+                "codex_exit_code": 1,
+                "result_evidence": "missing",
+            }
+        )
+        trace[0:0] = [
+            {
+                "event": "writer-lease-acquired",
+                "lease": "M0",
+                "owner": "openbuild_implementation_strongest",
+            },
+            {
+                "event": "implementation-dispatch",
+                "risk": "high",
+                "agent_name": "openbuild_implementation_strongest",
+                "task_name": "failed_fixture",
+                "lease": "M0",
+                "result": "selected",
+                "fallback_reason": "none",
+            },
+            failed_receipt,
+            {"event": "writer-lease-released", "lease": "M0"},
+        ]
 
-        self.assertEqual(validate_implementation_dispatch_trace(trace), [])
+        errors = validate_implementation_dispatch_trace(trace)
+        self.assertTrue(any("blocks replacement dispatch and edits" in error for error in errors))
 
     def test_running_receipt_must_be_recorded_before_activation(self) -> None:
         trace = self.valid_trace()
@@ -2864,7 +2850,7 @@ class ReviewEscalationTraceTests(unittest.TestCase):
         errors = validate_review_escalation_trace(trace)
         self.assertTrue(any("activation event" in error for error in errors))
 
-    def test_native_reviewer_requires_a_prior_terminal_runner_failure_and_direct_effort(self) -> None:
+    def test_native_reviewer_is_rejected(self) -> None:
         trace = self.review_cycle(
             "fast",
             "openbuild_review_fast",
@@ -2875,42 +2861,9 @@ class ReviewEscalationTraceTests(unittest.TestCase):
         )
         for receipt in (trace[1], trace[3]):
             receipt["dispatch_method"] = "per-spawn-model"
-            receipt["model_reasoning_effort"] = ""
 
         errors = validate_review_escalation_trace(trace)
-        self.assertTrue(any("prior terminal runner failure" in error for error in errors))
-        self.assertTrue(any("direct model and reasoning effort" in error for error in errors))
-
-    def test_native_reviewer_accepts_a_bound_stopped_terminal_runner_failure(self) -> None:
-        trace = self.review_cycle(
-            "fast",
-            "openbuild_review_fast",
-            "D1",
-            verdict="ACCEPT",
-            findings="none",
-            escalation_reason="none",
-        )
-        runner_failure = trace[1] | {
-            "run_status": "failed",
-            "terminal_event": "turn.failed",
-            "activated": False,
-            "dispatch_result": "failed",
-            "fallback_reason": "runner-failed",
-            "process_tree_stopped": True,
-            "run_dir": "C:/runs/review-D1-fast-runner-failed",
-            "worker_pid": "301",
-            "worker_process_identity": "worker-D1-fast-0",
-            "codex_pid": "302",
-            "codex_process_identity": "codex-D1-fast-0",
-            "codex_exit_evidence": "valid",
-            "codex_exit_code": 1,
-            "result_evidence": "missing",
-        }
-        trace.insert(1, runner_failure)
-        for receipt in (trace[2], trace[4]):
-            receipt["dispatch_method"] = "per-spawn-model"
-
-        self.assertEqual(validate_review_escalation_trace(trace), [])
+        self.assertTrue(any("exact dispatch method" in error for error in errors))
 
     def test_review_result_must_follow_the_terminal_receipt(self) -> None:
         trace = self.review_cycle(

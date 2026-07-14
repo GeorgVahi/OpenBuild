@@ -29,7 +29,6 @@ import tomllib
 
 SUPPORTED_AGENTS = {
     "openbuild_search_separate",
-    "openbuild_search_fallback",
     "openbuild_implementation_fast",
     "openbuild_implementation_balanced",
     "openbuild_implementation_strongest",
@@ -424,7 +423,7 @@ def _matching_profiles(directory: Path, agent_name: str) -> list[tuple[Path, Map
 
 
 def load_agent_profile(agent_name: str, *, repo: Path, codex_home: Path) -> AgentProfile:
-    """Resolve the fixed packaged Explorer or an exact project-then-user custom profile."""
+    """Resolve immutable Spark or an exact project, user, then packaged role profile."""
 
     if agent_name not in SUPPORTED_AGENTS:
         raise RunnerError(f"unsupported OpenBuild agent: {agent_name}")
@@ -436,7 +435,11 @@ def load_agent_profile(agent_name: str, *, repo: Path, codex_home: Path) -> Agen
             )
         path, data = packaged[0]
         return _profile_from_data(data, path, agent_name)
-    scopes = [repo.resolve() / ".codex" / "agents", codex_home.resolve() / "agents"]
+    scopes = [
+        repo.resolve() / ".codex" / "agents",
+        codex_home.resolve() / "agents",
+        PACKAGED_PROFILE_DIR,
+    ]
     for directory in scopes:
         matches = _matching_profiles(directory, agent_name)
         if len(matches) > 1:
@@ -445,10 +448,7 @@ def load_agent_profile(agent_name: str, *, repo: Path, codex_home: Path) -> Agen
         if matches:
             path, data = matches[0]
             return _profile_from_data(data, path, agent_name)
-    raise RunnerError(
-        f"exact custom-agent profile {agent_name!r} is not configured under "
-        f"{scopes[0]} or {scopes[1]}; run $openbuild:build setup-models first"
-    )
+    raise RunnerError(f"packaged OpenBuild profile {agent_name!r} is missing; reinstall OpenBuild")
 
 
 def toml_string(value: str) -> str:

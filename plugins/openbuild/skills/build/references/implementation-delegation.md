@@ -25,9 +25,9 @@ Use a risk-matched coding model for every complexity class, as defined by [model
 
 ## Exact writer dispatch
 
-Dispatch that exact profile before every test or production code edit: `low` → `openbuild_implementation_fast`, `medium` → `openbuild_implementation_balanced`, and `high` or `critical` → `openbuild_implementation_strongest`. First establish the lease record below from the configured exact profile and baseline, then use `<build-skill-root>/scripts/agent_runner.py start --lease-id <lease-id>` for the exact launch. The runner refuses an implementation start without that lease ID, persists the lease-bound request before `Popen`, pins the profile model, `model_reasoning_effort`, and `workspace-write` sandbox, and holds Codex stdin. Record the returned unactivated running receipt, then call `activate`; the task prompt cannot reach the worker earlier. The lease remains active for the whole process. After successful terminal evidence, record the matching run-bound `implementation-handoff-accepted` event before consuming the result or releasing the lease. A matching failed/cancelled terminal receipt with a confirmed stopped process tree permits lease release only while the milestone remains incomplete and can never emit an accepted handoff. On a recorded runner failure, a callable native spawn may replace it only when the schema exposes both model and reasoning effort directly and the original process tree is confirmed stopped. A name-only compatibility fallback passes the canonical profile ID through `agent_name` and a separate descriptive label through `task_name` but records model/effort as unknown. A generic worker, descriptive task name, prompt mention, or stronger-than-requested profile is not the selected risk route and must not start editing.
+Dispatch that exact profile before every test or production code edit: `low` → `openbuild_implementation_fast`, `medium` → `openbuild_implementation_balanced`, and `high` or `critical` → `openbuild_implementation_strongest`. First establish the lease record, then use `<build-skill-root>/scripts/agent_runner.py start --lease-id <lease-id>`. Record the returned unactivated running receipt, call `activate`, and keep the lease active for the whole process. Accept handoff only after the terminal receipt proves the exact model, effort, sandbox, process lifecycle, exit zero, valid result evidence, and a semantically completed task. Any runner or semantic failure leaves the milestone incomplete and cannot select another writer route.
 
-Acquire the single-writer lease before dispatch, pass its ID to `start`, record the initial unactivated `running` receipt while the lease is active, call `activate`, record the matching `implementation-agent-activated` event, and only then permit the first test or production edit. Replace the running receipt with the terminal receipt after the process finishes. A bounded `wait` timeout is not a failed dispatch and never releases the lease. Use `cancel`, confirm that every started process stopped, and only then record a failed route, release the incomplete milestone's lease, or grant a replacement lease.
+Acquire the single-writer lease before dispatch, pass its ID to `start`, record the initial unactivated `running` receipt while the lease is active, call `activate`, record the matching `implementation-agent-activated` event, and only then permit the first test or production edit. Replace the running receipt with the terminal receipt after the process finishes. A bounded `wait` timeout is not a failed dispatch and never releases the lease. Use `cancel`, confirm that every started process stopped, and only then record a failed route and release the incomplete milestone's lease. That milestone remains blocked; do not grant a replacement lease or continue its edits.
 
 ```text
 Implementation routing receipt:
@@ -35,7 +35,7 @@ risk: <low|medium|high|critical>
 requested_agent: <exact openbuild_implementation_* profile>
 task_name: <independent descriptive task label>
 requested_tier: <fast|balanced|strongest>
-dispatch_method: <codex-exec-explicit-model|per-spawn-model|exact-custom-agent|unavailable>
+dispatch_method: <codex-exec-explicit-model|unavailable>
 configured_model: <profile model or unknown>
 model_reasoning_effort: <profile effort or unknown>
 observed_agent: <runtime agent or unknown>
@@ -51,7 +51,7 @@ codex_pid: <creation-bound Codex PID>
 codex_process_identity: <recorded OS creation identity>
 run_status: <running|completed|failed>
 dispatch_result: <selected|failed>
-fallback_reason: <none|profile-not-discoverable|profile-incomplete|cli-unavailable|chatgpt-auth-unavailable|selector-unavailable|model-unavailable|quota-exhausted|runner-failed|spawn-failed|sandbox-mismatch|tier-unproven|lease-conflict>
+fallback_reason: <none|profile-not-discoverable|profile-incomplete|cli-unavailable|chatgpt-auth-unavailable|model-unavailable|quota-exhausted|runner-failed|spawn-failed|sandbox-mismatch|lease-conflict>
 process_tree_stopped: <false while running; true for every terminal receipt>
 codex_exit_evidence: <valid|missing|malformed|identity-mismatch on terminal explicit-model receipts>
 codex_exit_code: <integer|unknown|null on terminal explicit-model receipts>
@@ -86,7 +86,7 @@ codex_process_identity: <same creation identity>
 result_evidence: valid
 ```
 
-For low or medium work, a failed exact dispatch may use another writer only when native selection or runtime/configuration evidence proves the same requested tier, sandbox, and lease; record the failed exact attempt and replacement identity instead of calling it the requested profile. For high or critical work, block before editing if the required profile/model floor is not proven. `root-only` remains a safety mode for coupled, sensitive, destructive, or overlapping scope, but it may edit only when the root's observed model satisfies the same tier and its receipt records `dispatch_method: risk-matched-root`; never use it as a silent convenience fallback.
+For every risk tier, a failed or semantically unsuccessful exact dispatch blocks further editing. Do not replace it with another agent, label, or root writer under the same milestone.
 
 ## Single-writer lease
 
@@ -120,7 +120,7 @@ Require all of these before granting the lease:
 - the worker can complete a coherent outcome without making product or architecture decisions;
 - no other implementation worker or root edit is active.
 
-While the lease is active, the root does not edit workspace files or spawn another writer. It may continue read-only reasoning and user updates that cannot invalidate the lease. If new user input changes the milestone, interrupt the worker before editing or issuing a replacement lease.
+While the lease is active, the root does not edit workspace files or spawn another writer. It may continue read-only reasoning and user updates that cannot invalidate the lease. If new user input replaces the milestone, interrupt the worker and close the old milestone before separately routing the new request.
 
 ## Worker contract
 
@@ -141,9 +141,9 @@ The worker must not:
 - add production dependencies or infrastructure without existing approval;
 - continue after discovering a new product choice, owner-layer conflict, secret, destructive action, or material scope expansion.
 
-Require the lease-bound pending request and initial routing receipt for `openbuild_implementation_fast`, `openbuild_implementation_balanced`, or `openbuild_implementation_strongest` before edits, then require its terminal receipt and run-bound accepted-handoff event before consuming successful output or release. Read-only search/discovery and `openbuild_review_*` profiles are never implementation workers. A proven equivalent native selector, built-in worker, generic bounded subagent, or `root-only` route may write only under the explicitly recorded exception above and when the same lease, TDD, minimality, validation, and review controls remain in force.
+Require the lease-bound pending request and initial routing receipt for `openbuild_implementation_fast`, `openbuild_implementation_balanced`, or `openbuild_implementation_strongest` before edits, then require its terminal receipt, semantic success, and run-bound accepted-handoff event before consuming output or releasing a completed milestone. Read-only search/discovery and `openbuild_review_*` profiles are never implementation workers.
 
-Missing model/tier metadata alone does not block low or medium implementation when the exact named profile is configured, the requested agent selection is recorded, its sandbox is appropriate, and no runtime evidence contradicts the route. Record the effective model/tier as `unknown` or `unobservable`; never claim a model switch or usage saving from the profile name alone. For high work require a confirmed strong route, and for critical work require the strongest proven route plus any applicable authority checkpoint. If the required tier cannot be selected, stop before all test and production code edits rather than silently lowering the risk floor.
+Every created implementation run requires concrete model, effort, and sandbox evidence. If the required tier cannot be selected or complete the task, stop before further test and production code edits rather than lowering the risk floor.
 
 ## Root handoff gate
 
@@ -158,6 +158,6 @@ After the worker finishes or stops, release the lease and let the root:
 7. Run progressive review against the complete current diff.
 8. Commit only after validation and review pass; keep Git exclusively root-owned.
 
-Do not accept a worker result merely because it reports success. If it changed forbidden files, used stale assumptions, cannot prove the primary signal, or exposed a new product/architecture choice, keep the milestone incomplete and repair under a new root-owned signal or a new bounded lease.
+Do not accept a worker result merely because it reports success. If it changed forbidden files, used stale assumptions, cannot prove the primary signal, or exposed a new product/architecture choice, keep the milestone incomplete and blocked. Do not repair that milestone through the root or a replacement lease; report the exact blocker and request new authority when required.
 
 For `sequential-workers`, complete this gate before issuing the next lease. Record the actual mode, verified worker identity/role, allowed files, validation, and handoff in the milestone log.

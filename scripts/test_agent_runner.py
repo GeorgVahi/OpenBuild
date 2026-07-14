@@ -64,6 +64,39 @@ class AgentProfileResolutionTests(unittest.TestCase):
             self.assertEqual(profile.sandbox, "read-only")
             self.assertEqual(profile.source, repo / ".codex" / "agents" / "project.toml")
 
+    def test_user_profile_wins_over_packaged_default_by_exact_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            repo.mkdir()
+            user_home = root / "codex-home"
+            source = self.write_profile(user_home, "user.toml", model="user-model")
+
+            profile = agent_runner.load_agent_profile(
+                "openbuild_review_strong",
+                repo=repo,
+                codex_home=user_home,
+            )
+
+            self.assertEqual(profile.model, "user-model")
+            self.assertEqual(profile.source, source)
+
+    def test_duplicate_exact_profiles_fail_closed_before_packaged_default(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            repo.mkdir()
+            user_home = root / "codex-home"
+            self.write_profile(user_home, "first.toml")
+            self.write_profile(user_home, "second.toml", model="second-model")
+
+            with self.assertRaisesRegex(agent_runner.RunnerError, "ambiguous"):
+                agent_runner.load_agent_profile(
+                    "openbuild_review_strong",
+                    repo=repo,
+                    codex_home=user_home,
+                )
+
     def test_packaged_spark_profile_makes_code_discovery_zero_config(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -122,18 +155,41 @@ class AgentProfileResolutionTests(unittest.TestCase):
             self.assertEqual(profile.reasoning_effort, "low")
             self.assertEqual(profile.source.parent, agent_runner.PACKAGED_PROFILE_DIR.resolve())
 
-    def test_other_roles_still_require_explicit_configuration(self) -> None:
+    def test_every_supported_role_has_a_zero_setup_packaged_default(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             repo = root / "repo"
             repo.mkdir()
+            expected = {
+                "openbuild_search_separate": ("gpt-5.3-codex-spark", "low", "read-only"),
+                "openbuild_implementation_fast": ("gpt-5.6-terra", "low", "workspace-write"),
+                "openbuild_implementation_balanced": ("gpt-5.6-terra", "medium", "workspace-write"),
+                "openbuild_implementation_strongest": ("gpt-5.6-sol", "xhigh", "workspace-write"),
+                "openbuild_review_fast": ("gpt-5.6-luna", "low", "read-only"),
+                "openbuild_review_balanced": ("gpt-5.6-terra", "medium", "read-only"),
+                "openbuild_review_strong": ("gpt-5.6-sol", "high", "read-only"),
+                "openbuild_review_strongest": ("gpt-5.6-sol", "xhigh", "read-only"),
+            }
 
-            with self.assertRaisesRegex(agent_runner.RunnerError, "setup-models"):
-                agent_runner.load_agent_profile(
-                    "openbuild_implementation_balanced",
+            self.assertEqual(agent_runner.SUPPORTED_AGENTS, set(expected))
+            for agent_name, configured in expected.items():
+                profile = agent_runner.load_agent_profile(
+                    agent_name,
                     repo=repo,
                     codex_home=root / "codex-home",
                 )
+                with self.subTest(agent_name=agent_name):
+                    self.assertEqual(
+                        (profile.model, profile.reasoning_effort, profile.sandbox),
+                        configured,
+                    )
+                    self.assertEqual(
+                        profile.source.parent,
+                        agent_runner.PACKAGED_PROFILE_DIR.resolve(),
+                    )
+
+    def test_deprecated_search_fallback_is_not_supported(self) -> None:
+        self.assertNotIn("openbuild_search_fallback", agent_runner.SUPPORTED_AGENTS)
 
     def test_incomplete_profile_is_rejected_instead_of_inheriting_parent_model(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

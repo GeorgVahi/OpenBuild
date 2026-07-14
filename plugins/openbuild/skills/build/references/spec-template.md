@@ -16,11 +16,11 @@ Use this as a flexible structure. Remove irrelevant sections and keep the docume
 - Complexity: low | medium | high | critical — <evidence>
 - Implementation mode: Direct | Investigation | TDD-first — <evidence>
 - Version impact: not applicable | prerelease | patch | minor | major — <version source, policy, and evidence>
-- Routing mode: native-selector | configured-profiles | reasoning-ladder | role-only | generic-subagent | root-only
-- Discovery mode: delegated | mixed | root-fallback — <observed model/tier or unknown>
-- Search usage route: separate-pool | main-efficient | role-only | generic-subagent | root-fallback — <observed model/pool, first-attempt result, and circuit breaker>
+- Routing mode: codex-exec-explicit-model | root-recovery | blocked
+- Discovery mode: delegated | mixed | root-recovery — <exact runner evidence or root recovery reason>
+- Search usage route: separate-pool | root-recovery — <exact result or terminal failure and circuit breaker>
 - Search routing receipt: <exact agent, dispatch method, configured/observed model, pool, result, and fallback reason>
-- Implementation model route: fast-profile | balanced-profile | strongest-profile | native-selector | risk-matched-root | blocked — <requested profile/tier, observed model or unknown, escalation, and exact blocker>
+- Implementation model route: fast-profile | balanced-profile | strongest-profile | blocked — <exact profile/model/effort, semantic outcome, escalation, and blocker>
 - Implementation routing receipt: <risk, exact requested agent/tier, dispatch method, configured/observed model, workspace-write sandbox, lease, result, and fallback reason>
 - Review routing receipt: <diff revision, risk floor, exact requested agent/tier, dispatch method, configured/observed model, read-only sandbox, result, and fallback reason>
 
@@ -212,11 +212,11 @@ Created logical agent runs: `<count>`.
 
 | Run | Created | Role/task | Actual model | Effort | Status/outcome | Work and specification mapping | Evidence |
 |---|---|---|---|---|---|---|---|
-| A-001 | yes | <search/critic/implementation/review/native fallback/generic fallback and task> | <accepted actual value or unknown> | <accepted actual value or unknown> | <terminal status and usable/unusable/cancelled/timeout outcome> | <short factual work; AC, milestone, or specification section, or none> | <accepted non-private evidence> |
+| A-001 | yes | <search/critic/implementation/review and task> | <exact runner value> | <exact runner value> | <terminal and semantic outcome> | <short factual work; AC, milestone, or specification section, or none> | <accepted non-private receipt evidence> |
 
-Create a row only after the logical agent run exists. A wrapper and its child `codex exec` count as one logical run. Pre-spawn dispatch failures do not increment the created-run count; list normalized failures separately when they affected routing or fallback. Keep every created terminal run visible even when unusable, cancelled, or timed out.
+Create a row only after the exact-runner logical agent run exists. A wrapper and its child `codex exec` count as one logical run. Pre-spawn dispatch failures do not increment the created-run count; list normalized failures separately when they affected routing. Keep every created terminal run visible even when unusable, cancelled, or timed out.
 
-Actual model and effort require accepted explicit-dispatch or runtime evidence; otherwise record `unknown`. A configured or requested model is not the actual model. Do not include any PID, thread ID, private run path, raw prompt, raw log, token or usage value, or authentication detail.
+Actual model and effort come from the accepted explicit-runner receipt. Never create an agent row from a requested label or unverified native dispatch. Do not include any PID, thread ID, private run path, raw prompt, raw log, token or usage value, or authentication detail.
 
 Pre-spawn dispatch failures (not included in created count): <profile/route -> normalized reason, or none>.
 

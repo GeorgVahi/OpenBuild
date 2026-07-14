@@ -23,7 +23,7 @@ Use a fresh context with conversation-history inheritance disabled when the runt
 
 ## Exact dispatch and routing receipt
 
-Select the exact starting reviewer from task risk: `low` → `openbuild_review_fast`, `medium` → `openbuild_review_balanced`, `high` → `openbuild_review_strong`, and `critical` → `openbuild_review_strongest`. Start it through `<build-skill-root>/scripts/agent_runner.py`; the primary `codex-exec-explicit-model` route pins the configured model, reasoning effort, and read-only sandbox in a separate process. Durably record the returned unactivated `running` Review routing receipt before calling `activate`, record the matching run/process-bound `review-agent-activated` event, and then wait for the stopped terminal receipt. Accept a review result only after that terminal receipt records `turn.completed`, creation-bound exit code zero, and valid result evidence. Use a native direct selector only after a recorded runner failure and only when it exposes both model and reasoning effort; a name-only compatibility fallback passes the canonical profile ID through `agent_name` and a separate descriptive `task_name` while recording model/effort as unknown. Do not accept a generic reviewer or a prompt that merely names the profile as selection evidence.
+Select the exact starting reviewer from task risk: `low` → `openbuild_review_fast`, `medium` → `openbuild_review_balanced`, `high` → `openbuild_review_strong`, and `critical` → `openbuild_review_strongest`. Start it through `<build-skill-root>/scripts/agent_runner.py`; `codex-exec-explicit-model` pins the resolved model, reasoning effort, and read-only sandbox in a separate process. Record the unactivated `running` receipt, call `activate`, record `review-agent-activated`, and wait for the stopped terminal receipt. Accept a review only after that receipt records `turn.completed`, creation-bound exit code zero, valid result evidence, and a semantically completed review. Failure blocks the exact review/release gate; create no replacement reviewer.
 
 Run a strictly sequential ladder, starting at the floor and moving at most one step at a time: `fast → balanced → strong → strongest`. After every dispatch, record this complete lifecycle before using the result:
 
@@ -34,7 +34,7 @@ risk_floor: <fast|balanced|strong|strongest>
 requested_agent: <exact openbuild_review_* profile>
 task_name: <independent descriptive task label>
 requested_tier: <fast|balanced|strong|strongest>
-dispatch_method: <codex-exec-explicit-model|per-spawn-model|exact-custom-agent|unavailable>
+dispatch_method: <codex-exec-explicit-model|unavailable>
 configured_model: <profile model or unknown>
 model_reasoning_effort: <profile effort or unknown>
 observed_agent: <runtime agent or unknown>
@@ -44,7 +44,7 @@ activated: <false in the recorded running receipt; true in the terminal receipt>
 run_status: <running|completed|failed>
 sandbox: <read-only or observed value>
 dispatch_result: <selected|failed>
-fallback_reason: <none|profile-not-discoverable|profile-incomplete|cli-unavailable|chatgpt-auth-unavailable|selector-unavailable|model-unavailable|quota-exhausted|runner-failed|spawn-failed|tier-unproven>
+fallback_reason: <none|profile-not-discoverable|profile-incomplete|cli-unavailable|chatgpt-auth-unavailable|model-unavailable|quota-exhausted|runner-failed|spawn-failed>
 process_tree_stopped: <false in running; true in terminal>
 run_dir: <protected run artifact directory>
 worker_pid: <worker PID>
@@ -66,7 +66,7 @@ codex_process_identity: <same creation-bound identity>
 activated: true
 ```
 
-The two receipts and activation event prove routing intent, process continuity, and observed selection separately. The running receipt must carry the exact non-terminal evidence tuple `codex_exit_evidence: missing`, `codex_exit_code: unknown|null`, and `result_evidence: missing`. The terminal receipt must preserve every routing and process identity from the running receipt, positively confirm the process tree stopped, and carry valid exit/result evidence before `review-result`. A configured profile with unobservable model metadata may satisfy low or medium selection when no evidence contradicts the explicit CLI selection. High and critical floors still require proven strong/strongest capability. Any fallback must be read-only and proven at or above the floor; name the actual reviewer instead of impersonating the unavailable profile.
+The two receipts and activation event prove routing intent, process continuity, and observed selection separately. The running receipt must carry the exact non-terminal evidence tuple `codex_exit_evidence: missing`, `codex_exit_code: unknown|null`, and `result_evidence: missing`. The terminal receipt must preserve every routing and process identity from the running receipt, positively confirm the process tree stopped, and carry concrete model/effort plus valid exit/result evidence before `review-result`. Any exact-runner or semantic failure leaves the gate incomplete and creates no replacement reviewer.
 
 ## Required result
 
@@ -74,7 +74,7 @@ Ask for this structure:
 
 ```text
 Review mode: independent | self-review-limited
-Routing mode: native-selector | configured-profiles | reasoning-ladder | role-only | generic-subagent | root-only
+Routing mode: codex-exec-explicit-model | diagnostic-root-review
 Requested tier: fast | balanced | strong | strongest | unknown
 Observed model/tier: <verified value or unknown>
 Diff identity: <commit range, status, or artifact hashes>
@@ -159,7 +159,7 @@ Dispatch the next exact reviewer only after the current reviewer returns its str
 - Fix confirmed issues before moving up unless the stronger tier is needed to resolve a conflict.
 - Never downgrade below the task's complexity floor.
 - Stop escalating when distinct proven tiers are exhausted.
-- If subagents are unavailable, run one root self-review and label it `self-review, limited`.
+- If exact review is unavailable, a root self-review may diagnose gaps but cannot satisfy the review or release gate without a new explicit user override.
 - If the strongest available review still returns blocking issues, keep the milestone or task incomplete and record the blocker.
 
 ## Acceptance gate
@@ -177,4 +177,4 @@ Accept a milestone only when all are true:
 - reviewer confidence and tier satisfy the complexity floor;
 - the current diff, not a stale earlier diff, was reviewed.
 
-For `high` and `critical` work, a high score from a cheaper reviewer never replaces an available strong or strongest final pass. If tier selection is unavailable, use the strongest available root/reviewer fallback, disclose `observed tier: unknown`, and rely on evidence, validation, and applicable approval policy rather than fabricating or automatically failing a tier claim.
+For `high` and `critical` work, a high score from a cheaper reviewer never replaces the required strong or strongest final pass. If exact tier selection fails, keep the gate incomplete and report the terminal reason.
