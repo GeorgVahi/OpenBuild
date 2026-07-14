@@ -19,10 +19,10 @@ Use this as a flexible structure. Remove irrelevant sections and keep the docume
 - Routing mode: codex-exec-explicit-model | root-recovery | blocked
 - Discovery mode: delegated | mixed | root-recovery — <exact runner evidence or root recovery reason>
 - Search usage route: separate-pool | root-recovery — <exact result or terminal failure and circuit breaker>
-- Search routing receipt: <exact agent, dispatch method, configured/observed model, pool, result, and fallback reason>
+- Search routing receipt: <model-map source/hash/step, exact agent, dispatch method, configured/observed model, pool, result, and fallback reason>
 - Implementation model route: fast-profile | balanced-profile | strong-profile | strongest-profile | blocked — <exact profile/model/effort, semantic outcome, pre-edit escalation, and blocker>
-- Implementation routing receipt: <risk, exact requested agent/tier, dispatch method, configured/observed model, workspace-write sandbox, lease, result, and fallback reason>
-- Review routing receipt: <diff revision, risk floor, exact requested agent/tier, dispatch method, configured/observed model, read-only sandbox, result, and fallback reason>
+- Implementation routing receipt: <model-map source/hash/step, risk, exact requested agent/tier, dispatch method, configured/observed model, workspace-write sandbox, lease, result, and fallback reason>
+- Review routing receipt: <model-map source/hash/step, diff revision, risk floor, exact requested agent/tier, dispatch method, configured/observed model, read-only sandbox, result, and fallback reason>
 
 ## 1. Outcome
 
@@ -227,7 +227,7 @@ The final localized report uses `Agents` for English and `Агенты` for Russ
 ### YYYY-MM-DD — <stage>
 
 - Changed: <summary>.
-- Routing: <search receipt/circuit breaker; implementation exact dispatch/receipt/lease; sequential review receipts>.
+- Routing: <model-map source/hash/steps; search receipt/circuit breaker; implementation exact dispatch/receipt/lease; sequential review receipts>.
 - Primary signal: met | not met | partially validated.
 - Validation: `<command>` -> <result>.
 - Minimality decision: <selected rung and evidence>.

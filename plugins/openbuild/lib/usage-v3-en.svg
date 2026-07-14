@@ -31,9 +31,9 @@
   </defs>
 
   <rect width="1600" height="1000" fill="url(#bg)"/>
-  <text x="800" y="55" text-anchor="middle" class="title">OpenBuild 2.1.4 · weaker-first exact routing</text>
+  <text x="800" y="55" text-anchor="middle" class="title">OpenBuild 2.1.5 · configurable exact routing</text>
   <rect x="570" y="78" width="460" height="62" class="box yellow" fill="#1a1502"/>
-  <text x="800" y="117" text-anchor="middle" class="label" fill="#ffe34d">TASK RISK + RUNTIME EVIDENCE</text>
+  <text x="800" y="117" text-anchor="middle" class="label" fill="#ffe34d">TASK RISK + USER MODEL MAP</text>
 
   <rect x="24" y="170" width="468" height="730" class="panel cyan"/>
   <rect x="516" y="170" width="568" height="730" class="panel blue"/>
@@ -49,9 +49,9 @@
   <path d="M258 340 V382" class="line"/>
 
   <rect x="58" y="382" width="400" height="110" class="box cyan"/>
-  <text x="258" y="418" text-anchor="middle" class="small muted">EXACT SEPARATE PROCESS</text>
-  <text x="258" y="452" text-anchor="middle" class="body">openbuild_search_separate</text>
-  <text x="258" y="478" text-anchor="middle" class="small" fill="#6ff8ff">Spark · low · read-only</text>
+  <text x="258" y="418" text-anchor="middle" class="small muted">MODEL MAP → EXACT PROCESS</text>
+  <text x="258" y="452" text-anchor="middle" class="body">configured search profile</text>
+  <text x="258" y="478" text-anchor="middle" class="small" fill="#6ff8ff">default: Spark · low · read-only</text>
   <path d="M258 492 V535" class="line"/>
 
   <rect x="58" y="535" width="400" height="88" class="box cyan"/>
@@ -70,7 +70,7 @@
   <text x="363" y="747" text-anchor="middle" class="body">recovery</text>
   <text x="363" y="775" text-anchor="middle" class="tiny muted">minimum lookup only</text>
   <path d="M253 736 H269" class="line"/>
-  <text x="258" y="846" text-anchor="middle" class="small" fill="#6ff8ff">Spark remains fixed for code discovery</text>
+  <text x="258" y="846" text-anchor="middle" class="small" fill="#6ff8ff">Configurable model · fixed read-only contract</text>
 
   <text x="551" y="260" class="small muted">STARTING ROUTE</text>
   <rect x="550" y="278" width="255" height="92" class="box blue"/>
@@ -95,7 +95,7 @@
   <path d="M805 449 H842" class="line"/>
 
   <rect x="842" y="535" width="207" height="105" class="box blue"/>
-  <text x="945" y="568" text-anchor="middle" class="small" fill="#8fc9ff">ONE TIER ONLY</text>
+  <text x="945" y="568" text-anchor="middle" class="small" fill="#8fc9ff">NEXT MAP STEP</text>
   <text x="945" y="595" text-anchor="middle" class="small">implementation_strong</text>
   <text x="945" y="621" text-anchor="middle" class="tiny muted">Sol · high</text>
   <path d="M945 502 V535" class="line"/>
@@ -134,7 +134,7 @@
   <path d="M1340 690 V727" class="line"/>
 
   <rect x="1140" y="727" width="400" height="105" class="box purple"/>
-  <text x="1340" y="761" text-anchor="middle" class="body">Next proven tier only</text>
+  <text x="1340" y="761" text-anchor="middle" class="body">Next configured step only</text>
   <text x="1340" y="790" text-anchor="middle" class="small" fill="#dda2ff">strong · Sol high</text>
   <text x="1340" y="817" text-anchor="middle" class="tiny muted">strongest only for final dispute</text>
   <text x="1340" y="868" text-anchor="middle" class="small" fill="#dda2ff">Clean balanced review may close high risk</text>

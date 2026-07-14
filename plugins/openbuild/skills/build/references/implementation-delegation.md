@@ -14,20 +14,20 @@ Do not use parallel write-heavy workers in one checkout. Discovery workers, spec
 
 Choose the minimum sufficient implementation depth:
 
-| Complexity | Default implementation mode |
+| Complexity | Packaged default implementation mode |
 |---|---|
 | `low` | exact `openbuild_implementation_fast` profile for Direct, documentation, cosmetic, or mechanical work without behavior changes |
 | `medium` | exact `openbuild_implementation_balanced` profile for contained logic or refactoring with clear contracts and supported tests |
 | `high` | exact `openbuild_implementation_balanced` starting profile; escalate to `openbuild_implementation_strong` only on a completed pre-edit capability result |
 | `critical` | exact `openbuild_implementation_strongest` profile with the deepest supported reasoning; never delegate destructive execution |
 
-Use a risk-matched coding model for every complexity class, as defined by [model routing](model-routing.md). Start low at fast, medium and high at balanced, and critical at strongest. Low may rise only to balanced; medium and high may rise only to strong; strongest is critical-only. Scale supported reasoning effort within the selected tier. Escalate only after the current worker returns a valid `NEEDS_ESCALATION` before any edit. Do not infer capability from a model name, and do not claim a route or delegation without runtime/configuration evidence.
+Use the effective user, project, or packaged model map for every complexity class, as defined by [model routing](model-routing.md). Resolve `implementation.<risk>` before the lease and start its first exact profile. The table above describes the packaged defaults, not a hard-coded override of a configured map. Escalate only after the current worker returns a valid configured `NEEDS_ESCALATION` trigger before any edit. Do not infer capability from a model name, and do not claim a route or delegation without runtime/configuration evidence.
 
 ## Exact writer dispatch
 
-Dispatch that exact profile before every test or production code edit, using the starting route: `low` → `openbuild_implementation_fast`, `medium` or `high` → `openbuild_implementation_balanced`, and `critical` → `openbuild_implementation_strongest`. First establish the lease record, then use `<build-skill-root>/scripts/agent_runner.py start --lease-id <lease-id>`. Record the returned unactivated running receipt, call `activate`, and keep the lease active for the whole process. Accept handoff only after the terminal receipt proves the exact model, effort, sandbox, process lifecycle, exit zero, valid result evidence, and a semantically completed task.
+Dispatch the first exact profile returned by `<build-skill-root>/scripts/model_map.py resolve --use-case implementation --risk <risk>` before every test or production code edit. Record the map source/hash and route step. First establish the lease record, then use `<build-skill-root>/scripts/agent_runner.py start --lease-id <lease-id>`. Record the returned unactivated running receipt, call `activate`, and keep the lease active for the whole process. Accept handoff only after the terminal receipt proves the exact model, effort, sandbox, process lifecycle, exit zero, valid result evidence, and a semantically completed task.
 
-The worker assesses capability before its first write. If the assigned tier is insufficient, it must make no test or production edit and return `NEEDS_ESCALATION` with one allowed reason: `task-complexity-above-tier`, `unresolved-cross-layer-reasoning`, `validation-strategy-uncertain`, or `capability-gap`. Only a completed `codex-exec-explicit-model` run with `turn.completed`, exit code zero, valid result evidence, a stopped process tree, concrete observed model evidence, and verified zero writes may authorize the root to release the lease and advance exactly one tier. Record the root-owned `implementation-escalation-approved` event before the next lease. Low may advance fast → balanced; medium and high may advance balanced → strong. Critical starts at strongest and does not escalate.
+The worker assesses capability before its first write. If the assigned profile is insufficient, it must make no test or production edit and return `NEEDS_ESCALATION` with a reason listed by the resolved route: `task-complexity-above-tier`, `unresolved-cross-layer-reasoning`, `validation-strategy-uncertain`, or `capability-gap`. Only a completed `codex-exec-explicit-model` run with `turn.completed`, exit code zero, valid result evidence, a stopped process tree, concrete observed model evidence, and verified zero writes may authorize the root to release the lease and advance exactly one configured route step without exceeding `max_steps`. Record the root-owned `implementation-escalation-approved` event before the next lease. A critical route is used only when its map records `critical_confirmed = true`.
 
 Infrastructure or transport failure—including CLI, authentication, quota, model availability, sandbox, spawn, runner, timeout, or unusable evidence—never authorizes escalation. Keep the milestone blocked, release only after the process tree is confirmed stopped, and create no replacement writer. Once any test or production edit occurs, capability escalation is forbidden for that milestone; the same writer owns the full red/green implementation and handoff.
 
@@ -35,6 +35,9 @@ Acquire the single-writer lease before dispatch, pass its ID to `start`, record 
 
 ```text
 Implementation routing receipt:
+routing_map_source: <project | user | packaged path>
+routing_map_sha256: <effective map hash>
+route_step: <1..max_steps>
 risk: <low|medium|high|critical>
 requested_agent: <exact openbuild_implementation_* profile>
 task_name: <independent descriptive task label>
@@ -90,7 +93,7 @@ codex_process_identity: <same creation identity>
 result_evidence: valid
 ```
 
-For every risk tier, a failed exact dispatch or a semantic result other than completed work or a valid pre-edit `NEEDS_ESCALATION` blocks further editing. Do not replace it with another agent, label, or root writer under the same milestone.
+For every risk tier, a failed exact dispatch or a semantic result other than completed work or a valid configured pre-edit `NEEDS_ESCALATION` blocks further editing. Do not replace transport failure with another agent, label, or root writer under the same milestone.
 
 ## Single-writer lease
 
@@ -147,7 +150,7 @@ The worker must not:
 
 Require the lease-bound pending request and initial routing receipt for `openbuild_implementation_fast`, `openbuild_implementation_balanced`, `openbuild_implementation_strong`, or `openbuild_implementation_strongest` before edits, then require its terminal receipt, semantic success, and run-bound accepted-handoff event before consuming output or releasing a completed milestone. Read-only search/discovery and `openbuild_review_*` profiles are never implementation workers.
 
-Every created implementation run requires concrete model, effort, and sandbox evidence. If the starting tier cannot be selected, or if it cannot complete the task and did not return a valid pre-edit `NEEDS_ESCALATION`, stop before further test and production code edits rather than lowering the risk floor or bypassing the ladder.
+Every created implementation run requires concrete model, effort, and sandbox evidence. If the starting route step cannot be selected, or if it cannot complete the task and did not return a valid configured pre-edit `NEEDS_ESCALATION`, stop before further test and production code edits rather than lowering the risk floor or bypassing the map.
 
 ## Root handoff gate
 
@@ -162,6 +165,6 @@ After the worker finishes or stops, release the lease and let the root:
 7. Run progressive review against the complete current diff.
 8. Commit only after validation and review pass; keep Git exclusively root-owned.
 
-Do not accept a worker result merely because it reports success. If it changed forbidden files, used stale assumptions, cannot prove the primary signal, or exposed a new product/architecture choice, keep the milestone incomplete and blocked. Do not repair an edited or failed milestone through the root or a replacement lease; the only new writer lease allowed by this protocol follows a completed, verified zero-write `NEEDS_ESCALATION` and exact one-tier root approval. Report any other blocker and request new authority when required.
+Do not accept a worker result merely because it reports success. If it changed forbidden files, used stale assumptions, cannot prove the primary signal, or exposed a new product/architecture choice, keep the milestone incomplete and blocked. Do not repair an edited or failed milestone through the root or a replacement lease; the only new writer lease allowed by this protocol follows a completed, verified zero-write configured `NEEDS_ESCALATION` and exact one-step root approval. Report any other blocker and request new authority when required.
 
 For `sequential-workers`, complete this gate before issuing the next lease. Record the actual mode, verified worker identity/role, allowed files, validation, and handoff in the milestone log.

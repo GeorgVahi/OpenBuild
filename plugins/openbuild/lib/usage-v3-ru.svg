@@ -31,9 +31,9 @@
   </defs>
 
   <rect width="1600" height="1000" fill="url(#bg)"/>
-  <text x="800" y="55" text-anchor="middle" class="title">OpenBuild 2.1.4 · сначала достаточная слабая модель</text>
+  <text x="800" y="55" text-anchor="middle" class="title">OpenBuild 2.1.5 · настраиваемая точная маршрутизация</text>
   <rect x="570" y="78" width="460" height="62" class="box yellow" fill="#1a1502"/>
-  <text x="800" y="117" text-anchor="middle" class="label" fill="#ffe34d">РИСК ЗАДАЧИ + RUNTIME-ДОКАЗАТЕЛЬСТВА</text>
+  <text x="800" y="117" text-anchor="middle" class="label" fill="#ffe34d">РИСК ЗАДАЧИ + КАРТА МОДЕЛЕЙ</text>
 
   <rect x="24" y="170" width="468" height="730" class="panel cyan"/>
   <rect x="516" y="170" width="568" height="730" class="panel blue"/>
@@ -49,9 +49,9 @@
   <path d="M258 340 V382" class="line"/>
 
   <rect x="58" y="382" width="400" height="110" class="box cyan"/>
-  <text x="258" y="418" text-anchor="middle" class="small muted">ТОЧНЫЙ ОТДЕЛЬНЫЙ ПРОЦЕСС</text>
-  <text x="258" y="452" text-anchor="middle" class="body">openbuild_search_separate</text>
-  <text x="258" y="478" text-anchor="middle" class="small" fill="#6ff8ff">Spark · low · read-only</text>
+  <text x="258" y="418" text-anchor="middle" class="small muted">КАРТА → ТОЧНЫЙ ПРОЦЕСС</text>
+  <text x="258" y="452" text-anchor="middle" class="body">профиль поиска из карты</text>
+  <text x="258" y="478" text-anchor="middle" class="small" fill="#6ff8ff">по умолчанию: Spark · low · read-only</text>
   <path d="M258 492 V535" class="line"/>
 
   <rect x="58" y="535" width="400" height="88" class="box cyan"/>
@@ -70,7 +70,7 @@
   <text x="363" y="747" text-anchor="middle" class="body">корневым агентом</text>
   <text x="363" y="775" text-anchor="middle" class="tiny muted">только минимум</text>
   <path d="M253 736 H269" class="line"/>
-  <text x="258" y="846" text-anchor="middle" class="small" fill="#6ff8ff">Для поиска по коду всегда фиксирован Spark</text>
+  <text x="258" y="846" text-anchor="middle" class="small" fill="#6ff8ff">Модель настраивается · read-only контракт фиксирован</text>
 
   <text x="551" y="260" class="small muted">СТАРТОВЫЙ МАРШРУТ</text>
   <rect x="550" y="278" width="255" height="92" class="box blue"/>
@@ -95,7 +95,7 @@
   <path d="M805 449 H842" class="line"/>
 
   <rect x="842" y="535" width="207" height="105" class="box blue"/>
-  <text x="945" y="568" text-anchor="middle" class="small" fill="#8fc9ff">ТОЛЬКО ОДИН ШАГ</text>
+  <text x="945" y="568" text-anchor="middle" class="small" fill="#8fc9ff">СЛЕДУЮЩИЙ ШАГ КАРТЫ</text>
   <text x="945" y="595" text-anchor="middle" class="small">implementation_strong</text>
   <text x="945" y="621" text-anchor="middle" class="tiny muted">Sol · high</text>
   <path d="M945 502 V535" class="line"/>
@@ -134,7 +134,7 @@
   <path d="M1340 690 V727" class="line"/>
 
   <rect x="1140" y="727" width="400" height="105" class="box purple"/>
-  <text x="1340" y="761" text-anchor="middle" class="small">Только следующий доказанный уровень</text>
+  <text x="1340" y="761" text-anchor="middle" class="small">Только следующий шаг из карты</text>
   <text x="1340" y="790" text-anchor="middle" class="small" fill="#dda2ff">strong · Sol high</text>
   <text x="1340" y="817" text-anchor="middle" class="tiny muted">strongest — только финальный спор</text>
   <text x="1340" y="868" text-anchor="middle" class="small" fill="#dda2ff">Чистый balanced-review закрывает high</text>

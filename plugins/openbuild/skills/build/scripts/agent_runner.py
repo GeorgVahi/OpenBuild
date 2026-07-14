@@ -29,6 +29,9 @@ import tomllib
 
 SUPPORTED_AGENTS = {
     "openbuild_search_separate",
+    "openbuild_search_balanced",
+    "openbuild_search_strong",
+    "openbuild_search_strongest",
     "openbuild_implementation_fast",
     "openbuild_implementation_balanced",
     "openbuild_implementation_strong",
@@ -49,6 +52,16 @@ PROVIDER_ENVIRONMENT_OVERRIDES = {
 TERMINAL_EVENTS = {"turn.completed", "turn.failed"}
 SCHEMA_VERSION = 1
 PACKAGED_PROFILE_DIR = Path(__file__).resolve().parents[1] / "profiles"
+SEARCH_DEVELOPER_INSTRUCTIONS = (
+    "You are the already-delegated read-only Explorer. Do not spawn or delegate to another agent.\n\n"
+    "When code discovery, broad rg, route or symbol lookup, owner mapping, or cross-file evidence gathering is needed:\n"
+    "- perform repository search, rg, rg --files, Get-Content, and local file reading yourself;\n"
+    "- do not edit files, write configuration, make product or architecture decisions, commit, push, or answer the user;\n"
+    "- return only a compact evidence map with path:line, symbol or route, a short snippet/signature, and why it matters;\n"
+    "- include relevant negative results, confidence, and the search stop condition;\n"
+    "- keep raw logs and large file dumps out of the result.\n\n"
+    "The main process will do targeted reads only after your result, for verification before edits."
+)
 ACTIVE_WORKER_CHILD: Any | None = None
 ACTIVE_WINDOWS_JOB: Any | None = None
 ACTIVE_WORKER_FINALIZING = False
@@ -397,13 +410,19 @@ def _profile_from_data(data: Mapping[str, Any], path: Path, agent_name: str) -> 
             f"{path}: {name} requires sandbox_mode={required_sandbox!r}, got {sandbox!r}"
         )
 
+    developer_instructions = _required_string(data, "developer_instructions", path)
+    if name.startswith("openbuild_search_") and developer_instructions != SEARCH_DEVELOPER_INSTRUCTIONS:
+        raise RunnerError(
+            f"{path}: search profiles must preserve the exact canonical Explorer contract"
+        )
+
     return AgentProfile(
         name=name,
         description=_required_string(data, "description", path),
         model=model,
         reasoning_effort=reasoning_effort,
         sandbox=sandbox,
-        developer_instructions=_required_string(data, "developer_instructions", path),
+        developer_instructions=developer_instructions,
         source=path.resolve(),
     )
 
@@ -424,18 +443,10 @@ def _matching_profiles(directory: Path, agent_name: str) -> list[tuple[Path, Map
 
 
 def load_agent_profile(agent_name: str, *, repo: Path, codex_home: Path) -> AgentProfile:
-    """Resolve immutable Spark or an exact project, user, then packaged role profile."""
+    """Resolve an exact project, user, then packaged role profile."""
 
     if agent_name not in SUPPORTED_AGENTS:
         raise RunnerError(f"unsupported OpenBuild agent: {agent_name}")
-    if agent_name == "openbuild_search_separate":
-        packaged = _matching_profiles(PACKAGED_PROFILE_DIR, agent_name)
-        if len(packaged) != 1:
-            raise RunnerError(
-                "packaged openbuild_search_separate profile is missing or ambiguous; reinstall OpenBuild"
-            )
-        path, data = packaged[0]
-        return _profile_from_data(data, path, agent_name)
     scopes = [
         repo.resolve() / ".codex" / "agents",
         codex_home.resolve() / "agents",

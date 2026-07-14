@@ -6,8 +6,8 @@ Use this protocol before any repository search in every Build mode. The root age
 
 1. Treat `rg`, `rg --files`, file or symbol lookup, repository-wide or targeted grep, dependency/route tracing, test/config/schema discovery, similar-pattern search, log scanning, and cross-file flow mapping as search operations covered by this rule.
 2. Write a compact search plan with the objective, likely regions, independent branches, minimum evidence, and a stop condition.
-3. Dispatch `openbuild_search_separate` through `<build-skill-root>/scripts/agent_runner.py` as `codex-exec-explicit-model` before the root runs any new repository search command. Call `start`, durably record its unactivated running receipt, and only then call `activate`; require the terminal receipt, `turn.completed`, exit code zero, valid result evidence, and a semantically completed search before using the evidence. If this exact route fails, create no replacement agent: record the normalized reason and use only the minimum targeted root search needed to unblock the task.
-4. Put independent search branches into the single exact worker's prompt when scope justifies them; do not create another discovery agent.
+3. Resolve `discovery.default` through `<build-skill-root>/scripts/model_map.py` before the root runs any new repository search command. Dispatch its first returned exact profile through `agent_runner.py` as `codex-exec-explicit-model`. Call `start`, durably record its unactivated running receipt, and only then call `activate`; require the terminal receipt, `turn.completed`, exit code zero, valid result evidence, and a semantically completed search before using the evidence.
+4. Put independent search branches into the current exact worker's prompt when scope justifies them. Advance exactly one configured route step only when a completed search reports a listed evidence trigger and the route has another step. If transport or exact selection fails, create no replacement agent: record the normalized reason and use only the minimum targeted root search needed to unblock the task.
 5. Aggregate and deduplicate results, surface contradictions and negative results, then decide whether more discovery is useful.
 6. Let the root agent reread already-known critical files and lines before decisions or edits. If verification requires a new grep or lookup, send that search through the same usage-pool order.
 
@@ -52,7 +52,7 @@ Keep raw logs, large file dumps, and repetitive matches out of the root context.
 
 - Never infer suitability, price, speed, or strength from a model name.
 - Report a concrete model only when the runtime or confirmed profile exposes it.
-- The immutable packaged `openbuild_search_separate` exact-runner route is mandatory for created discovery agents. If it fails, create no other discovery agent and use only documented targeted root recovery.
+- The exact route resolved from the effective project, user, or packaged model map is mandatory for created discovery agents. The packaged default is `openbuild_search_separate` on Spark/low. If transport or exact selection fails, create no other discovery agent and use only documented targeted root recovery.
 - Do not scrape the user's private usage page or guess remaining quota. Treat runtime quota/unavailability errors or explicit user evidence as authoritative for the current-run circuit breaker.
 - A different role, prompt, or thread is not proof of a different model or reduced token cost.
 
@@ -61,7 +61,10 @@ Keep raw logs, large file dumps, and repetitive matches out of the root context.
 Emit two lifecycle receipts for the exact worker. Before its first repository search, record the unactivated `run_status: running` receipt, then record a matching `search-agent-activated` event and activate it. After a successful search, record the terminal receipt with unchanged run/process identities and a stopped process tree; only then emit exactly one root-owned, run-bound `search-evidence-consumed` and use its evidence. A failed run never emits `search-evidence-consumed`; its terminal failed receipt precedes targeted root recovery. If the worker times out, use `cancel` and record `agent-cancellation-confirmed` with both processes stopped. Unusable or semantically failed evidence requires a completed result and cannot be consumed.
 
 ```text
-search_agent: openbuild_search_separate
+search_agent: <exact current profile returned by the model map>
+map_source: <project | user | packaged path>
+map_sha256: <effective map hash>
+route_step: <1..max_steps>
 task_name: <independent descriptive task label>
 dispatch_method: codex-exec-explicit-model | unavailable
 configured_model: <profile/runtime value or unknown>
@@ -93,7 +96,7 @@ Bind evidence use to that terminal run:
 ```text
 event: search-evidence-consumed
 actor: root
-search_agent: openbuild_search_separate
+search_agent: <same exact current profile>
 run_dir: <same terminal run directory>
 ```
 

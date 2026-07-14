@@ -124,7 +124,7 @@ class AgentProfileResolutionTests(unittest.TestCase):
                 with self.subTest(token=token):
                     self.assertIn(token, profile.developer_instructions)
 
-    def test_project_or_user_profile_cannot_override_packaged_spark_profile(self) -> None:
+    def test_project_search_profile_can_override_model_but_not_search_contract(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             repo = root / "repo"
@@ -136,6 +136,7 @@ class AgentProfileResolutionTests(unittest.TestCase):
                 name="openbuild_search_separate",
                 model="confirmed-user-search-model",
                 model_reasoning_effort="minimal",
+                developer_instructions=agent_runner.SEARCH_DEVELOPER_INSTRUCTIONS,
             )
             self.write_profile(
                 repo / ".codex",
@@ -143,6 +144,7 @@ class AgentProfileResolutionTests(unittest.TestCase):
                 name="openbuild_search_separate",
                 model="untrusted-project-search-model",
                 model_reasoning_effort="high",
+                developer_instructions=agent_runner.SEARCH_DEVELOPER_INSTRUCTIONS,
             )
 
             profile = agent_runner.load_agent_profile(
@@ -151,9 +153,30 @@ class AgentProfileResolutionTests(unittest.TestCase):
                 codex_home=user_home,
             )
 
-            self.assertEqual(profile.model, "gpt-5.3-codex-spark")
-            self.assertEqual(profile.reasoning_effort, "low")
-            self.assertEqual(profile.source.parent, agent_runner.PACKAGED_PROFILE_DIR.resolve())
+            self.assertEqual(profile.model, "untrusted-project-search-model")
+            self.assertEqual(profile.reasoning_effort, "high")
+            self.assertEqual(profile.source, repo / ".codex" / "agents" / "search.toml")
+
+    def test_search_profile_cannot_weaken_the_canonical_discovery_instructions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            repo.mkdir()
+            user_home = root / "codex-home"
+            self.write_profile(
+                user_home,
+                "search.toml",
+                name="openbuild_search_separate",
+                model="user-search-model",
+                developer_instructions="Search and edit whatever seems useful.",
+            )
+
+            with self.assertRaisesRegex(agent_runner.RunnerError, "canonical Explorer contract"):
+                agent_runner.load_agent_profile(
+                    "openbuild_search_separate",
+                    repo=repo,
+                    codex_home=user_home,
+                )
 
     def test_every_supported_role_has_a_zero_setup_packaged_default(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -162,6 +185,9 @@ class AgentProfileResolutionTests(unittest.TestCase):
             repo.mkdir()
             expected = {
                 "openbuild_search_separate": ("gpt-5.3-codex-spark", "low", "read-only"),
+                "openbuild_search_balanced": ("gpt-5.6-terra", "medium", "read-only"),
+                "openbuild_search_strong": ("gpt-5.6-sol", "high", "read-only"),
+                "openbuild_search_strongest": ("gpt-5.6-sol", "xhigh", "read-only"),
                 "openbuild_implementation_fast": ("gpt-5.6-terra", "low", "workspace-write"),
                 "openbuild_implementation_balanced": ("gpt-5.6-terra", "medium", "workspace-write"),
                 "openbuild_implementation_strong": ("gpt-5.6-sol", "high", "workspace-write"),

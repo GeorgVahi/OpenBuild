@@ -19,9 +19,15 @@ BLINDSPOT_PROTOCOL = SKILL / "references" / "blindspot-protocol.md"
 IMPLEMENTATION_DELEGATION = SKILL / "references" / "implementation-delegation.md"
 REVIEW_PROTOCOL = SKILL / "references" / "review-protocol.md"
 AGENT_RUNNER = SKILL / "scripts" / "agent_runner.py"
+MODEL_MAP_RESOLVER = SKILL / "scripts" / "model_map.py"
+PACKAGED_MODEL_MAP = SKILL / "profiles" / "openbuild_model_map.toml"
+MODEL_MAP_INTERVIEW = SKILL / "references" / "model-map-interview.md"
 PACKAGED_SEARCH_MODEL = "gpt-5.3-codex-spark"
 PACKAGED_AGENT_DEFAULTS = {
     "openbuild_search_separate": (PACKAGED_SEARCH_MODEL, "low", "read-only"),
+    "openbuild_search_balanced": ("gpt-5.6-terra", "medium", "read-only"),
+    "openbuild_search_strong": ("gpt-5.6-sol", "high", "read-only"),
+    "openbuild_search_strongest": ("gpt-5.6-sol", "xhigh", "read-only"),
     "openbuild_implementation_fast": ("gpt-5.6-terra", "low", "workspace-write"),
     "openbuild_implementation_balanced": ("gpt-5.6-terra", "medium", "workspace-write"),
     "openbuild_implementation_strong": ("gpt-5.6-sol", "high", "workspace-write"),
@@ -64,13 +70,17 @@ REQUIRED = [
     IMPLEMENTATION_DELEGATION,
     SKILL / "references" / "minimality-protocol.md",
     SKILL / "references" / "model-routing.md",
+    MODEL_MAP_INTERVIEW,
     REVIEW_PROTOCOL,
     AGENT_RUNNER,
+    MODEL_MAP_RESOLVER,
+    PACKAGED_MODEL_MAP,
     *PACKAGED_AGENT_PROFILES.values(),
     SKILL / "references" / "tdd-workflow.md",
     SKILL / "references" / "versioning.md",
     ROOT / "scripts" / "test_validate_package.py",
     ROOT / "scripts" / "test_agent_runner.py",
+    ROOT / "scripts" / "test_model_map.py",
 ]
 
 TEXT_SUFFIXES = {".md", ".json", ".yaml", ".yml", ".toml", ".py"}
@@ -342,6 +352,10 @@ def validate_packaged_agent_profile(
             errors.append(f"{agent_name}.toml: {field} must be non-empty")
     if agent_name == SEARCH_AGENT:
         errors.extend(validate_packaged_search_profile(profile))
+    elif agent_name.startswith("openbuild_search_") and profile.get("developer_instructions") != PACKAGED_SEARCH_INSTRUCTIONS:
+        errors.append(
+            f"{agent_name}.toml: developer_instructions must match the exact canonical Explorer contract"
+        )
     return errors
 
 
@@ -2794,8 +2808,11 @@ def validate_blindspot_contract(
         "two complementary",
         "separate closure pass for high",
         "three complementary",
-        "Missing model/tier metadata alone",
-        "missing required perspective coverage",
+        "effective model map",
+        "critic.<risk>",
+        "configured evidence trigger",
+        "Transport failure does not authorize another critic model",
+        "do not satisfy a required independent closure",
         "self-review, limited",
     ]:
         if token not in critic_loop:
@@ -2909,7 +2926,7 @@ def validate_implementation_delegation_contract(
     if "bounded implementation worker" not in tdd_workflow:
         errors.append("tdd-workflow.md: missing bounded implementation worker contract")
     tdd_steps = markdown_section(tdd_workflow, "## Red → green → refactor")
-    route_position = tdd_steps.find("Select the risk-matched root or bounded implementation worker")
+    route_position = tdd_steps.find("Resolve `implementation.<risk>` through the effective model map")
     edit_position = tdd_steps.find("Under that lease, add or modify the test")
     if route_position < 0 or edit_position < 0 or route_position >= edit_position:
         errors.append("tdd-workflow.md: risk-matched writer route and lease must precede every test code edit")
@@ -2981,11 +2998,15 @@ def validate_usage_routing_contract(
 
     explicit_discovery = markdown_section(skill_text, "## Explicit Code Discovery Delegation")
     for token in [
-        "only through `scripts/agent_runner.py`",
-        "immutable packaged `openbuild_search_separate` profile",
+        "only through `scripts/model_map.py` followed by `scripts/agent_runner.py`",
+        "packaged default is `openbuild_search_separate`",
         "pinned to `gpt-5.3-codex-spark`, low reasoning, and read-only sandbox",
+        "explicitly confirmed project or user map",
+        "canonical Explorer instructions and read-only sandbox remain fixed",
         "compact evidence map with `path:line`, symbol/route, snippet/signature, and why it matters",
         "Do not call a native Explorer or any other agent API",
+        "completed semantic search",
+        "listed evidence trigger",
         "create no replacement agent",
         "minimum targeted root search",
     ]:
@@ -2996,14 +3017,21 @@ def validate_usage_routing_contract(
     for token in [
         "Before locating a specification",
         "exact-runner circuit-breaker state",
-        "start the custom agent named `openbuild_search_separate`",
+        "scripts/model_map.py resolve --use-case discovery --risk default",
+        "map_source",
+        "map_sha256",
+        "first returned profile",
         "scripts/agent_runner.py",
         "codex exec -m <model> -c model_reasoning_effort=<effort>",
         "before the root runs `rg`",
-        "create no replacement agent",
+        "transport failure permits only the disclosed targeted root route",
     ]:
         if token not in search_preflight:
-            category = "exact agent dispatch" if "agent" in token or "exact dispatch" in token else "search preflight"
+            category = (
+                "exact agent dispatch"
+                if "agent" in token or "model_map.py" in token or "first returned" in token
+                else "search preflight"
+            )
             errors.append(f"SKILL.md {category}: missing {token}")
     preflight_position = skill_text.find("## Initialize search routing")
     selection_position = skill_text.find("## Select the specification safely")
@@ -3014,7 +3042,9 @@ def validate_usage_routing_contract(
     skill_discovery = markdown_section(skill_text, "## Discover repository evidence")
     for token in [
         "before any repository grep",
-        "dispatch the exact packaged search agent first",
+        "resolve the effective discovery map",
+        "dispatch its first exact agent",
+        "configured evidence trigger",
         "create no replacement agent",
         "minimum targeted root search",
     ]:
@@ -3022,24 +3052,32 @@ def validate_usage_routing_contract(
             errors.append(f"SKILL.md usage routing: missing {token}")
     skill_implementation = markdown_section(skill_text, "## Implement milestones")
     for token in [
-        "risk-matched writer tier",
-        "Escalate only on task evidence",
-        "`NEEDS_ESCALATION` before any edit",
-        "preserve the same TDD/minimality/validation gates",
+        "model_map.py resolve --use-case implementation",
+        "first returned exact profile",
+        "single-writer lease",
+        "configured trigger before any edit",
+        "next configured route step",
+        "preserve the same TDD/minimality/validation gates at every route step",
     ]:
         if token not in skill_implementation:
             errors.append(f"SKILL.md risk-matched writer routing: missing {token}")
 
     search_order = markdown_section(model_routing, "## Search usage-pool order")
     for token in [
-        "**Exact Spark route:**",
+        "**Configured exact route:**",
+        "model_map.py",
         "openbuild_search_separate",
+        "gpt-5.3-codex-spark",
+        "canonical Explorer instructions and read-only sandbox",
+        "**Semantic escalation:**",
+        "configured evidence gap",
+        "max_steps",
         "**Root recovery:**",
         "open a circuit breaker",
-        "without retrying the same failed route for every grep",
+        "without retrying another model for every grep",
         "Do not scrape or infer remaining quota",
         "Do not silently skip it",
-        "Do not create another search agent",
+        "Do not create another search agent for transport recovery",
         "profile-not-discoverable",
         "model-unavailable",
         "quota-exhausted",
@@ -3054,7 +3092,8 @@ def validate_usage_routing_contract(
         "unactivated `running` routing receipt",
         "only then consume the evidence",
         "exit code of zero",
-        "same-named project/user profiles cannot override it",
+        "Project/user overrides may change exact model and effort",
+        "search overrides keep the canonical instructions immutable",
     ]:
         if token not in search_order:
             if token in SEARCH_DISPATCH_FAILURES:
@@ -3064,14 +3103,16 @@ def validate_usage_routing_contract(
             else:
                 category = "search usage-pool order"
             errors.append(f"model-routing.md {category}: missing {token}")
-    ordered_search_tokens = ["**Exact Spark route:**", "**Root recovery:**"]
+    ordered_search_tokens = ["**Configured exact route:**", "**Semantic escalation:**", "**Root recovery:**"]
     search_positions = [search_order.find(token) for token in ordered_search_tokens]
     if any(position < 0 for position in search_positions) or search_positions != sorted(search_positions):
-        errors.append("model-routing.md search order: exact Spark must precede root recovery")
+        errors.append("model-routing.md search order: configured route and semantic escalation must precede root recovery")
 
     implementation_route = markdown_section(model_routing, "## Implementation worker routing")
     for token in [
-        "minimum sufficient proven coding tier",
+        "resolve `implementation.<risk>` through `model_map.py`",
+        "first returned exact profile",
+        "packaged map uses",
         "openbuild_implementation_fast",
         "openbuild_implementation_balanced",
         "openbuild_implementation_strong",
@@ -3079,7 +3120,9 @@ def validate_usage_routing_contract(
         "Escalate only on evidence",
         "`NEEDS_ESCALATION`",
         "Before any edit",
-        "exactly one tier",
+        "trigger listed by the resolved route",
+        "exactly one configured route step",
+        "max_steps",
         "Infrastructure or transport failure",
         "Every created implementation agent must have concrete model, effort, and sandbox evidence",
         "stop before further test or production edits",
@@ -3102,13 +3145,13 @@ def validate_usage_routing_contract(
 
     review_route = markdown_section(model_routing, "### Exact sequential reviewer dispatch")
     for token in [
-        "Dispatch the exact starting reviewer",
-        "openbuild_review_fast",
-        "openbuild_review_balanced",
-        "openbuild_review_strong",
-        "openbuild_review_strongest",
-        "fast → balanced → strong → strongest",
-        "Move exactly one proven tier higher",
+        "Resolve the exact starting reviewer through `model_map.py`",
+        "critic or progressive-review ladder",
+        "first returned profile",
+        "returned order",
+        "configured trigger",
+        "max_steps",
+        "Move exactly one route step",
         "Review routing receipt",
         "unactivated `running` Review routing receipt",
         "review-agent-activated",
@@ -3122,17 +3165,22 @@ def validate_usage_routing_contract(
         "Reviewers remain read-only",
     ]:
         if token not in review_route:
-            if token.startswith("Dispatch the exact"):
+            if token.startswith("Resolve the exact"):
                 category = "exact reviewer dispatch"
-            elif token == "fast → balanced → strong → strongest":
+            elif token == "returned order":
                 category = "sequential review ladder"
             else:
                 category = "review routing"
             errors.append(f"model-routing.md {category}: missing {token}")
 
-    setup = markdown_section(model_routing, "## `$build setup-models`")
+    setup = markdown_section(model_routing, "## `$build configure-models`")
     for token in [
+        "backward-compatible alias",
+        "model-map interview",
         "openbuild_search_separate",
+        "openbuild_search_balanced",
+        "openbuild_search_strong",
+        "openbuild_search_strongest",
         "openbuild_implementation_fast",
         "openbuild_implementation_balanced",
         "openbuild_implementation_strong",
@@ -3145,7 +3193,7 @@ def validate_usage_routing_contract(
         "workspace-write",
     ]:
         if token not in setup:
-            errors.append(f"model-routing.md setup-models: missing {token}")
+            errors.append(f"model-routing.md configure-models: missing {token}")
 
     migration = markdown_section(model_routing, "### Guided legacy-profile migration")
     for token in [
@@ -3168,11 +3216,14 @@ def validate_usage_routing_contract(
     mandatory_search = markdown_section(code_discovery, "## Mandatory routing rule")
     for token in [
         "`rg --files`",
-        "openbuild_search_separate",
+        "discovery.default",
+        "scripts/model_map.py",
         "new grep or lookup",
         "circuit breaker",
         "do not pay for repeated failed attempts",
         "before the root runs any new repository search command",
+        "Advance exactly one configured route step",
+        "listed evidence trigger",
         "create no replacement agent",
         "agent_runner.py",
         "codex-exec-explicit-model",
@@ -3184,7 +3235,9 @@ def validate_usage_routing_contract(
 
     model_claims = markdown_section(code_discovery, "## Model and savings claims")
     for token in [
-        "immutable packaged `openbuild_search_separate` exact-runner route is mandatory",
+        "effective project, user, or packaged model map is mandatory",
+        "packaged default is `openbuild_search_separate` on Spark/low",
+        "transport or exact selection fails",
         "create no other discovery agent",
         "targeted root recovery",
     ]:
@@ -3195,7 +3248,10 @@ def validate_usage_routing_contract(
 
     routing_receipt = markdown_section(code_discovery, "## Search routing receipt")
     for token in [
-        "search_agent: openbuild_search_separate",
+        "search_agent: <exact current profile returned by the model map>",
+        "map_source:",
+        "map_sha256:",
+        "route_step:",
         "task_name:",
         "dispatch_method:",
         "configured_model:",
@@ -3216,7 +3272,9 @@ def validate_usage_routing_contract(
             errors.append(f"code-discovery.md routing receipt: missing {token}")
 
     for token in [
-        "risk-matched coding model for every complexity class",
+        "effective user, project, or packaged model map for every complexity class",
+        "Resolve `implementation.<risk>` before the lease",
+        "packaged defaults",
         "openbuild_implementation_fast",
         "openbuild_implementation_balanced",
         "openbuild_implementation_strong",
@@ -3225,16 +3283,19 @@ def validate_usage_routing_contract(
         "Every created implementation run requires concrete model, effort, and sandbox evidence",
         "`high` | exact `openbuild_implementation_balanced` starting profile",
         "`critical` | exact `openbuild_implementation_strongest` profile",
-        "`NEEDS_ESCALATION` before any edit",
+        "configured `NEEDS_ESCALATION` trigger before any edit",
         "stop before further test and production code edits",
-        "Dispatch that exact profile before every test or production code edit",
+        "Dispatch the first exact profile returned by `<build-skill-root>/scripts/model_map.py resolve --use-case implementation --risk <risk>` before every test or production code edit",
         "Implementation routing receipt",
+        "routing_map_source:",
+        "routing_map_sha256:",
+        "route_step:",
         "codex_exit_evidence:",
         "implementation-handoff-accepted",
         "Every terminal explicit-model receipt",
     ]:
         if token not in implementation:
-            if token.startswith("Dispatch that exact"):
+            if token.startswith("Dispatch the first exact"):
                 category = "exact writer dispatch"
             elif token == "Implementation routing receipt":
                 category = "implementation routing receipt"
@@ -3244,12 +3305,16 @@ def validate_usage_routing_contract(
 
     review_dispatch = markdown_section(review_protocol, "## Exact dispatch and routing receipt")
     for token in [
-        "low` → `openbuild_review_fast",
-        "medium` → `openbuild_review_balanced",
-        "high` → `openbuild_review_balanced",
-        "critical` → `openbuild_review_strongest",
-        "fast → balanced → strong → strongest",
+        "Resolve `review.<risk>` through `<build-skill-root>/scripts/model_map.py`",
+        "first exact returned reviewer",
+        "map source/hash and route step",
+        "resolved route strictly sequentially",
+        "max_steps",
+        "packaged defaults start fast for low, balanced for medium/high, and strongest for critical",
         "Review routing receipt",
+        "routing_map_source:",
+        "routing_map_sha256:",
+        "route_step:",
         "review-agent-activated",
         "run_status:",
         "process_tree_stopped:",
@@ -3708,7 +3773,7 @@ def main() -> int:
         "attempt budget",
         "version impact",
         "separate-usage",
-        "risk-matched writer tier",
+        "model_map.py resolve --use-case implementation",
     ]
     for token in required_skill_tokens:
         if token not in skill_text:
@@ -3772,19 +3837,24 @@ def main() -> int:
     ]:
         if token not in runner_text:
             fail(errors, f"agent_runner.py: missing explicit-model contract {token}")
-    fixed_search_resolution = runner_text.find('if agent_name == "openbuild_search_separate":')
-    custom_scope_resolution = runner_text.find("scopes = [", fixed_search_resolution)
+    custom_scope_resolution = runner_text.find("scopes = [")
+    project_scope_resolution = runner_text.find('repo.resolve() / ".codex" / "agents"', custom_scope_resolution)
+    user_scope_resolution = runner_text.find('codex_home.resolve() / "agents"', custom_scope_resolution)
     packaged_default_resolution = runner_text.find("PACKAGED_PROFILE_DIR,", custom_scope_resolution)
+    search_contract_resolution = runner_text.find(
+        'name.startswith("openbuild_search_") and developer_instructions != SEARCH_DEVELOPER_INSTRUCTIONS'
+    )
     if (
-        fixed_search_resolution < 0
-        or custom_scope_resolution < 0
+        custom_scope_resolution < 0
+        or project_scope_resolution < 0
+        or user_scope_resolution < 0
         or packaged_default_resolution < 0
-        or fixed_search_resolution > custom_scope_resolution
-        or packaged_default_resolution < custom_scope_resolution
+        or not (custom_scope_resolution < project_scope_resolution < user_scope_resolution < packaged_default_resolution)
+        or search_contract_resolution < 0
     ):
         fail(
             errors,
-            "agent_runner.py: packaged Spark profile must resolve before every project/user custom scope",
+            "agent_runner.py: every profile must resolve project then user then packaged while search keeps its canonical contract",
         )
     windows_job_position = runner_text.find("ACTIVE_WINDOWS_JOB = create_windows_kill_job()")
     worker_auth_position = runner_text.find(
@@ -3801,6 +3871,52 @@ def main() -> int:
             fail(errors, f"{profile_path.name}: invalid TOML ({exc})")
             packaged_profile = {}
         errors.extend(validate_packaged_agent_profile(agent_name, packaged_profile))
+
+    resolver_text = read_text(MODEL_MAP_RESOLVER, errors)
+    for token in [
+        "project",
+        "user",
+        "packaged",
+        "critical_confirmed",
+        "semantic-before-edit",
+        "transport_failure",
+        "load_agent_profile",
+        "map_sha256",
+    ]:
+        if token not in resolver_text:
+            fail(errors, f"model_map.py: missing model-map contract {token}")
+    try:
+        map_validation = subprocess.run(
+            [sys.executable, str(MODEL_MAP_RESOLVER), "validate", "--path", str(PACKAGED_MODEL_MAP)],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        fail(errors, f"openbuild_model_map.toml: validator could not run ({exc})")
+    else:
+        if map_validation.returncode != 0:
+            detail = (map_validation.stderr or map_validation.stdout).strip()
+            fail(errors, f"openbuild_model_map.toml: validation failed ({detail})")
+
+    interview_text = read_text(MODEL_MAP_INTERVIEW, errors)
+    for token in [
+        "one to three questions",
+        "recommended option first",
+        "Discovery",
+        "Specification critics",
+        "Implementation",
+        "Review",
+        "Critical work",
+        "final preview",
+        "exact diff",
+        "explicit permission",
+        "model_map.py validate",
+    ]:
+        if token.lower() not in interview_text.lower():
+            fail(errors, f"model-map-interview.md: missing guided interview contract {token}")
 
     readme = read_text(ROOT / "README.md", errors)
     readme_ru = read_text(ROOT / "README.ru.md", errors)

@@ -23,12 +23,15 @@ Use a fresh context with conversation-history inheritance disabled when the runt
 
 ## Exact dispatch and routing receipt
 
-Select the exact starting reviewer from task risk: `low` → `openbuild_review_fast`, `medium` → `openbuild_review_balanced`, `high` → `openbuild_review_balanced`, and `critical` → `openbuild_review_strongest`. Start it through `<build-skill-root>/scripts/agent_runner.py`; `codex-exec-explicit-model` pins the resolved model, reasoning effort, and read-only sandbox in a separate process. Record the unactivated `running` receipt, call `activate`, record `review-agent-activated`, and wait for the stopped terminal receipt. Accept a review only after that receipt records `turn.completed`, creation-bound exit code zero, valid result evidence, and a semantically completed review. Failure blocks the exact review/release gate; create no replacement reviewer.
+Resolve `review.<risk>` through `<build-skill-root>/scripts/model_map.py` and select its first exact returned reviewer. Start it through `<build-skill-root>/scripts/agent_runner.py`; `codex-exec-explicit-model` pins the resolved model, reasoning effort, and read-only sandbox in a separate process. Record the map source/hash and route step, the unactivated `running` receipt, call `activate`, record `review-agent-activated`, and wait for the stopped terminal receipt. Accept a review only after that receipt records `turn.completed`, creation-bound exit code zero, valid result evidence, and a semantically completed review. Transport failure blocks the exact review/release gate; create no replacement reviewer.
 
-Run a strictly sequential ladder, starting at the floor and moving at most one step at a time: `fast → balanced → strong → strongest`. After every dispatch, record this complete lifecycle before using the result:
+Run the resolved route strictly sequentially, moving at most one configured step at a time and stopping at `max_steps`. The packaged defaults start fast for low, balanced for medium/high, and strongest for critical. After every dispatch, record this complete lifecycle before using the result:
 
 ```text
 Review routing receipt (first `running`, then terminal):
+routing_map_source: <project | user | packaged path>
+routing_map_sha256: <effective map hash>
+route_step: <1..max_steps>
 diff_revision: <commit/status/hash identity>
 risk_floor: <fast|balanced|strong|strongest>
 requested_agent: <exact openbuild_review_* profile>
@@ -136,7 +139,7 @@ Reviewers do not edit tests or implementation, run write-capable remediation, co
 
 ## Escalation triggers
 
-After adjudication and remediation, move one proven tier higher when any trigger remains:
+After adjudication and remediation, move one configured route step when a trigger allowed by the resolved map remains:
 
 - score is below `9.5` and is tied to a concrete finding, uncertainty, or coverage gap;
 - confidence is low;
@@ -149,16 +152,16 @@ After adjudication and remediation, move one proven tier higher when any trigger
 
 Escalation means a stronger confirmed model/profile or supported reasoning effort. Changing only the prompt, role label, or thread is not a model escalation; report it accurately.
 
-Dispatch the next exact reviewer only after the current reviewer returns its structured result, the root adjudicates every finding, confirmed changes are remediated through the owning TDD/minimality workflow, and affected validation is green. If no trigger remains, stop; do not spend a stronger tier merely to seek a higher score. If a trigger remains, advance exactly one available proven step and give the next reviewer source artifacts rather than the previous conclusion.
+Dispatch the next exact reviewer only after the current reviewer returns its structured result, the root adjudicates every finding, confirmed changes are remediated through the owning TDD/minimality workflow, and affected validation is green. If no configured trigger remains, stop; do not spend another route step merely to seek a higher score. If a trigger remains, advance exactly one available configured step and give the next reviewer source artifacts rather than the previous conclusion.
 
 ## Loop bounds
 
 - Run at most one review per unchanged diff and effective tier.
 - Run only one reviewer at a time; do not fan out the progressive ladder.
-- Follow `fast → balanced → strong → strongest` from the risk floor without skipping a proven intermediate tier.
+- Follow the resolved ordered route without skipping a configured intermediate step.
 - Fix confirmed issues before moving up unless the stronger tier is needed to resolve a conflict.
 - Never downgrade below the task's complexity floor.
-- Stop escalating when distinct proven tiers are exhausted.
+- Stop escalating when `max_steps` or the distinct configured profiles are exhausted.
 - If exact review is unavailable, a root self-review may diagnose gaps but cannot satisfy the review or release gate without a new explicit user override.
 - If the strongest available review still returns blocking issues, keep the milestone or task incomplete and record the blocker.
 
@@ -177,4 +180,4 @@ Accept a milestone only when all are true:
 - reviewer confidence and tier satisfy the complexity floor;
 - the current diff, not a stale earlier diff, was reviewed.
 
-For `high` work, an evidence-backed balanced `ACCEPT` may close the gate when coverage is complete, validation is green, confidence is sufficient, and no actionable trigger remains. Move to strong only after a concrete trigger; use strongest only after strong for a final unresolved material dispute. `critical` work starts and finishes at strongest. If exact tier selection fails, keep the gate incomplete and report the terminal reason.
+For every risk, an evidence-backed `ACCEPT` at the current configured step may close the gate when coverage is complete, validation is green, confidence is sufficient, and no configured trigger remains. Critical work uses only a map with `critical_confirmed = true`. If exact profile selection fails, keep the gate incomplete and report the terminal reason.

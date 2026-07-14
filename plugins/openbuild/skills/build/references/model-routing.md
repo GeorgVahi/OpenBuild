@@ -1,21 +1,39 @@
 # Capability-aware model routing
 
-Use this reference whenever Build delegates repository discovery, specification critique, implementation, log analysis, or review, and always for `$build setup-models`.
+Use this reference whenever Build delegates repository discovery, specification critique, implementation, log analysis, or review, and always for `$build configure-models` or its `$build setup-models` alias.
 
 ## Routing principles
 
 1. Keep the current root agent as orchestrator and decision owner.
-2. Route every repository search to the immutable packaged read-only search worker before using the root. Keep decisions, targeted reads of already-known files, durable specification/version edits, validation, Git, and final synthesis with the root.
-3. When that exact route fails, create no replacement agent; use only the minimum targeted root search required to unblock the task.
+2. Resolve the effective model map before every agent dispatch. Route every repository search to its first configured read-only search worker before using the root. Keep decisions, targeted reads of already-known files, durable specification/version edits, validation, Git, and final synthesis with the root.
+3. Advance only after a completed semantic result contains a configured evidence trigger. When transport or exact selection fails, create no replacement agent; discovery alone may use the minimum targeted root search required to unblock the task.
 4. Choose models or tiers only from capabilities exposed by the runtime or confirmed configuration, then execute the selected profile through the packaged explicit-model runner.
 5. Never rank a model by parsing its name. A model catalog may expose IDs, supported reasoning efforts, a default, or an upgrade path without exposing cost or a complete strength ordering.
 6. Never claim that a model changed unless the spawn result, selected profile, or runtime evidence proves it.
 7. Preserve only the documented targeted-root recovery for search; block implementation and exact-review gates on runner failure.
 8. Keep search workers, specification critics, and reviewers read-only. Route code edits to a risk-matched Implementation worker under the same Ready, TDD, minimality, single-writer, validation, and review gates in [adaptive implementation delegation](implementation-delegation.md).
 
+## User model map
+
+`scripts/model_map.py` owns route selection. It loads one complete map in strict project → user → packaged order:
+
+1. `<project>/.codex/openbuild/model-map.toml`;
+2. `$CODEX_HOME/openbuild/model-map.toml`;
+3. `<build-skill-root>/profiles/openbuild_model_map.toml`.
+
+An existing higher-priority map must validate completely; never merge missing or invalid values from a lower scope. The map covers `discovery.default` plus `critic`, `implementation`, and `review` at low, medium, high, and critical risk. Every route provides an ordered exact-agent sequence, `max_steps`, `escalation_triggers`, stop behavior, and a confirmed failure policy. Resolve it before every created agent:
+
+```text
+model_map.py resolve --repo <workspace> --codex-home <codex-home> --use-case <discovery|critic|implementation|review> --risk <default|low|medium|high|critical>
+```
+
+Persist `map_source`, `map_sha256`, use case, risk, returned agents, and route step with the routing receipt. Invoke `agent_runner.py` only with the exact profile returned for that step. The next step is legal only after a transport-success result contains one of that route's configured semantic triggers.
+
+The map cannot relax the safety envelope: `writer_policy` remains `single`, every transport failure remains `block`, search/critic/review remain read-only, implementation remains `workspace-write` under the single-writer lease with `semantic-before-edit` escalation, and only discovery has targeted-root recovery. Every critical route requires `critical_confirmed = true`. Configure it through [the model-map interview](model-map-interview.md).
+
 ## Primary explicit-model runtime
 
-The only agent dispatch method is `codex-exec-explicit-model`, implemented by `<build-skill-root>/scripts/agent_runner.py` and requiring Python 3.11 or newer. For `openbuild_search_separate` it resolves only the fixed packaged Spark profile and ignores same-named project/user files; for every other role it resolves the exact canonical profile from `<project>/.codex/agents`, then `$CODEX_HOME/agents`, then the packaged default. It rejects missing or inherited `model` and `model_reasoning_effort`, verifies the role sandbox, and launches a separate process with argument-vector selection rather than a shell-composed command:
+The only agent dispatch method is `codex-exec-explicit-model`, implemented by `<build-skill-root>/scripts/agent_runner.py` and requiring Python 3.11 or newer. For every canonical role it resolves the exact profile from `<project>/.codex/agents`, then `$CODEX_HOME/agents`, then the packaged default. It rejects missing or inherited `model` and `model_reasoning_effort`, verifies the role sandbox, and requires every search override to preserve the exact canonical Explorer developer instructions. It launches a separate process with argument-vector selection rather than a shell-composed command:
 
 ```text
 codex exec --json --ephemeral -m <profile-model> -c model_reasoning_effort="<profile-effort>" -c features.multi_agent=false -c forced_login_method="chatgpt" -c model_provider="openai" --sandbox <profile-sandbox> -C <workspace> -o <result> -
@@ -25,7 +43,7 @@ The runner removes ambient API-key and provider-base-URL variables, requires `co
 
 Start with `agent_runner.py start`, retain and record its unactivated running receipt, then call `agent_runner.py activate` for that run directory. The activation artifact must repeat the live Codex PID and creation identity; the worker holds Codex stdin until that match, so no task action can precede the recorded receipt. Poll with `status`; use `wait` only with a bounded timeout. A timeout of the parent wait is non-terminal while the creation-bound worker or Codex process identity remains active or its liveness is unknown: never fall back or release a writer lease on that signal. Use `cancel` when interruption is required and continue only after every started process and process group is positively confirmed stopped. Implementation starts additionally require a pre-existing `--lease-id`, which is persisted before `Popen`, followed by a lease/run-bound activation event before edits. A dispatch is proven only when the receipt names the requested agent, configured model, reasoning effort, and sandbox, the readable non-empty result exists, and exactly one terminal JSONL event is its final nonblank event: `turn.completed`. `turn.failed`, malformed or trailing JSONL, missing result/terminal evidence, a non-zero CLI exit, unknown process liveness, or a stopped process tree without recoverable completion evidence fails the route. The CLI selection plus accepted terminal event is operational evidence of the requested model/effort; it is not a cryptographic attestation of provider-internal routing.
 
-If the explicit runner fails, record one of `profile-not-discoverable`, `profile-incomplete`, `cli-unavailable`, `chatgpt-auth-unavailable`, `model-unavailable`, `quota-exhausted`, `sandbox-mismatch`, `runner-failed`, `spawn-failed`, `worker-timeout`, or `unusable-evidence`. `worker-timeout` is valid only after `cancel` confirms every started process stopped; `unusable-evidence` is valid only after a completed result. Create no replacement agent. Search uses targeted root recovery, implementation remains blocked, and diagnostic root review cannot close an exact-review or release gate.
+If the explicit runner fails, record one of `profile-not-discoverable`, `profile-incomplete`, `cli-unavailable`, `chatgpt-auth-unavailable`, `model-unavailable`, `quota-exhausted`, `sandbox-mismatch`, `runner-failed`, `spawn-failed`, `worker-timeout`, or `unusable-evidence`. `worker-timeout` is valid only after `cancel` confirms every started process stopped; `unusable-evidence` is valid only after a completed result. Create no replacement agent for transport failure. Search uses targeted root recovery, implementation remains blocked, and diagnostic root review cannot close an exact-review or release gate. A next configured model-map step is not transport recovery: it is allowed only after a completed semantically insufficient result with a listed trigger.
 
 ## Exact-agent dependency checkpoint
 
@@ -46,16 +64,17 @@ Offer two paths: the user installs manually and replies after completion, or Bui
 
 Use this order before any repository grep, file/symbol lookup, dependency trace, route/test/config/schema search, or log scan:
 
-1. **Exact Spark route:** run the packaged `openbuild_search_separate` profile through `agent_runner.py` as `codex-exec-explicit-model`. OpenBuild pins this zero-profile-setup search route exclusively to `gpt-5.3-codex-spark` with low reasoning and a read-only sandbox; same-named project/user profiles cannot override it.
-2. **Root recovery:** after a stopped terminal exact-runner failure, perform only the minimum targeted root search needed to unblock the task and record the normalized failure. Do not create another search agent.
+1. **Configured exact route:** resolve `discovery.default` through `model_map.py`, then run its first returned profile through `agent_runner.py` as `codex-exec-explicit-model`. The zero-setup packaged map starts `openbuild_search_separate` on `gpt-5.3-codex-spark` with low reasoning and a read-only sandbox. An explicit project/user profile may change model and effort but must preserve the canonical Explorer instructions and read-only sandbox.
+2. **Semantic escalation:** after a completed transport-success search reports a configured evidence gap, advance exactly one step in the returned route and never exceed `max_steps`. Stop on sufficient evidence.
+3. **Root recovery:** after a stopped terminal exact-runner transport/evidence failure, perform only the minimum targeted root search needed to unblock the task and record the normalized failure. Do not create another search agent for transport recovery.
 
-Attempt the exact separate-pool dispatch once before the first search branch. Do not run the first repository search until it succeeds or fails with one recorded reason: `profile-not-discoverable`, `profile-incomplete`, `cli-unavailable`, `chatgpt-auth-unavailable`, `model-unavailable`, `quota-exhausted`, `sandbox-mismatch`, `runner-failed`, or `spawn-failed`. Use `worker-timeout` or `unusable-evidence` only after a selected worker actually runs. Then open a circuit breaker for the current Build run and use the next branch without retrying the same failed route for every grep. Reset it only on a new Build invocation, verified runtime-state change, or explicit user instruction. Do not scrape or infer remaining quota from the private usage dashboard; record only the selected profile/model and an observed runtime/quota result.
+Attempt the configured first dispatch once before the first search branch. Do not run the first repository search until it succeeds or fails with one recorded reason: `profile-not-discoverable`, `profile-incomplete`, `cli-unavailable`, `chatgpt-auth-unavailable`, `model-unavailable`, `quota-exhausted`, `sandbox-mismatch`, `runner-failed`, or `spawn-failed`. Use `worker-timeout` or `unusable-evidence` only after a selected worker actually runs. A transport failure must open a circuit breaker for the current Build run and go directly to targeted root recovery without retrying another model for every grep. Reset it only on a new Build invocation, verified runtime-state change, or explicit user instruction. Do not scrape or infer remaining quota from the private usage dashboard; record only the selected profile/model and an observed runtime/quota result.
 
 Do not block specification-only work merely because the search route is unavailable, but disclose targeted root recovery. Do not silently skip it when the exact route is required.
 
 Before the first repository search, emit the selected worker's unactivated `running` routing receipt with `configured_model`, `observed_model`, `fallback_reason`, and run/process identities, then record matching activation. After the worker search, emit its stopped terminal receipt and only then consume the evidence through exactly one root-owned event bound to that run. The terminal `codex-exec-explicit-model` receipt requires `turn.completed`, a creation-bound integer exit code of zero, a valid non-empty result, and semantic task success. The exact runner is the only created-agent route; after failure record the reason and use targeted root recovery.
 
-OpenBuild ships reviewed concrete defaults for every canonical role and still permits exact project/user overrides for non-Spark roles. Spark remains immutable. Availability failures remain explicit and never select another agent route.
+OpenBuild ships reviewed concrete defaults for every canonical role. Project/user overrides may change exact model and effort for any canonical role; search overrides keep the canonical instructions immutable. Availability failures remain explicit and never select another agent route.
 
 ## Critic and review capability order
 
@@ -63,11 +82,11 @@ For specification critics and diff review, use the exact packaged or canonical `
 
 ### Exact sequential reviewer dispatch
 
-Dispatch the exact starting reviewer through `agent_runner.py` before every progressive-review ladder: `low` → `openbuild_review_fast`, `medium` → `openbuild_review_balanced`, `high` → `openbuild_review_balanced`, and `critical` → `openbuild_review_strongest`. Persist the unactivated `running` Review routing receipt, call `activate`, record the matching `review-agent-activated` event, and require the stopped terminal receipt with `codex-exec-explicit-model`, `turn.completed`, creation-bound exit code zero, valid result evidence, and a semantically completed review; only then use the result. Failure blocks the gate instead of selecting another reviewer route.
+Resolve the exact starting reviewer through `model_map.py` before every critic or progressive-review ladder, using its classified risk and corresponding use case. Dispatch the first returned profile through `agent_runner.py`. Persist the map source/hash and route step, the unactivated `running` Review routing receipt, call `activate`, record the matching `review-agent-activated` event, and require the stopped terminal receipt with `codex-exec-explicit-model`, `turn.completed`, creation-bound exit code zero, valid result evidence, and a semantically completed review; only then use the result. Transport failure blocks the gate instead of selecting another reviewer route.
 
-Run reviewers one at a time in this order: fast → balanced → strong → strongest. Begin at the complexity floor, never below it. Stop after an evidence-backed `ACCEPT` with sufficient confidence, complete acceptance coverage, green validation, and no actionable finding. Move exactly one proven tier higher only when the previous structured result records a trigger from [the review protocol](review-protocol.md). The root adjudicates and remediates confirmed findings through TDD/minimality, reruns affected validation, and only then dispatches the next exact reviewer. Reviewers remain read-only and never fix their own findings.
+Run reviewers one at a time in the returned order. Stop after an evidence-backed `ACCEPT` with sufficient confidence, complete acceptance coverage, green validation, and no actionable finding. Move exactly one route step only when the previous structured result records a configured trigger from [the review protocol](review-protocol.md), and stop at `max_steps`. The root adjudicates and remediates confirmed findings through TDD/minimality, reruns affected validation, and only then dispatches the next exact reviewer. Reviewers remain read-only and never fix their own findings.
 
-Emit one unactivated `running` and one stopped terminal Review routing receipt around a matching `review-agent-activated` event. The dispatch event separates canonical `agent_name` from descriptive `task_name`. Both receipts carry `diff_revision`, `risk_floor`, `requested_agent`, `task_name`, `requested_tier`, `dispatch_method`, `configured_model`, `model_reasoning_effort`, `observed_agent`, `observed_model`, `terminal_event`, `activated`, `run_status`, `sandbox`, `dispatch_result`, `fallback_reason`, `process_tree_stopped`, `run_dir`, worker/Codex PIDs and creation identities, `codex_exit_evidence`, `codex_exit_code`, and `result_evidence`. The terminal receipt must preserve the original route and identities and precede `review-result`. Do not repeat the same tier on an unchanged diff or skip a proven intermediate tier. If an exact profile or runner is unavailable, record the primary-runtime failure and leave the gate incomplete; create no replacement reviewer.
+Emit one unactivated `running` and one stopped terminal Review routing receipt around a matching `review-agent-activated` event. The dispatch event separates canonical `agent_name` from descriptive `task_name`. Both receipts carry the routing-map source/hash/step, `diff_revision`, `risk_floor`, `requested_agent`, `task_name`, `requested_tier`, `dispatch_method`, `configured_model`, `model_reasoning_effort`, `observed_agent`, `observed_model`, `terminal_event`, `activated`, `run_status`, `sandbox`, `dispatch_result`, `fallback_reason`, `process_tree_stopped`, `run_dir`, worker/Codex PIDs and creation identities, `codex_exit_evidence`, `codex_exit_code`, and `result_evidence`. The terminal receipt must preserve the original route and identities and precede `review-result`. Do not repeat the same profile on an unchanged diff or skip a configured intermediate step. If an exact profile or runner is unavailable, record the primary-runtime failure and leave the gate incomplete; create no replacement reviewer.
 
 ## Complexity floor
 
@@ -96,24 +115,26 @@ For broad repository search, use the full search-plan, evidence-map, fallback, a
 
 ## Implementation worker routing
 
-Choose an Implementation worker only after the current specification revision passes the Ready gate. Classify the milestone before every lease and select the minimum sufficient proven coding tier:
+Choose an Implementation worker only after the current specification revision passes the Ready gate. Classify the milestone before every lease, resolve `implementation.<risk>` through `model_map.py`, and select the first returned exact profile. The packaged map uses:
 
 - `openbuild_implementation_fast` for low-risk Direct documentation, cosmetic, or mechanical work with no behavior change;
 - `openbuild_implementation_balanced` as the starting route for medium-risk contained logic and high-risk cross-layer behavior;
 - `openbuild_implementation_strong` only after a completed balanced worker returns a valid pre-edit capability escalation;
 - `openbuild_implementation_strongest` directly for critical work at the deepest supported effort.
 
-Before every test or production code edit, acquire the single-writer lease for the exact selected profile, then start it through `agent_runner.py` as `codex-exec-explicit-model` with `--lease-id <id>`. Separate the canonical `agent_name` from the descriptive `task_name`. Record the lease-bound unactivated `running` Implementation routing receipt, call `activate`, record `implementation-agent-activated`, and keep the lease active through all worker writes. A completed receipt with `turn.completed`, creation-bound exit code zero, valid result evidence, and a semantically completed task must precede `implementation-handoff-accepted`, result consumption, and release. A failed, cancelled, or semantically unsuccessful receipt permits lease release only with the milestone incomplete and forbids another writer route.
+Before every test or production code edit, acquire the single-writer lease for the exact selected profile, then start it through `agent_runner.py` as `codex-exec-explicit-model` with `--lease-id <id>`. Separate the canonical `agent_name` from the descriptive `task_name`. Record the routing-map source/hash/step and the lease-bound unactivated `running` Implementation routing receipt, call `activate`, record `implementation-agent-activated`, and keep the lease active through all worker writes. A completed receipt with `turn.completed`, creation-bound exit code zero, valid result evidence, and a semantically completed task must precede `implementation-handoff-accepted`, result consumption, and release. A failed, cancelled, or semantically unsuccessful receipt permits lease release only with the milestone incomplete and forbids another writer route.
 
 Never use `openbuild_search_separate`, legacy `openbuild-discovery`, or `openbuild_review_*` profiles for code edits. Use bounded or sequential exact implementation workers and never run concurrent writers in one checkout.
 
 Pass only the milestone, baseline, allowed files, acceptance criteria, red or primary signal, focused green command, and stop conditions defined in [adaptive implementation delegation](implementation-delegation.md). The root independently verifies the returned diff and validation before review or Git actions.
 
-**Escalate only on evidence.** Before any edit, the selected worker may return `NEEDS_ESCALATION` only after a completed transport-success run with valid terminal evidence, concrete observed model evidence, a stopped process tree, and verified zero writes. The root then records approval and advances exactly one tier: fast → balanced for low, or balanced → strong for medium/high. Strongest is critical-only. Once any edit occurs, the same writer owns the complete milestone and escalation is forbidden. Do not fan out or escalate merely because a stronger model exists, and never repeat an unchanged task at the same tier.
+**Escalate only on evidence.** Before any edit, the selected worker may return `NEEDS_ESCALATION` only after a completed transport-success run with valid terminal evidence, concrete observed model evidence, a stopped process tree, verified zero writes, and a trigger listed by the resolved route. The root then records approval and advances exactly one configured route step without exceeding `max_steps`. Once any edit occurs, the same writer owns the complete milestone and escalation is forbidden. Do not fan out or escalate merely because another model exists, and never repeat an unchanged task at the same step.
 
 Every created implementation agent must have concrete model, effort, and sandbox evidence from the runner receipt. Infrastructure or transport failure—including CLI, authentication, quota, model availability, sandbox, spawn, runner, timeout, or unusable evidence—never authorizes a stronger writer. When the exact route cannot be selected or the semantic handoff fails without a valid pre-edit escalation result, stop before further test or production edits rather than lowering the risk floor, and record the limitation.
 
-## `$build setup-models`
+## `$build configure-models`
+
+Run the complete adaptive procedure in [the model-map interview](model-map-interview.md). `$build setup-models` is a backward-compatible alias and must run the same interview, validation, preview, and permission gates.
 
 ### Preflight
 
@@ -127,7 +148,12 @@ Every created implementation agent must have concrete model, effort, and sandbox
 
 ### Proposal
 
-The packaged `openbuild_search_separate` route is fixed and is never proposed as a writable profile. The packaged implementation/review profiles work without setup; propose only requested canonical overrides:
+The packaged profiles and model map work without setup. Propose only the complete requested map plus canonical profile overrides needed to realize it:
+
+- `openbuild_search_separate`: packaged fast search route; an override may change model/effort only while preserving the exact canonical Explorer instructions and read-only sandbox;
+- `openbuild_search_balanced`: optional balanced read-only discovery step;
+- `openbuild_search_strong`: optional strong read-only discovery step;
+- `openbuild_search_strongest`: optional deepest read-only discovery step;
 
 - `openbuild_implementation_fast`: a proven efficient coding route for low-risk Direct work, write-capable only inside the parent-approved workspace and a single-writer lease;
 - `openbuild_implementation_balanced`: the starting coding route for medium- and high-risk work, write-capable only inside the parent-approved workspace and a single-writer lease;
@@ -154,7 +180,7 @@ Ask whether configuration should be user-scoped (`~/.codex/agents`) or project-s
 
 ### Guided legacy-profile migration
 
-Map the supported legacy names to canonical runtime-safe IDs without changing their configured model, reasoning effort, sandbox, or developer instructions. The legacy `openbuild-search-separate` name is deliberately excluded: the canonical ID is reserved for the immutable packaged Spark profile, so setup reports any such legacy file as inactive and does not create a canonical replacement.
+Map the supported legacy names to canonical runtime-safe IDs without changing their configured model, reasoning effort, sandbox, or developer instructions. The legacy `openbuild-search-separate` name is deliberately excluded because search overrides must adopt the current exact canonical Explorer instructions; report it as inactive and let the interview propose a newly rendered canonical profile instead of copying it blindly.
 
 | Legacy `name` | Canonical `name` |
 |---|---|
@@ -212,6 +238,7 @@ Record this for each run or milestone:
 
 ```text
 Complexity: <low|medium|high|critical> — <evidence>
+Model map: <source, SHA-256, use case, risk, route step/max_steps>
 Routing mode: <codex-exec-explicit-model|root-recovery|blocked>
 Discovery mode: <delegated|mixed|root-recovery>
 Search usage route: <separate-pool|root-recovery>

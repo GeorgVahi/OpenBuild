@@ -4,7 +4,7 @@
 
 OpenBuild — явно вызываемый workflow для Codex, который может провести задачу или существующую спецификацию от поиска по репозиторию до реализации, проверок и review. Основной маршрут автоматический: вызовите Build, опишите результат, а он сам выберет первый незавершённый этап.
 
-Текущий релиз: `2.1.4` ([закреплённый исходник skill](https://github.com/GeorgVahi/OpenBuild/tree/v2.1.4/plugins/openbuild/skills/build)).
+Текущий релиз: `2.1.5` ([закреплённый исходник skill](https://github.com/GeorgVahi/OpenBuild/tree/v2.1.5/plugins/openbuild/skills/build)).
 
 ## Схемы
 
@@ -41,7 +41,7 @@ codex plugin marketplace remove openbuild
 Добавьте последний закреплённый релиз и установите plugin:
 
 ```powershell
-codex plugin marketplace add GeorgVahi/OpenBuild --ref v2.1.4
+codex plugin marketplace add GeorgVahi/OpenBuild --ref v2.1.5
 codex plugin add openbuild@openbuild
 ```
 
@@ -57,7 +57,8 @@ codex plugin add openbuild@openbuild
 - `refine <путь>` — сверить существующую спецификацию с репозиторием;
 - `run <путь>` — реализовать существующую спецификацию;
 - `full <идея>` — пройти путь от спецификации до реализации и review;
-- `auto <идея-или-путь>` — явно запросить автоматический маршрут.
+- `auto <идея-или-путь>` — явно запросить автоматический маршрут;
+- `configure-models` — пройти понятное интервью и выбрать первую модель, шаги эскалации по доказательству, reasoning effort и критические маршруты для поиска, критиков спецификации, реализации и review.
 
 Для существующей спецификации передайте относительный от репозитория или абсолютный путь. Build не выбирает молча между несколькими подходящими файлами.
 
@@ -65,11 +66,11 @@ codex plugin add openbuild@openbuild
 
 OpenBuild поставляет готовые профили для поиска, реализации и review. Каждый создаваемый агент запускается только через встроенный `codex-exec-explicit-model` runner: он передаёт точную модель, reasoning effort, sandbox и задачу в отдельный процесс `codex exec`, а затем сохраняет terminal receipt.
 
-Приоритет профилей: override проекта, override пользователя, затем встроенный профиль. Встроенный Spark-профиль поиска неизменяем, поэтому поиск по коду всегда использует один read-only контракт. Native Explorer, name-only custom agents, generic workers и другие маршруты без доказуемых model/effort не используются.
+Приоритет карты моделей и профилей: override проекта, override пользователя, затем встроенные значения. `$openbuild:build configure-models` собирает полную проектную или пользовательскую карту простыми вопросами; Build разрешает её перед каждым агентом. Модель поиска можно менять, но канонический read-only контракт поиска остаётся неизменяемым. Native Explorer, name-only custom agents, generic workers и другие маршруты без доказуемых model/effort не используются.
 
 Если точный поиск не запустился, Build фиксирует причину и выполняет только минимальный targeted root search. Ошибка точного implementation- или review-агента оставляет gate незавершённым вместо подмены агентом с неизвестной моделью.
 
-Реализация стартует на Terra для низкого, среднего и высокого риска; Sol high разрешён только после завершённого pre-edit `NEEDS_ESCALATION`, а критическая работа сразу получает Sol xhigh. Review аналогично стартует на Luna для low, на Terra для medium/high и доходит до Sol только по доказательству либо для critical.
+Во встроенной карте реализация стартует на Terra для низкого, среднего и высокого риска; Sol high разрешён только после завершённого pre-edit `NEEDS_ESCALATION`, а критическая работа сразу получает Sol xhigh. Review аналогично стартует на Luna для low, на Terra для medium/high и доходит до Sol только по доказательству либо для critical. Проверенная пользовательская карта заменяет эти стартовые маршруты и лимиты.
 
 ## Progressive review
 

@@ -1,0 +1,134 @@
+schema_version = 1
+name = "OpenBuild defaults"
+writer_policy = "single"
+failure_policy = "block"
+
+[discovery.default]
+agents = ["openbuild_search_separate"]
+max_steps = 1
+escalation_mode = "after-evidence"
+escalation_triggers = ["insufficient-evidence", "ambiguous-ownership", "cross-file-gap"]
+stop_on_success = true
+transport_failure = "block"
+fallback = "targeted-root"
+critical_confirmed = false
+
+[critic.low]
+agents = ["openbuild_review_fast", "openbuild_review_balanced"]
+max_steps = 2
+escalation_mode = "after-evidence"
+escalation_triggers = ["coverage-gap", "unresolved-contradiction", "low-confidence", "material-uncertainty"]
+stop_on_success = true
+transport_failure = "block"
+fallback = "block"
+critical_confirmed = false
+
+[critic.medium]
+agents = ["openbuild_review_balanced", "openbuild_review_strong"]
+max_steps = 2
+escalation_mode = "after-evidence"
+escalation_triggers = ["coverage-gap", "unresolved-contradiction", "low-confidence", "material-uncertainty"]
+stop_on_success = true
+transport_failure = "block"
+fallback = "block"
+critical_confirmed = false
+
+[critic.high]
+agents = ["openbuild_review_balanced", "openbuild_review_strong"]
+max_steps = 2
+escalation_mode = "after-evidence"
+escalation_triggers = ["coverage-gap", "unresolved-contradiction", "low-confidence", "material-uncertainty"]
+stop_on_success = true
+transport_failure = "block"
+fallback = "block"
+critical_confirmed = false
+
+[critic.critical]
+agents = ["openbuild_review_strongest"]
+max_steps = 1
+escalation_mode = "after-evidence"
+escalation_triggers = []
+stop_on_success = true
+transport_failure = "block"
+fallback = "block"
+critical_confirmed = true
+
+[implementation.low]
+agents = ["openbuild_implementation_fast", "openbuild_implementation_balanced"]
+max_steps = 2
+escalation_mode = "semantic-before-edit"
+escalation_triggers = ["task-complexity-above-tier", "unresolved-cross-layer-reasoning", "validation-strategy-uncertain", "capability-gap"]
+stop_on_success = true
+transport_failure = "block"
+fallback = "block"
+critical_confirmed = false
+
+[implementation.medium]
+agents = ["openbuild_implementation_balanced", "openbuild_implementation_strong"]
+max_steps = 2
+escalation_mode = "semantic-before-edit"
+escalation_triggers = ["task-complexity-above-tier", "unresolved-cross-layer-reasoning", "validation-strategy-uncertain", "capability-gap"]
+stop_on_success = true
+transport_failure = "block"
+fallback = "block"
+critical_confirmed = false
+
+[implementation.high]
+agents = ["openbuild_implementation_balanced", "openbuild_implementation_strong"]
+max_steps = 2
+escalation_mode = "semantic-before-edit"
+escalation_triggers = ["task-complexity-above-tier", "unresolved-cross-layer-reasoning", "validation-strategy-uncertain", "capability-gap"]
+stop_on_success = true
+transport_failure = "block"
+fallback = "block"
+critical_confirmed = false
+
+[implementation.critical]
+agents = ["openbuild_implementation_strongest"]
+max_steps = 1
+escalation_mode = "semantic-before-edit"
+escalation_triggers = []
+stop_on_success = true
+transport_failure = "block"
+fallback = "block"
+critical_confirmed = true
+
+[review.low]
+agents = ["openbuild_review_fast", "openbuild_review_balanced"]
+max_steps = 2
+escalation_mode = "after-evidence"
+escalation_triggers = ["actionable-finding", "coverage-gap", "low-confidence", "material-dispute"]
+stop_on_success = true
+transport_failure = "block"
+fallback = "block"
+critical_confirmed = false
+
+[review.medium]
+agents = ["openbuild_review_balanced", "openbuild_review_strong"]
+max_steps = 2
+escalation_mode = "after-evidence"
+escalation_triggers = ["actionable-finding", "coverage-gap", "low-confidence", "material-dispute"]
+stop_on_success = true
+transport_failure = "block"
+fallback = "block"
+critical_confirmed = false
+
+[review.high]
+agents = ["openbuild_review_balanced", "openbuild_review_strong"]
+max_steps = 2
+escalation_mode = "after-evidence"
+escalation_triggers = ["actionable-finding", "coverage-gap", "low-confidence", "material-dispute"]
+stop_on_success = true
+transport_failure = "block"
+fallback = "block"
+critical_confirmed = false
+
+[review.critical]
+agents = ["openbuild_review_strongest"]
+max_steps = 1
+escalation_mode = "after-evidence"
+escalation_triggers = []
+stop_on_success = true
+transport_failure = "block"
+fallback = "block"
+critical_confirmed = true

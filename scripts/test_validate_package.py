@@ -68,6 +68,83 @@ class RunnerOnlyRoutingContractTests(unittest.TestCase):
                 self.assertNotIn(token, combined)
 
 
+class ConfigurableModelMapContractTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.skill = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+        self.routing = (SKILL / "references" / "model-routing.md").read_text(encoding="utf-8")
+        interview_path = SKILL / "references" / "model-map-interview.md"
+        self.interview = interview_path.read_text(encoding="utf-8") if interview_path.is_file() else ""
+        self.readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.readme_ru = (ROOT / "README.ru.md").read_text(encoding="utf-8")
+
+    def test_configure_models_is_a_documented_build_command(self) -> None:
+        for text in (self.skill, self.routing, self.readme, self.readme_ru):
+            with self.subTest(document=text[:24]):
+                self.assertIn("configure-models", text)
+        self.assertIn("setup-models", self.skill)
+        self.assertIn("backward-compatible alias", self.routing)
+
+    def test_interview_is_deep_adaptive_and_plain_language(self) -> None:
+        for token in [
+            "project or user scope",
+            "available model evidence",
+            "speed, quality, and usage limits",
+            "Discovery",
+            "Specification critics",
+            "Implementation",
+            "Review",
+            "Critical work",
+            "recommended option first",
+            "one to three questions",
+            "final preview",
+            "exact diff",
+            "explicit permission",
+            "restore packaged defaults",
+        ]:
+            with self.subTest(token=token):
+                self.assertIn(token.lower(), self.interview.lower())
+
+    def test_model_map_precedence_and_fail_closed_rules_are_normative(self) -> None:
+        for token in [
+            ".codex/openbuild/model-map.toml",
+            "$CODEX_HOME/openbuild/model-map.toml",
+            "project → user → packaged",
+            "transport failure",
+            "semantic-before-edit",
+            "single-writer",
+            "critical_confirmed",
+        ]:
+            with self.subTest(token=token):
+                self.assertIn(token, self.routing)
+
+    def test_every_dispatch_resolves_the_user_map_before_agent_runner(self) -> None:
+        for use_case in ("discovery", "critic", "implementation", "review"):
+            with self.subTest(use_case=use_case):
+                self.assertIn(
+                    f"model_map.py resolve --use-case {use_case}",
+                    self.skill,
+                )
+        self.assertIn("map_source", self.skill)
+        self.assertIn("map_sha256", self.skill)
+        self.assertIn("route step", self.skill)
+
+    def test_interview_configures_exact_profiles_and_complete_routes(self) -> None:
+        for token in [
+            "model",
+            "reasoning effort",
+            "max_steps",
+            "escalation_triggers",
+            "low, medium, high, and critical",
+            "openbuild_search_balanced",
+            "openbuild_search_strong",
+            "openbuild_search_strongest",
+            "model_map.py validate",
+            "one launcher smoke per distinct model/effort/sandbox tuple",
+        ]:
+            with self.subTest(token=token):
+                self.assertIn(token, self.interview)
+
+
 class PerCommitVersionGateTests(unittest.TestCase):
     def test_every_nonempty_commit_requires_a_version_bump(self) -> None:
         examples = [
@@ -311,7 +388,7 @@ class ImplementationDelegationContractTests(unittest.TestCase):
         tdd_workflow = self.tdd_workflow.replace("bounded implementation worker", "implementation helper")
         self.assertTrue(any("tdd-workflow.md" in error for error in self.validate(tdd_workflow=tdd_workflow)))
 
-        route = "Select the risk-matched root or bounded implementation worker"
+        route = "Resolve `implementation.<risk>` through the effective model map"
         edit = "Under that lease, add or modify the test"
         tdd_workflow = self.tdd_workflow.replace(route, "__EDIT_ORDER__").replace(edit, route).replace("__EDIT_ORDER__", edit)
         self.assertTrue(any("must precede every test code edit" in error for error in self.validate(tdd_workflow=tdd_workflow)))
@@ -340,19 +417,19 @@ class ImplementationDelegationContractTests(unittest.TestCase):
 class ChangelogContractTests(unittest.TestCase):
     def test_release_manifest_version_and_latest_release_are_documented(self) -> None:
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-        self.assertEqual(validate_changelog_contract(changelog, "2.1.4"), [])
+        self.assertEqual(validate_changelog_contract(changelog, "2.1.5"), [])
         self.assertNotIn("## [2.1.1]", changelog)
 
-        mutated = changelog.replace("## [2.1.4] - 2026-07-14", "## [next] - 2026-07-14")
-        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "2.1.4")))
+        mutated = changelog.replace("## [2.1.5] - 2026-07-14", "## [next] - 2026-07-14")
+        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "2.1.5")))
 
     def test_released_version_is_pinned_in_both_install_channels(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         readme_ru = (ROOT / "README.ru.md").read_text(encoding="utf-8")
-        self.assertEqual(validate_release_docs_contract(readme, readme_ru, "2.1.4"), [])
+        self.assertEqual(validate_release_docs_contract(readme, readme_ru, "2.1.5"), [])
 
-        mutated = readme.replace("--ref v2.1.4", "--ref main")
-        self.assertTrue(any("README.md" in error for error in validate_release_docs_contract(mutated, readme_ru, "2.1.4")))
+        mutated = readme.replace("--ref v2.1.5", "--ref main")
+        self.assertTrue(any("README.md" in error for error in validate_release_docs_contract(mutated, readme_ru, "2.1.5")))
 
 
 class DecisionAuthorityTraceTests(unittest.TestCase):
@@ -1490,16 +1567,16 @@ class UsageRoutingContractTests(unittest.TestCase):
         self.assertNotIn("`Agent usage`", self.skill_text)
         self.assertNotIn("`Agent usage`", self.template_text)
 
-    def test_exact_spark_search_precedes_root_recovery(self) -> None:
+    def test_configured_search_route_precedes_root_recovery(self) -> None:
         self.assertEqual(self.validate(), [])
 
-        model_routing = self.model_routing.replace("**Exact Spark route:**", "**Search worker:**")
+        model_routing = self.model_routing.replace("**Configured exact route:**", "**Search worker:**")
         self.assertTrue(any("search usage-pool" in error for error in self.validate(model_routing=model_routing)))
 
-        exact = "**Exact Spark route:**"
+        exact = "**Configured exact route:**"
         recovery = "**Root recovery:**"
         model_routing = self.model_routing.replace(exact, "__SEARCH_ORDER__").replace(recovery, exact).replace("__SEARCH_ORDER__", recovery)
-        self.assertTrue(any("exact Spark must precede root recovery" in error for error in self.validate(model_routing=model_routing)))
+        self.assertTrue(any("must precede root recovery" in error for error in self.validate(model_routing=model_routing)))
 
     def test_explicit_cli_runner_is_packaged_and_is_the_primary_dispatch(self) -> None:
         self.assertTrue((SKILL / "scripts" / "agent_runner.py").is_file())
@@ -1579,7 +1656,7 @@ class UsageRoutingContractTests(unittest.TestCase):
 
     def test_exact_named_search_agent_dispatch_precedes_repository_search(self) -> None:
         skill_text = self.skill_text.replace(
-            "start the custom agent named `openbuild_search_separate`",
+            "scripts/model_map.py resolve --use-case discovery --risk default",
             "Attempt a suitable search worker",
         )
         self.assertTrue(any("exact agent dispatch" in error for error in self.validate(skill_text=skill_text)))
@@ -1618,7 +1695,7 @@ class UsageRoutingContractTests(unittest.TestCase):
 
     def test_code_edits_use_risk_matched_writer_tiers(self) -> None:
         implementation = self.implementation.replace(
-            "risk-matched coding model for every complexity class",
+            "effective user, project, or packaged model map for every complexity class",
             "suitable coding model",
         )
         self.assertTrue(any("implementation-delegation.md" in error for error in self.validate(implementation=implementation)))
@@ -1634,7 +1711,7 @@ class UsageRoutingContractTests(unittest.TestCase):
 
     def test_exact_named_writer_dispatch_precedes_every_code_edit(self) -> None:
         implementation = self.implementation.replace(
-            "Dispatch that exact profile before every test or production code edit",
+            "Dispatch the first exact profile returned by `<build-skill-root>/scripts/model_map.py resolve --use-case implementation --risk <risk>` before every test or production code edit",
             "Prefer that profile while implementing",
         )
         self.assertTrue(any("exact writer dispatch" in error for error in self.validate(implementation=implementation)))
@@ -1647,14 +1724,14 @@ class UsageRoutingContractTests(unittest.TestCase):
 
     def test_reviewers_use_exact_profiles_in_a_sequential_ladder(self) -> None:
         model_routing = self.model_routing.replace(
-            "Dispatch the exact starting reviewer",
+            "Resolve the exact starting reviewer through `model_map.py`",
             "Choose a suitable reviewer",
         )
         self.assertTrue(any("exact reviewer dispatch" in error for error in self.validate(model_routing=model_routing)))
 
         model_routing = self.model_routing.replace(
-            "fast → balanced → strong → strongest",
-            "fast → strongest",
+            "Run reviewers one at a time in the returned order",
+            "Run reviewers in any order",
         )
         self.assertTrue(any("sequential review ladder" in error for error in self.validate(model_routing=model_routing)))
 

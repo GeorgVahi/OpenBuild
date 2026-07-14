@@ -4,7 +4,7 @@
 
 OpenBuild is an explicit Codex workflow that can take a plain-language task or an existing specification from repository discovery through implementation, validation, and review. The default route is automatic: invoke Build, describe the outcome, and let it choose the first incomplete phase.
 
-Current release: `2.1.4` ([pinned skill source](https://github.com/GeorgVahi/OpenBuild/tree/v2.1.4/plugins/openbuild/skills/build)).
+Current release: `2.1.5` ([pinned skill source](https://github.com/GeorgVahi/OpenBuild/tree/v2.1.5/plugins/openbuild/skills/build)).
 
 ## Diagrams
 
@@ -41,7 +41,7 @@ codex plugin marketplace remove openbuild
 Add the latest pinned release and install it:
 
 ```powershell
-codex plugin marketplace add GeorgVahi/OpenBuild --ref v2.1.4
+codex plugin marketplace add GeorgVahi/OpenBuild --ref v2.1.5
 codex plugin add openbuild@openbuild
 ```
 
@@ -57,7 +57,8 @@ Optional modes:
 - `refine <path>` — reconcile an existing specification with the repository;
 - `run <path>` — implement an existing specification;
 - `full <idea>` — specification through implementation and review;
-- `auto <idea-or-path>` — explicitly request automatic routing.
+- `auto <idea-or-path>` — explicitly request automatic routing;
+- `configure-models` — answer a guided interview to choose the first model, evidence-gated escalation steps, reasoning effort, and critical routes for discovery, specification critics, implementation, and review.
 
 For an existing specification, pass its repository-relative or absolute path. Build never chooses among multiple plausible specification files silently.
 
@@ -65,11 +66,11 @@ For an existing specification, pass its repository-relative or absolute path. Bu
 
 OpenBuild ships ready-to-use profiles for discovery, implementation, and review. It starts every created agent only through the packaged `codex-exec-explicit-model` runner, which supplies the exact model, reasoning effort, sandbox, and task to a separate `codex exec` process and records a terminal receipt.
 
-Profile precedence is project override, user override, then packaged default. The packaged Spark discovery profile is immutable so code search consistently uses the same read-only contract. Native Explorer, name-only custom agents, generic workers, and other routes that cannot prove model and effort are not used.
+Model-map and profile precedence is project override, user override, then packaged default. `$openbuild:build configure-models` builds a complete project or user map in plain language; Build resolves that map before every agent. Search models may be customized, while the canonical read-only discovery contract remains immutable. Native Explorer, name-only custom agents, generic workers, and other routes that cannot prove model and effort are not used.
 
 If exact discovery fails, Build records the reason and performs only the minimum targeted root search needed to continue. An exact implementation or review failure leaves that gate incomplete instead of substituting an agent with unknown model metadata.
 
-Implementation starts on Terra for low, medium, and high risk; Sol high is used only after a completed pre-edit `NEEDS_ESCALATION`, while critical work starts on Sol xhigh. Review similarly starts low on Luna, medium/high on Terra, and reaches Sol only on evidence or for critical work.
+The packaged map starts implementation on Terra for low, medium, and high risk; Sol high is used only after a completed pre-edit `NEEDS_ESCALATION`, while critical work starts on Sol xhigh. Review similarly starts low on Luna, medium/high on Terra, and reaches Sol only on evidence or for critical work. A validated user map replaces these starting routes and limits.
 
 ## Progressive review
 
