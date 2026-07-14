@@ -6,6 +6,40 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-07-13
+
+### Added
+
+- Added a packaged cross-platform `agent_runner.py` that resolves exact OpenBuild profiles and starts separate `codex exec` processes with explicit model, reasoning-effort, and sandbox arguments under saved ChatGPT authentication.
+- Added two-phase start/status/activate/wait receipts with creation-bound worker/Codex identities, immutable prompt snapshots, JSONL/stderr/result/exit-code artifacts, selected profile metadata, and terminal-event validation; only exit code zero plus one final `turn.completed` and a non-empty result is accepted.
+- Added a zero-configuration read-only `openbuild_search_separate` profile pinned to `gpt-5.3-codex-spark` with low reasoning and the strict `rg`/`Get-Content` compact evidence-map contract.
+
+### Changed
+
+- `codex-exec-explicit-model` is now the primary discovery, implementation, and review dispatch. Native direct selectors and name-only custom-agent spawns are documented fallbacks and can no longer be reported as observed model switching without evidence.
+- The `openbuild_search_separate` ID now resolves exclusively to the packaged `gpt-5.3-codex-spark` profile; same-named project/user files and the legacy migration path cannot replace that fixed discovery contract.
+- Explicit-model workers are told that they are already delegated and may not spawn another agent, preventing recursive discovery delegation from global instructions.
+- Routing trace validation now requires model reasoning effort and terminal `turn.completed` evidence for explicit CLI dispatches, while retaining the existing risk floors, single-writer lease, TDD, review, fallback, and root-owned Git controls.
+- Runner hardening now disables the stable multi-agent capability mechanically, forces subscription-provider selection, rejects top-level and nested provider redirects across user/project config layers, binds Windows identity and termination to the original process object, places each Windows worker tree in a kill-on-close Job Object, creates run directories with a protected current-user-only Windows DACL, uses precise Linux/macOS creation identities, refuses reused-PID process-group signals, treats POSIX zombies as stopped execution while still reaping direct children, keeps POSIX run artifacts private, and performs unconditional terminal-recording cleanup across root/worker/output exceptions and interrupts.
+- Activation artifacts are now bound to the live Codex PID plus creation identity, failed post-activation receipts return non-zero, and verified startup failures remain terminal even when `worker.json` could not be published.
+- Startup failures no longer claim a stopped process tree when creation-bound cleanup evidence is unavailable; non-valid exit evidence cannot carry a stale code, and running review receipts must retain the exact missing/unknown/missing evidence tuple.
+- The runner now persists a private pre-spawn marker before Codex `Popen` and upgrades it with the creation identity before publishing readiness, so a worker crash in that window either permits creation-bound cleanup or blocks fallback as unconfirmed; startup and cancellation receipts use a null/unknown code plus explicit evidence state instead of manufacturing exit code `-1`.
+- Public receipt reconstruction now consumes that pre-spawn marker and honors an explicit unconfirmed startup flag, so an unidentified orphan window remains non-terminal and cannot authorize fallback or writer-lease release.
+- Implementation launches now require a pre-existing lease ID persisted before `Popen`; honest failed explicit-search receipts may carry `turn.failed` into the documented fallback path.
+- Deterministic traces now enforce the actual writer lifecycle (`lease → dispatch → unactivated receipt → matching activation → edits → terminal receipt → accepted handoff → release`) and require unchanged run/process identities plus positively stopped worker/Codex evidence before timeout fallback or lease release.
+- Successful writer traces now require a run-bound `implementation-handoff-accepted` event after terminal exit/result evidence and before lease release; failed writer routes require complete independent failure evidence and cannot authorize handoff.
+- Deterministic search traces now enforce `dispatch → unactivated receipt → matching activation → worker search → terminal receipt → evidence consumption`; failed search/writer receipts may preserve truthful `turn.completed` evidence only when independently bound exit/result evidence proves failure.
+- Failed search runs can never emit `search-evidence-consumed`, and failed implementation runs cannot hide an accepted handoff behind a wrong or missing lease.
+- Search validation now requires the fixed packaged Spark runner to be the first selected route, permits native selection only after its stopped terminal failure, and binds exactly one root consumption event to the successful terminal run; writer validation inspects accepted handoffs across the complete lease lifecycle, including events before dispatch.
+- Native discovery receipts now bind a read-only sandbox across running and terminal evidence, and `per-spawn-model` fallback is rejected unless it carries a concrete model plus reasoning effort.
+- Implementation and review native fallbacks now require their own route-bound stopped terminal runner failure first; direct per-spawn fallbacks must prove both model and reasoning effort, while exact-name compatibility remains honestly unobservable.
+- Deterministic review traces now enforce `dispatch → unactivated receipt → matching activation → terminal receipt → review result`, preserve creation-bound process identities across the lifecycle, and reject review conclusions without a stopped process tree, exit code zero, and valid result evidence.
+- Review completion now applies the same strict terminal-evidence validator as search and implementation and rejects booleans or numeric strings in place of an integer creation-bound exit code.
+- Accepted JSONL completion now also requires a preceding non-empty `thread.started` identity, and package validation compares the complete packaged Explorer instruction to its canonical value so semantic drift cannot hide behind retained keywords.
+- POSIX worker termination now preserves the short finalization window after Codex has exited or its creation-bound exit record has been persisted, allowing cancellation recovery instead of overwriting valid completion with a signal-induced failure.
+- The explicit runner documents and enforces Python 3.11+ instead of claiming that profile-free Spark discovery has no runtime prerequisite.
+- The existing blind-spot, `auto`, separate usage pool, Risk-matched-model coding, single-writer, and review contracts remain intact; Deterministic contract validation now covers the explicit-process receipts and packaged Spark route.
+
 ## [2.0.1] - 2026-07-13
 
 ### Changed
@@ -105,7 +139,8 @@ The project follows [Semantic Versioning](https://semver.org/).
 - Codex plugin marketplace distribution and standalone skill installation path.
 - Complete English and Russian documentation.
 
-[Unreleased]: https://github.com/GeorgVahi/OpenBuild/compare/v2.0.1...HEAD
+[Unreleased]: https://github.com/GeorgVahi/OpenBuild/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/GeorgVahi/OpenBuild/compare/v2.0.1...v2.1.0
 [2.0.1]: https://github.com/GeorgVahi/OpenBuild/compare/v1.1.1...v2.0.1
 [1.1.1]: https://github.com/GeorgVahi/OpenBuild/compare/v1.0.4...v1.1.1
 [1.0.4]: https://github.com/GeorgVahi/OpenBuild/compare/v0.4.0...v1.0.4

@@ -25,9 +25,9 @@ Use a risk-matched coding model for every complexity class, as defined by [model
 
 ## Exact writer dispatch
 
-Dispatch that exact profile before every test or production code edit: `low` → `openbuild_implementation_fast`, `medium` → `openbuild_implementation_balanced`, and `high` or `critical` → `openbuild_implementation_strongest`. When the callable spawn schema exposes a direct model selector, bind the profile's confirmed model there; otherwise pass the canonical profile ID through `agent_name` and a separate descriptive label through `task_name`. A generic worker, descriptive task name, prompt mention, or stronger-than-requested profile is not the selected risk route and must not start editing.
+Dispatch that exact profile before every test or production code edit: `low` → `openbuild_implementation_fast`, `medium` → `openbuild_implementation_balanced`, and `high` or `critical` → `openbuild_implementation_strongest`. First establish the lease record below from the configured exact profile and baseline, then use `<build-skill-root>/scripts/agent_runner.py start --lease-id <lease-id>` for the exact launch. The runner refuses an implementation start without that lease ID, persists the lease-bound request before `Popen`, pins the profile model, `model_reasoning_effort`, and `workspace-write` sandbox, and holds Codex stdin. Record the returned unactivated running receipt, then call `activate`; the task prompt cannot reach the worker earlier. The lease remains active for the whole process. After successful terminal evidence, record the matching run-bound `implementation-handoff-accepted` event before consuming the result or releasing the lease. A matching failed/cancelled terminal receipt with a confirmed stopped process tree permits lease release only while the milestone remains incomplete and can never emit an accepted handoff. On a recorded runner failure, a callable native spawn may replace it only when the schema exposes both model and reasoning effort directly and the original process tree is confirmed stopped. A name-only compatibility fallback passes the canonical profile ID through `agent_name` and a separate descriptive label through `task_name` but records model/effort as unknown. A generic worker, descriptive task name, prompt mention, or stronger-than-requested profile is not the selected risk route and must not start editing.
 
-Emit an Implementation routing receipt after dispatch and before granting the single-writer lease or changing any file:
+Acquire the single-writer lease before dispatch, pass its ID to `start`, record the initial unactivated `running` receipt while the lease is active, call `activate`, record the matching `implementation-agent-activated` event, and only then permit the first test or production edit. Replace the running receipt with the terminal receipt after the process finishes. A bounded `wait` timeout is not a failed dispatch and never releases the lease. Use `cancel`, confirm that every started process stopped, and only then record a failed route, release the incomplete milestone's lease, or grant a replacement lease.
 
 ```text
 Implementation routing receipt:
@@ -35,14 +35,55 @@ risk: <low|medium|high|critical>
 requested_agent: <exact openbuild_implementation_* profile>
 task_name: <independent descriptive task label>
 requested_tier: <fast|balanced|strongest>
-dispatch_method: <per-spawn-model|exact-custom-agent|unavailable>
+dispatch_method: <codex-exec-explicit-model|per-spawn-model|exact-custom-agent|unavailable>
 configured_model: <profile model or unknown>
+model_reasoning_effort: <profile effort or unknown>
 observed_agent: <runtime agent or unknown>
 observed_model: <runtime model or unknown>
+terminal_event: <turn.completed|turn.failed|none>
 sandbox: <workspace-write or observed value>
 lease: <milestone ID or none>
+activated: <false for the recorded running receipt; true after activation>
+run_dir: <private runner directory>
+worker_pid: <creation-bound worker PID>
+worker_process_identity: <recorded OS creation identity>
+codex_pid: <creation-bound Codex PID>
+codex_process_identity: <recorded OS creation identity>
+run_status: <running|completed|failed>
 dispatch_result: <selected|failed>
-fallback_reason: <none|profile-not-discoverable|selector-unavailable|model-unavailable|quota-exhausted|spawn-failed|sandbox-mismatch|tier-unproven|lease-conflict>
+fallback_reason: <none|profile-not-discoverable|profile-incomplete|cli-unavailable|chatgpt-auth-unavailable|selector-unavailable|model-unavailable|quota-exhausted|runner-failed|spawn-failed|sandbox-mismatch|tier-unproven|lease-conflict>
+process_tree_stopped: <false while running; true for every terminal receipt>
+codex_exit_evidence: <valid|missing|malformed|identity-mismatch on terminal explicit-model receipts>
+codex_exit_code: <integer|unknown|null on terminal explicit-model receipts>
+result_evidence: <valid|missing|empty|invalid on terminal explicit-model receipts>
+```
+
+Every terminal explicit-model receipt carries all three exit/result evidence fields. Valid exit evidence requires an integer exit code; missing, malformed, or identity-mismatched exit evidence requires an unknown exit code. Accepted handoff requires `turn.completed`, valid creation-bound exit evidence with code zero, and a valid non-empty result. Every failed terminal receipt requires a non-zero code, missing/malformed/identity-mismatched exit record, or missing/empty/invalid result as independent failure evidence, including when JSONL reports `turn.failed`; once its process tree is stopped, that accurate failed receipt releases the lease while leaving the milestone incomplete.
+
+Record the ordered activation separately; all bindings come from the already-recorded running receipt:
+
+```text
+event: implementation-agent-activated
+lease: <same milestone ID>
+agent_name: <same exact openbuild_implementation_* profile>
+task_name: <same independent task label>
+run_dir: <same private runner directory>
+worker_process_identity: <same creation identity>
+codex_process_identity: <same creation identity>
+activated: true
+```
+
+Consume a successful worker result only through this event after the matching terminal receipt:
+
+```text
+event: implementation-handoff-accepted
+lease: <same milestone ID>
+agent_name: <same exact openbuild_implementation_* profile>
+task_name: <same independent task label>
+run_dir: <same private runner directory>
+worker_process_identity: <same creation identity>
+codex_process_identity: <same creation identity>
+result_evidence: valid
 ```
 
 For low or medium work, a failed exact dispatch may use another writer only when native selection or runtime/configuration evidence proves the same requested tier, sandbox, and lease; record the failed exact attempt and replacement identity instead of calling it the requested profile. For high or critical work, block before editing if the required profile/model floor is not proven. `root-only` remains a safety mode for coupled, sensitive, destructive, or overlapping scope, but it may edit only when the root's observed model satisfies the same tier and its receipt records `dispatch_method: risk-matched-root`; never use it as a silent convenience fallback.
@@ -100,7 +141,7 @@ The worker must not:
 - add production dependencies or infrastructure without existing approval;
 - continue after discovering a new product choice, owner-layer conflict, secret, destructive action, or material scope expansion.
 
-Require the exact dispatch and Implementation routing receipt above for `openbuild_implementation_fast`, `openbuild_implementation_balanced`, or `openbuild_implementation_strongest` before the selected worker receives its lease. Read-only search/discovery and `openbuild_review_*` profiles are never implementation workers. A proven equivalent native selector, built-in worker, generic bounded subagent, or `root-only` route may write only under the explicitly recorded exception above and when the same lease, TDD, minimality, validation, and review controls remain in force.
+Require the lease-bound pending request and initial routing receipt for `openbuild_implementation_fast`, `openbuild_implementation_balanced`, or `openbuild_implementation_strongest` before edits, then require its terminal receipt and run-bound accepted-handoff event before consuming successful output or release. Read-only search/discovery and `openbuild_review_*` profiles are never implementation workers. A proven equivalent native selector, built-in worker, generic bounded subagent, or `root-only` route may write only under the explicitly recorded exception above and when the same lease, TDD, minimality, validation, and review controls remain in force.
 
 Missing model/tier metadata alone does not block low or medium implementation when the exact named profile is configured, the requested agent selection is recorded, its sandbox is appropriate, and no runtime evidence contradicts the route. Record the effective model/tier as `unknown` or `unobservable`; never claim a model switch or usage saving from the profile name alone. For high work require a confirmed strong route, and for critical work require the strongest proven route plus any applicable authority checkpoint. If the required tier cannot be selected, stop before all test and production code edits rather than silently lowering the risk floor.
 

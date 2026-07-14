@@ -8,6 +8,7 @@ import json
 import re
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 
@@ -17,6 +18,19 @@ SKILL = PLUGIN / "skills" / "build"
 BLINDSPOT_PROTOCOL = SKILL / "references" / "blindspot-protocol.md"
 IMPLEMENTATION_DELEGATION = SKILL / "references" / "implementation-delegation.md"
 REVIEW_PROTOCOL = SKILL / "references" / "review-protocol.md"
+AGENT_RUNNER = SKILL / "scripts" / "agent_runner.py"
+PACKAGED_SEARCH_PROFILE = SKILL / "profiles" / "openbuild_search_separate.toml"
+PACKAGED_SEARCH_MODEL = "gpt-5.3-codex-spark"
+PACKAGED_SEARCH_INSTRUCTIONS = (
+    "You are the already-delegated read-only Explorer. Do not spawn or delegate to another agent.\n\n"
+    "When code discovery, broad rg, route or symbol lookup, owner mapping, or cross-file evidence gathering is needed:\n"
+    "- perform repository search, rg, rg --files, Get-Content, and local file reading yourself;\n"
+    "- do not edit files, write configuration, make product or architecture decisions, commit, push, or answer the user;\n"
+    "- return only a compact evidence map with path:line, symbol or route, a short snippet/signature, and why it matters;\n"
+    "- include relevant negative results, confidence, and the search stop condition;\n"
+    "- keep raw logs and large file dumps out of the result.\n\n"
+    "The main process will do targeted reads only after your result, for verification before edits.\n"
+)
 
 REQUIRED = [
     ROOT / ".agents" / "plugins" / "marketplace.json",
@@ -37,9 +51,12 @@ REQUIRED = [
     SKILL / "references" / "minimality-protocol.md",
     SKILL / "references" / "model-routing.md",
     REVIEW_PROTOCOL,
+    AGENT_RUNNER,
+    PACKAGED_SEARCH_PROFILE,
     SKILL / "references" / "tdd-workflow.md",
     SKILL / "references" / "versioning.md",
     ROOT / "scripts" / "test_validate_package.py",
+    ROOT / "scripts" / "test_agent_runner.py",
 ]
 
 TEXT_SUFFIXES = {".md", ".json", ".yaml", ".yml", ".toml", ".py"}
@@ -59,10 +76,22 @@ VERSION_SYNC_PATHS = {MANIFEST_RELATIVE, "CHANGELOG.md", "README.md", "README.ru
 SEARCH_AGENT = "openbuild_search_separate"
 SEARCH_DISPATCH_FAILURES = {
     "profile-not-discoverable",
+    "profile-incomplete",
+    "cli-unavailable",
+    "chatgpt-auth-unavailable",
     "selector-unavailable",
     "model-unavailable",
     "quota-exhausted",
+    "sandbox-mismatch",
+    "runner-failed",
     "spawn-failed",
+    "worker-timeout",
+    "unusable-evidence",
+}
+EXACT_DISPATCH_METHODS = {
+    "codex-exec-explicit-model",
+    "per-spawn-model",
+    "exact-custom-agent",
 }
 IMPLEMENTATION_AGENT_BY_RISK = {
     "low": ("fast", "openbuild_implementation_fast"),
@@ -93,7 +122,6 @@ REVIEW_ESCALATION_REASONS = {
     "complexity-floor",
 }
 CANONICAL_AGENT_IDS = {
-    "openbuild_search_separate": "openbuild-search-separate",
     "openbuild_search_fallback": "openbuild-search-fallback",
     "openbuild_implementation_fast": "openbuild-implementation-fast",
     "openbuild_implementation_balanced": "openbuild-implementation-balanced",
@@ -171,6 +199,133 @@ def read_text(path: Path, errors: list[str]) -> str:
         return ""
 
 
+def _receipt_exit_code(receipt: dict[str, object]) -> int | None:
+    value = receipt.get("codex_exit_code")
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return None
+
+
+def explicit_success_evidence_is_valid(receipt: dict[str, object]) -> bool:
+    return (
+        receipt.get("codex_exit_evidence") == "valid"
+        and _receipt_exit_code(receipt) == 0
+        and receipt.get("result_evidence") == "valid"
+    )
+
+
+def explicit_failure_evidence_is_valid(receipt: dict[str, object]) -> bool:
+    exit_evidence = receipt.get("codex_exit_evidence")
+    result_evidence = receipt.get("result_evidence")
+    exit_code = _receipt_exit_code(receipt)
+    return (
+        exit_evidence in {"missing", "malformed", "identity-mismatch"}
+        or (exit_evidence == "valid" and exit_code is not None and exit_code != 0)
+        or result_evidence in {"missing", "empty", "invalid"}
+    )
+
+
+def validate_explicit_terminal_evidence(
+    receipt: dict[str, object], *, label: str
+) -> list[str]:
+    """Require complete, internally consistent runner evidence on every explicit terminal receipt."""
+
+    if receipt.get("dispatch_method") != "codex-exec-explicit-model":
+        return []
+    errors: list[str] = []
+    required = {"codex_exit_evidence", "codex_exit_code", "result_evidence"}
+    missing = sorted(field for field in required if field not in receipt)
+    if missing:
+        return [f"{label}: explicit-model terminal receipt missing evidence fields {missing}"]
+    exit_evidence = receipt.get("codex_exit_evidence")
+    result_evidence = receipt.get("result_evidence")
+    raw_exit_code = receipt.get("codex_exit_code")
+    if exit_evidence not in {"valid", "missing", "malformed", "identity-mismatch"}:
+        errors.append(f"{label}: explicit-model terminal receipt has invalid exit evidence state")
+    if result_evidence not in {"valid", "missing", "empty", "invalid"}:
+        errors.append(f"{label}: explicit-model terminal receipt has invalid result evidence state")
+    if exit_evidence == "valid" and (
+        isinstance(raw_exit_code, bool) or not isinstance(raw_exit_code, int)
+    ):
+        errors.append(f"{label}: valid exit evidence requires an integer Codex exit code")
+    if exit_evidence in {"missing", "malformed", "identity-mismatch"} and (
+        raw_exit_code is not None and raw_exit_code != "unknown"
+    ):
+        errors.append(
+            f"{label}: non-valid exit evidence cannot carry a Codex exit code"
+        )
+    run_status = receipt.get("run_status")
+    if run_status == "completed" and not explicit_success_evidence_is_valid(receipt):
+        errors.append(f"{label}: completed receipt needs exit code zero and valid result evidence")
+    if run_status == "failed" and not explicit_failure_evidence_is_valid(receipt):
+        errors.append(
+            f"{label}: failed receipt needs independent exit/result failure evidence"
+        )
+    return errors
+
+
+def validate_prior_terminal_runner_failure(
+    receipts: list[dict[str, object]],
+    *,
+    label: str,
+    bindings: dict[str, object],
+) -> list[str]:
+    """Require a creation-bound stopped explicit-runner failure before native fallback."""
+
+    errors: list[str] = []
+    failures = [
+        receipt
+        for receipt in receipts
+        if receipt.get("dispatch_method") == "codex-exec-explicit-model"
+        and receipt.get("run_status") == "failed"
+    ]
+    if len(failures) != 1:
+        return [f"{label}: native selection requires one prior terminal runner failure"]
+    failure = failures[0]
+    for field, expected in bindings.items():
+        if failure.get(field) != expected:
+            errors.append(f"{label}: prior runner failure changed route binding {field}")
+    errors.extend(validate_explicit_terminal_evidence(failure, label=label))
+    if (
+        failure.get("dispatch_result") != "failed"
+        or failure.get("fallback_reason") not in SEARCH_DISPATCH_FAILURES
+        or failure.get("process_tree_stopped") is not True
+    ):
+        errors.append(
+            f"{label}: prior terminal runner failure must be failed with an allowed reason and stopped process tree"
+        )
+    terminal_event = failure.get("terminal_event")
+    if terminal_event not in {None, "none", "turn.failed", "turn.completed"}:
+        errors.append(f"{label}: prior terminal runner failure has invalid terminal event")
+    if terminal_event == "turn.completed" and not explicit_failure_evidence_is_valid(failure):
+        errors.append(
+            f"{label}: prior runner turn.completed needs independent exit/result failure evidence"
+        )
+    return errors
+
+
+def validate_packaged_search_profile(profile: dict[str, object]) -> list[str]:
+    """Lock the portable Spark profile and its discovery instruction exactly."""
+
+    errors: list[str] = []
+    expected = {
+        "name": SEARCH_AGENT,
+        "model": PACKAGED_SEARCH_MODEL,
+        "model_reasoning_effort": "low",
+        "sandbox_mode": "read-only",
+    }
+    for field, value in expected.items():
+        if profile.get(field) != value:
+            errors.append(f"openbuild_search_separate.toml: {field} must be {value!r}")
+    if profile.get("developer_instructions") != PACKAGED_SEARCH_INSTRUCTIONS:
+        errors.append(
+            "openbuild_search_separate.toml: developer_instructions must match the exact canonical Explorer contract"
+        )
+    return errors
+
+
 def markdown_section(text: str, heading: str) -> str:
     """Return one Markdown section without matching tokens from later sections."""
 
@@ -191,23 +346,24 @@ def markdown_section(text: str, heading: str) -> str:
 
 
 def validate_search_dispatch_trace(events: list[dict[str, str]]) -> list[str]:
-    """Validate a compact observable trace for the first repository lookup."""
+    """Validate start -> activation -> worker search -> terminal receipt -> evidence use."""
 
     errors: list[str] = []
-    lookup_index = next(
-        (index for index, event in enumerate(events) if event.get("event") == "repository-search"),
-        None,
-    )
-    if lookup_index is None:
+    lookup_indices = [
+        index for index, event in enumerate(events) if event.get("event") == "repository-search"
+    ]
+    if not lookup_indices:
         return ["search dispatch trace: missing repository-search event"]
-
-    prior_events = events[:lookup_index]
-    dispatches = [event for event in prior_events if event.get("event") == "search-dispatch"]
-    if not dispatches:
-        errors.append("search dispatch trace: exact agent dispatch must precede repository search")
-        return errors
-
-    dispatch = dispatches[0]
+    lookup_index = lookup_indices[0]
+    dispatch_indices = [
+        index
+        for index, event in enumerate(events[:lookup_index])
+        if event.get("event") == "search-dispatch"
+    ]
+    if not dispatch_indices:
+        return ["search dispatch trace: exact agent dispatch must precede repository search"]
+    dispatch_index = dispatch_indices[0]
+    dispatch = events[dispatch_index]
     agent_name = dispatch.get("agent_name", "")
     task_name = dispatch.get("task_name", "")
     if agent_name != SEARCH_AGENT:
@@ -217,56 +373,371 @@ def validate_search_dispatch_trace(events: list[dict[str, str]]) -> list[str]:
     if not task_name or task_name == agent_name:
         errors.append("search dispatch trace: task_name must be a separate non-profile task label")
 
-    result = dispatch.get("result")
-    fallback_reason = dispatch.get("fallback_reason", "")
-    if result == "selected":
-        if fallback_reason not in {"", "none"}:
+    attempt_result = dispatch.get("result")
+    attempt_reason = dispatch.get("fallback_reason", "")
+    if attempt_result == "selected":
+        if attempt_reason not in {"", "none"}:
             errors.append("search dispatch trace: selected route must not report a fallback reason")
-        if events[lookup_index].get("actor") != SEARCH_AGENT:
-            errors.append("search dispatch trace: selected exact agent must own the first repository search")
-    elif result == "failed":
-        if fallback_reason not in SEARCH_DISPATCH_FAILURES:
+    elif attempt_result == "failed":
+        if attempt_reason not in SEARCH_DISPATCH_FAILURES:
             errors.append("search dispatch trace: failed dispatch must use an allowed fallback reason")
     else:
         errors.append("search dispatch trace: dispatch result must be selected or failed")
 
-    receipt_events = [
-        (index, event)
-        for index, event in enumerate(prior_events)
-        if event.get("event") == "search-routing-receipt"
-    ]
-    if not receipt_events:
-        errors.append("search dispatch trace: routing receipt must precede repository search")
-        return errors
-
-    receipt_index, receipt = receipt_events[-1]
-    dispatch_index = prior_events.index(dispatch)
-    if receipt_index <= dispatch_index:
-        errors.append("search dispatch trace: routing receipt must follow the exact dispatch attempt")
-    required_fields = {
+    receipt_fields = {
         "search_agent",
         "task_name",
         "dispatch_method",
         "configured_model",
+        "model_reasoning_effort",
+        "sandbox",
         "observed_agent",
         "observed_model",
+        "terminal_event",
+        "activated",
+        "run_status",
         "pool",
+        "dispatch_result",
         "fallback_reason",
+        "process_tree_stopped",
+        "run_dir",
+        "worker_pid",
+        "worker_process_identity",
+        "codex_pid",
+        "codex_process_identity",
     }
-    missing = sorted(field for field in required_fields if field not in receipt)
-    if missing:
-        errors.append(f"search dispatch trace: routing receipt missing fields {missing}")
-    if receipt.get("search_agent") != SEARCH_AGENT:
-        errors.append(f"search dispatch trace: routing receipt must name {SEARCH_AGENT}")
-    if receipt.get("task_name") != task_name:
-        errors.append("search dispatch trace: routing receipt task_name must match the separate task label")
-    if receipt.get("dispatch_method") not in {"per-spawn-model", "exact-custom-agent", "unavailable"}:
-        errors.append("search dispatch trace: routing receipt has invalid dispatch method")
-    if result == "selected" and receipt.get("pool") != "separate":
+
+    def validate_common_receipt(receipt: dict[str, str]) -> None:
+        missing = sorted(field for field in receipt_fields if field not in receipt)
+        if missing:
+            errors.append(f"search dispatch trace: routing receipt missing fields {missing}")
+        if receipt.get("search_agent") != SEARCH_AGENT:
+            errors.append(f"search dispatch trace: routing receipt must name {SEARCH_AGENT}")
+        if receipt.get("task_name") != task_name:
+            errors.append("search dispatch trace: routing receipt task_name must match the separate task label")
+        if receipt.get("dispatch_method") not in EXACT_DISPATCH_METHODS | {"unavailable"}:
+            errors.append("search dispatch trace: routing receipt has invalid dispatch method")
+
+    receipts = [
+        (index, event)
+        for index, event in enumerate(events)
+        if event.get("event") == "search-routing-receipt"
+    ]
+    consumption_events = [
+        (index, event)
+        for index, event in enumerate(events)
+        if event.get("event") == "search-evidence-consumed"
+    ]
+    prior_receipts = [(index, receipt) for index, receipt in receipts if dispatch_index < index < lookup_index]
+    if not prior_receipts:
+        errors.append("search dispatch trace: routing receipt must follow dispatch and precede repository search")
+        return errors
+
+    if attempt_result == "failed":
+        receipt_index, receipt = prior_receipts[-1]
+        validate_common_receipt(receipt)
+        errors.extend(
+            validate_explicit_terminal_evidence(receipt, label="search dispatch trace")
+        )
+        if (
+            receipt.get("dispatch_method") == "codex-exec-explicit-model"
+            and receipt.get("sandbox") != "read-only"
+        ):
+            errors.append("search dispatch trace: explicit search runner must be read-only")
+        if receipt.get("run_status") != "failed" or receipt.get("dispatch_result") != "failed":
+            errors.append("search dispatch trace: failed dispatch requires a terminal failed receipt")
+        fallback_reason = receipt.get("fallback_reason", "")
+        if fallback_reason not in SEARCH_DISPATCH_FAILURES or fallback_reason != attempt_reason:
+            errors.append("search dispatch trace: failed receipt must preserve the allowed dispatch reason")
+        terminal_event = receipt.get("terminal_event")
+        if terminal_event not in {None, "none", "turn.failed", "turn.completed"}:
+            errors.append("search dispatch trace: failed explicit-model receipt has invalid terminal event")
+        if terminal_event == "turn.completed" and not explicit_failure_evidence_is_valid(receipt):
+            errors.append("search dispatch trace: failed turn.completed needs independent exit/result failure evidence")
+        if receipt.get("process_tree_stopped") is not True:
+            errors.append("search dispatch trace: terminal failed receipt must confirm the process tree stopped")
+        if consumption_events:
+            errors.append("search dispatch trace: failed worker evidence cannot be consumed")
+        if events[lookup_index].get("actor") == SEARCH_AGENT:
+            errors.append("search dispatch trace: a failed initial dispatch cannot own the fallback search")
+        if fallback_reason == "worker-timeout":
+            confirmations = [
+                event
+                for event in events[dispatch_index + 1 : receipt_index]
+                if event.get("event") == "agent-cancellation-confirmed"
+            ]
+            if not confirmations:
+                errors.append("search dispatch trace: worker-timeout fallback requires cancellation confirmation")
+            else:
+                confirmation = confirmations[-1]
+                if not confirmation.get("worker_pid"):
+                    errors.append("search dispatch trace: cancellation confirmation requires a worker PID")
+                if confirmation.get("codex_started") not in {True, False}:
+                    errors.append("search dispatch trace: cancellation confirmation needs codex_started state")
+                if confirmation.get("codex_started") is True and not confirmation.get("codex_pid"):
+                    errors.append("search dispatch trace: started Codex process requires its PID")
+                if confirmation.get("worker_stopped") is not True or confirmation.get("codex_stopped") is not True:
+                    errors.append("search dispatch trace: cancellation confirmation must prove both processes stopped")
+        return errors
+
+    running_receipts = [
+        (index, receipt)
+        for index, receipt in prior_receipts
+        if receipt.get("run_status") == "running"
+    ]
+    if not running_receipts:
+        errors.append("search dispatch trace: selected worker needs an unactivated running receipt before search")
+        return errors
+    running_index, running = running_receipts[-1]
+    validate_common_receipt(running)
+    if running.get("dispatch_method") == "codex-exec-explicit-model":
+        if (
+            running.get("configured_model") != PACKAGED_SEARCH_MODEL
+            or running.get("model_reasoning_effort") != "low"
+        ):
+            errors.append(
+                "search dispatch trace: primary packaged runner must use fixed Spark model and low effort"
+            )
+    else:
+        packaged_failures = [
+            (index, receipt)
+            for index, receipt in prior_receipts
+            if index < running_index
+            and receipt.get("dispatch_method") == "codex-exec-explicit-model"
+            and receipt.get("configured_model") == PACKAGED_SEARCH_MODEL
+            and receipt.get("model_reasoning_effort") == "low"
+            and receipt.get("run_status") == "failed"
+        ]
+        if not packaged_failures:
+            errors.append(
+                "search dispatch trace: native selected search requires a prior terminal packaged runner failure"
+            )
+        else:
+            _, packaged_failure = packaged_failures[-1]
+            validate_common_receipt(packaged_failure)
+            errors.extend(
+                validate_explicit_terminal_evidence(
+                    packaged_failure,
+                    label="search dispatch trace packaged runner",
+                )
+            )
+            if (
+                packaged_failure.get("dispatch_result") != "failed"
+                or packaged_failure.get("fallback_reason") not in SEARCH_DISPATCH_FAILURES
+                or packaged_failure.get("process_tree_stopped") is not True
+            ):
+                errors.append(
+                    "search dispatch trace: native selection requires a stopped terminal packaged runner failure"
+                )
+            terminal_event = packaged_failure.get("terminal_event")
+            if terminal_event not in {None, "none", "turn.failed", "turn.completed"}:
+                errors.append(
+                    "search dispatch trace: packaged runner failure has invalid terminal event"
+                )
+            if (
+                terminal_event == "turn.completed"
+                and not explicit_failure_evidence_is_valid(packaged_failure)
+            ):
+                errors.append(
+                    "search dispatch trace: packaged runner turn.completed needs independent failure evidence"
+                )
+            if packaged_failure.get("sandbox") != "read-only":
+                errors.append("search dispatch trace: packaged runner failure must preserve read-only sandbox")
+        if running.get("dispatch_method") == "per-spawn-model" and (
+            running.get("configured_model") in {None, "", "unknown", "unobservable"}
+            or running.get("model_reasoning_effort") in {None, "", "unknown", "unobservable"}
+        ):
+            errors.append(
+                "search dispatch trace: per-spawn native fallback requires direct model and reasoning effort"
+            )
+    if running.get("dispatch_result") != "selected" or running.get("fallback_reason") not in {"", "none"}:
+        errors.append("search dispatch trace: running receipt must preserve selected routing")
+    if running.get("activated") is not False or running.get("terminal_event") not in {None, "none"}:
+        errors.append("search dispatch trace: pre-search receipt must be unactivated and non-terminal")
+    if running.get("process_tree_stopped") is not False:
+        errors.append("search dispatch trace: running receipt cannot claim a stopped process tree")
+    if running.get("pool") != "separate":
         errors.append("search dispatch trace: selected exact agent must record the confirmed separate pool")
-    expected_reason = "none" if result == "selected" else fallback_reason
-    if receipt.get("fallback_reason") != expected_reason:
-        errors.append("search dispatch trace: routing receipt fallback reason must match dispatch outcome")
+    if running.get("sandbox") != "read-only":
+        errors.append("search dispatch trace: selected search worker must be read-only")
+    for field in ("run_dir", "worker_pid", "worker_process_identity", "codex_pid", "codex_process_identity"):
+        if not running.get(field):
+            errors.append(f"search dispatch trace: running receipt requires {field}")
+
+    prelookup_failures = [
+        (index, receipt)
+        for index, receipt in prior_receipts
+        if index > running_index and receipt.get("run_status") == "failed"
+    ]
+    if prelookup_failures:
+        terminal_index, terminal = prelookup_failures[-1]
+        validate_common_receipt(terminal)
+        errors.extend(
+            validate_explicit_terminal_evidence(terminal, label="search dispatch trace")
+        )
+        for field in (
+            "search_agent",
+            "task_name",
+            "dispatch_method",
+            "configured_model",
+            "model_reasoning_effort",
+            "run_dir",
+            "worker_pid",
+            "worker_process_identity",
+            "codex_pid",
+            "codex_process_identity",
+        ):
+            if terminal.get(field) != running.get(field):
+                errors.append(f"search dispatch trace: failed terminal receipt changed routing field {field}")
+        fallback_reason = terminal.get("fallback_reason", "")
+        if terminal.get("dispatch_result") != "failed" or fallback_reason not in SEARCH_DISPATCH_FAILURES:
+            errors.append("search dispatch trace: failed terminal receipt needs an allowed fallback reason")
+        if terminal.get("process_tree_stopped") is not True:
+            errors.append("search dispatch trace: failed terminal receipt must confirm stopped process tree")
+        terminal_event = terminal.get("terminal_event")
+        if terminal_event not in {None, "none", "turn.failed", "turn.completed"}:
+            errors.append("search dispatch trace: failed terminal receipt has invalid terminal event")
+        if terminal_event == "turn.completed" and not explicit_failure_evidence_is_valid(terminal):
+            errors.append("search dispatch trace: failed turn.completed needs independent exit/result failure evidence")
+        if terminal.get("activated") is True:
+            activations = [
+                event
+                for event in events[running_index + 1 : terminal_index]
+                if event.get("event") == "search-agent-activated"
+            ]
+            if len(activations) != 1:
+                errors.append("search dispatch trace: activated failed worker needs one matching activation event")
+        if events[lookup_index].get("actor") == SEARCH_AGENT:
+            errors.append("search dispatch trace: failed worker cannot own the fallback repository search")
+        if consumption_events:
+            errors.append("search dispatch trace: failed worker evidence cannot be consumed")
+        if fallback_reason == "worker-timeout":
+            confirmations = [
+                event
+                for event in events[running_index + 1 : terminal_index]
+                if event.get("event") == "agent-cancellation-confirmed"
+            ]
+            if not confirmations:
+                errors.append("search dispatch trace: worker-timeout fallback requires cancellation confirmation")
+            else:
+                confirmation = confirmations[-1]
+                if confirmation.get("worker_stopped") is not True or confirmation.get("codex_stopped") is not True:
+                    errors.append("search dispatch trace: cancellation confirmation must prove both processes stopped")
+        return errors
+
+    activations = [
+        event
+        for event in events[running_index + 1 : lookup_index]
+        if event.get("event") == "search-agent-activated"
+    ]
+    if len(activations) != 1:
+        errors.append("search dispatch trace: exactly one matching activation must precede worker search")
+    else:
+        activation = activations[0]
+        bindings = {
+            "search_agent": SEARCH_AGENT,
+            "task_name": task_name,
+            "run_dir": running.get("run_dir"),
+            "worker_process_identity": running.get("worker_process_identity"),
+            "codex_process_identity": running.get("codex_process_identity"),
+        }
+        for field, expected in bindings.items():
+            if activation.get(field) != expected:
+                errors.append(f"search dispatch trace: activation changed {field}")
+        if activation.get("activated") is not True:
+            errors.append("search dispatch trace: activation event must confirm activated true")
+    if events[lookup_index].get("actor") != SEARCH_AGENT:
+        errors.append("search dispatch trace: selected exact agent must own the first repository search")
+
+    terminal_receipts = [
+        (index, receipt)
+        for index, receipt in receipts
+        if index > lookup_index and receipt.get("run_status") in {"completed", "failed"}
+    ]
+    if not terminal_receipts:
+        errors.append("search dispatch trace: terminal routing receipt must follow worker search")
+        return errors
+    terminal_index, terminal = terminal_receipts[0]
+    worker_searches = [
+        event
+        for event in events[lookup_index:terminal_index]
+        if event.get("event") == "repository-search"
+    ]
+    if any(event.get("actor") != SEARCH_AGENT for event in worker_searches):
+        errors.append(
+            "search dispatch trace: every repository search before the selected worker terminal receipt "
+            f"must remain owned by {SEARCH_AGENT}"
+        )
+    if any(
+        event.get("event") == "repository-search" and event.get("actor") == SEARCH_AGENT
+        for event in events[terminal_index + 1 :]
+    ):
+        errors.append(
+            "search dispatch trace: selected worker cannot perform repository search after its terminal receipt"
+        )
+    validate_common_receipt(terminal)
+    errors.extend(validate_explicit_terminal_evidence(terminal, label="search dispatch trace"))
+    for field in (
+        "search_agent",
+        "task_name",
+        "dispatch_method",
+        "configured_model",
+        "model_reasoning_effort",
+        "sandbox",
+        "pool",
+        "run_dir",
+        "worker_pid",
+        "worker_process_identity",
+        "codex_pid",
+        "codex_process_identity",
+    ):
+        if terminal.get(field) != running.get(field):
+            errors.append(f"search dispatch trace: terminal receipt changed routing field {field}")
+    if terminal.get("activated") is not True or terminal.get("process_tree_stopped") is not True:
+        errors.append("search dispatch trace: terminal receipt must confirm activation and stopped process tree")
+
+    run_status = terminal.get("run_status")
+    if run_status == "completed":
+        if terminal.get("dispatch_result") != "selected" or terminal.get("fallback_reason") not in {"", "none"}:
+            errors.append("search dispatch trace: completed terminal receipt is inconsistent")
+        if terminal.get("terminal_event") != "turn.completed":
+            errors.append("search dispatch trace: completed explicit-model receipt requires turn.completed")
+        if not explicit_success_evidence_is_valid(terminal):
+            errors.append("search dispatch trace: completed receipt needs exit code zero and valid result evidence")
+        if len(consumption_events) != 1:
+            errors.append(
+                "search dispatch trace: completed worker needs exactly one run-bound search evidence consumption"
+            )
+        else:
+            consumption_index, consumption = consumption_events[0]
+            if (
+                consumption.get("actor") != "root"
+                or consumption.get("search_agent") != SEARCH_AGENT
+                or consumption.get("run_dir") != terminal.get("run_dir")
+            ):
+                errors.append(
+                    "search dispatch trace: completed worker needs exactly one run-bound search evidence consumption"
+                )
+            elif consumption_index <= terminal_index:
+                errors.append("search dispatch trace: terminal receipt must precede search evidence consumption")
+    else:
+        if terminal.get("dispatch_result") != "failed" or terminal.get("fallback_reason") not in SEARCH_DISPATCH_FAILURES:
+            errors.append("search dispatch trace: failed terminal receipt needs an allowed fallback reason")
+        terminal_event = terminal.get("terminal_event")
+        if terminal_event not in {None, "none", "turn.failed", "turn.completed"}:
+            errors.append("search dispatch trace: failed terminal receipt has invalid terminal event")
+        if terminal_event == "turn.completed" and not explicit_failure_evidence_is_valid(terminal):
+            errors.append("search dispatch trace: failed turn.completed needs independent exit/result failure evidence")
+        if consumption_events:
+            errors.append("search dispatch trace: failed worker evidence cannot be consumed")
+        if terminal.get("fallback_reason") == "worker-timeout":
+            confirmations = [
+                event
+                for event in events[running_index + 1 : terminal_index]
+                if event.get("event") == "agent-cancellation-confirmed"
+            ]
+            if not confirmations or confirmations[-1].get("worker_stopped") is not True or confirmations[-1].get("codex_stopped") is not True:
+                errors.append("search dispatch trace: worker-timeout fallback requires stopped-process confirmation")
 
     return errors
 
@@ -1174,21 +1645,32 @@ def validate_decision_authority_trace(events: list[dict[str, str]]) -> list[str]
 
 
 def validate_implementation_dispatch_trace(events: list[dict[str, str]]) -> list[str]:
-    """Validate that the risk-matched exact writer owns the first code edit."""
+    """Validate lease → dispatch → running receipt → writes → terminal receipt → release."""
 
     errors: list[str] = []
-    write_index = next(
-        (
-            index
-            for index, event in enumerate(events)
-            if event.get("event") in {"test-write", "code-write"}
-        ),
-        None,
-    )
-    if write_index is None:
+    write_indexes = [
+        index
+        for index, event in enumerate(events)
+        if event.get("event") in {"test-write", "code-write"}
+    ]
+    if not write_indexes:
         return ["implementation dispatch trace: missing test-write or code-write event"]
+    first_write_index = write_indexes[0]
+    last_write_index = write_indexes[-1]
 
-    prior_events = events[:write_index]
+    prior_events = events[:first_write_index]
+    lease_events = [
+        (index, event)
+        for index, event in enumerate(prior_events)
+        if event.get("event") == "writer-lease-acquired"
+    ]
+    if not lease_events:
+        return ["implementation dispatch trace: writer lease must be acquired before dispatch"]
+    lease_index, lease_event = lease_events[-1]
+    lease_id = lease_event.get("lease", "")
+    if not lease_id:
+        errors.append("implementation dispatch trace: acquired writer lease needs an ID")
+
     dispatches = [event for event in prior_events if event.get("event") == "implementation-dispatch"]
     if not dispatches:
         return ["implementation dispatch trace: exact writer dispatch must precede every code edit"]
@@ -1214,6 +1696,11 @@ def validate_implementation_dispatch_trace(events: list[dict[str, str]]) -> list
         errors.append("implementation dispatch trace: code edits require a selected exact writer")
     if dispatch.get("fallback_reason", "none") not in {"", "none"}:
         errors.append("implementation dispatch trace: selected exact writer must not report fallback")
+    dispatch_index = prior_events.index(dispatch)
+    if dispatch_index <= lease_index:
+        errors.append("implementation dispatch trace: writer lease must precede exact dispatch")
+    if dispatch.get("lease") != lease_id:
+        errors.append("implementation dispatch trace: dispatch lease must match the acquired lease")
 
     receipt_events = [
         (index, event)
@@ -1225,7 +1712,6 @@ def validate_implementation_dispatch_trace(events: list[dict[str, str]]) -> list
         return errors
 
     receipt_index, receipt = receipt_events[-1]
-    dispatch_index = prior_events.index(dispatch)
     if receipt_index <= dispatch_index:
         errors.append("implementation dispatch trace: routing receipt must follow exact writer dispatch")
     required_fields = {
@@ -1235,12 +1721,21 @@ def validate_implementation_dispatch_trace(events: list[dict[str, str]]) -> list
         "requested_tier",
         "dispatch_method",
         "configured_model",
+        "model_reasoning_effort",
         "observed_agent",
         "observed_model",
         "sandbox",
         "lease",
+        "run_status",
         "dispatch_result",
         "fallback_reason",
+        "activated",
+        "run_dir",
+        "worker_pid",
+        "worker_process_identity",
+        "codex_pid",
+        "codex_process_identity",
+        "process_tree_stopped",
     }
     missing = sorted(field for field in required_fields if field not in receipt)
     if missing:
@@ -1253,16 +1748,229 @@ def validate_implementation_dispatch_trace(events: list[dict[str, str]]) -> list
         errors.append("implementation dispatch trace: receipt task_name must match the separate task label")
     if receipt.get("requested_tier") != expected_tier:
         errors.append("implementation dispatch trace: receipt tier must match the risk floor")
-    if receipt.get("dispatch_method") not in {"per-spawn-model", "exact-custom-agent"}:
+    if receipt.get("lease") != lease_id:
+        errors.append("implementation dispatch trace: running receipt lease must match the acquired lease")
+    dispatch_method = receipt.get("dispatch_method")
+    if dispatch_method not in EXACT_DISPATCH_METHODS:
         errors.append("implementation dispatch trace: writer requires an exact dispatch method")
+    if dispatch_method == "codex-exec-explicit-model":
+        if not receipt.get("model_reasoning_effort"):
+            errors.append("implementation dispatch trace: explicit-model receipt needs model_reasoning_effort")
+        if receipt.get("terminal_event") not in {None, "none"}:
+            errors.append("implementation dispatch trace: running receipt must not claim terminal completion")
+    else:
+        prior_receipts = [
+            prior_receipt
+            for index, prior_receipt in receipt_events
+            if index < receipt_index
+        ]
+        errors.extend(
+            validate_prior_terminal_runner_failure(
+                prior_receipts,
+                label="implementation dispatch trace",
+                bindings={
+                    "risk": risk,
+                    "requested_agent": expected_agent,
+                    "task_name": task_name,
+                    "requested_tier": expected_tier,
+                    "lease": lease_id,
+                },
+            )
+        )
+        if dispatch_method == "per-spawn-model" and (
+            receipt.get("configured_model") in {None, "", "unknown", "unobservable"}
+            or receipt.get("model_reasoning_effort") in {None, "", "unknown", "unobservable"}
+        ):
+            errors.append(
+                "implementation dispatch trace: per-spawn native fallback requires direct model and reasoning effort"
+            )
+    if receipt.get("run_status") != "running":
+        errors.append("implementation dispatch trace: pre-write receipt must be running")
+    if receipt.get("activated") is not False:
+        errors.append("implementation dispatch trace: pre-write receipt must be recorded before activation")
+    if receipt.get("process_tree_stopped") is not False:
+        errors.append("implementation dispatch trace: running receipt cannot claim a stopped process tree")
     if receipt.get("sandbox") != "workspace-write":
         errors.append("implementation dispatch trace: writer sandbox must be workspace-write")
     if receipt.get("dispatch_result") != "selected":
         errors.append("implementation dispatch trace: receipt must confirm selected writer")
     if receipt.get("fallback_reason") not in {"", "none"}:
         errors.append("implementation dispatch trace: selected writer receipt must not report fallback")
-    if events[write_index].get("actor") != expected_agent:
-        errors.append("implementation dispatch trace: exact risk-matched writer must own the first code edit")
+
+    activation_events = [
+        (index, event)
+        for index, event in enumerate(events)
+        if receipt_index < index < first_write_index
+        and event.get("event") == "implementation-agent-activated"
+    ]
+    if len(activation_events) != 1:
+        errors.append(
+            "implementation dispatch trace: exactly one activation event must follow the recorded receipt and precede every edit"
+        )
+    else:
+        _, activation = activation_events[0]
+        activation_bindings = {
+            "lease": lease_id,
+            "agent_name": expected_agent,
+            "task_name": task_name,
+            "run_dir": receipt.get("run_dir"),
+            "worker_process_identity": receipt.get("worker_process_identity"),
+            "codex_process_identity": receipt.get("codex_process_identity"),
+        }
+        for field, expected_value in activation_bindings.items():
+            if activation.get(field) != expected_value:
+                errors.append(
+                    f"implementation dispatch trace: activation event changed lease/run binding {field}"
+                )
+        if activation.get("activated") is not True:
+            errors.append("implementation dispatch trace: activation event must confirm activated true")
+    if any(events[index].get("actor") != expected_agent for index in write_indexes):
+        errors.append("implementation dispatch trace: exact risk-matched writer must own every code edit")
+
+    terminal_receipts = [
+        (index, event)
+        for index, event in enumerate(events)
+        if index > last_write_index
+        and event.get("event") == "implementation-routing-receipt"
+        and event.get("lease") == lease_id
+    ]
+    if not terminal_receipts:
+        errors.append("implementation dispatch trace: terminal routing receipt must follow writer edits")
+        return errors
+    terminal_index, terminal = terminal_receipts[0]
+    for field in (
+        "risk",
+        "requested_agent",
+        "task_name",
+        "requested_tier",
+        "dispatch_method",
+        "configured_model",
+        "model_reasoning_effort",
+        "observed_agent",
+        "observed_model",
+        "terminal_event",
+        "sandbox",
+        "lease",
+        "run_status",
+        "dispatch_result",
+        "fallback_reason",
+        "process_tree_stopped",
+        "activated",
+        "run_dir",
+        "worker_pid",
+        "worker_process_identity",
+        "codex_pid",
+        "codex_process_identity",
+        "codex_exit_evidence",
+        "codex_exit_code",
+        "result_evidence",
+    ):
+        if field not in terminal:
+            errors.append(f"implementation dispatch trace: terminal receipt missing field {field}")
+    for field in (
+        "risk",
+        "requested_agent",
+        "task_name",
+        "requested_tier",
+        "dispatch_method",
+        "configured_model",
+        "model_reasoning_effort",
+        "sandbox",
+        "lease",
+        "run_dir",
+        "worker_pid",
+        "worker_process_identity",
+        "codex_pid",
+        "codex_process_identity",
+    ):
+        if terminal.get(field) != receipt.get(field):
+            errors.append(f"implementation dispatch trace: terminal receipt changed routing field {field}")
+    run_status = terminal.get("run_status")
+    errors.extend(
+        validate_explicit_terminal_evidence(terminal, label="implementation dispatch trace")
+    )
+    if terminal.get("process_tree_stopped") is not True:
+        errors.append("implementation dispatch trace: terminal receipt must confirm stopped process tree")
+    if terminal.get("activated") is not True:
+        errors.append("implementation dispatch trace: terminal receipt must confirm activation")
+    if run_status == "completed":
+        if terminal.get("dispatch_result") != "selected" or terminal.get("fallback_reason") not in {"", "none"}:
+            errors.append("implementation dispatch trace: completed writer terminal receipt is inconsistent")
+        if dispatch_method == "codex-exec-explicit-model" and terminal.get("terminal_event") != "turn.completed":
+            errors.append("implementation dispatch trace: terminal explicit-model receipt requires turn.completed")
+        if dispatch_method == "codex-exec-explicit-model" and not explicit_success_evidence_is_valid(terminal):
+            errors.append(
+                "implementation dispatch trace: completed writer needs exit code zero and valid result evidence"
+            )
+    elif run_status == "failed":
+        if terminal.get("dispatch_result") != "failed" or terminal.get("fallback_reason") in {"", "none"}:
+            errors.append("implementation dispatch trace: failed writer terminal receipt needs a failure reason")
+        terminal_event = terminal.get("terminal_event")
+        if terminal_event not in {"turn.failed", "turn.completed", "none", None}:
+            errors.append("implementation dispatch trace: failed writer terminal event is invalid")
+        if (
+            dispatch_method == "codex-exec-explicit-model"
+            and terminal_event == "turn.completed"
+            and not explicit_failure_evidence_is_valid(terminal)
+        ):
+            errors.append(
+                "implementation dispatch trace: failed turn.completed needs independent exit/result failure evidence"
+            )
+    else:
+        errors.append("implementation dispatch trace: terminal receipt must report completed or failed")
+
+    handoff_events = [
+        (index, event)
+        for index, event in enumerate(events)
+        if event.get("event") == "implementation-handoff-accepted"
+    ]
+    accepted_handoff_index: int | None = None
+    if run_status == "completed":
+        valid_handoffs = [
+            (index, event) for index, event in handoff_events if index > terminal_index
+        ]
+        if len(valid_handoffs) != 1 or len(handoff_events) != 1:
+            errors.append(
+                "implementation dispatch trace: completed writer needs one run-bound accepted handoff after terminal evidence"
+            )
+        else:
+            accepted_handoff_index, handoff = valid_handoffs[0]
+            handoff_bindings = {
+                "lease": lease_id,
+                "agent_name": expected_agent,
+                "task_name": task_name,
+                "run_dir": terminal.get("run_dir"),
+                "worker_process_identity": terminal.get("worker_process_identity"),
+                "codex_process_identity": terminal.get("codex_process_identity"),
+                "result_evidence": "valid",
+            }
+            for field, expected_value in handoff_bindings.items():
+                if handoff.get(field) != expected_value:
+                    errors.append(
+                        f"implementation dispatch trace: accepted handoff changed terminal binding {field}"
+                    )
+    elif handoff_events:
+        errors.append("implementation dispatch trace: failed writer result cannot be accepted as a handoff")
+
+    premature_releases = [
+        event
+        for index, event in enumerate(events)
+        if lease_index < index < terminal_index and event.get("event") == "writer-lease-released"
+    ]
+    if premature_releases:
+        errors.append("implementation dispatch trace: writer lease was released before terminal receipt")
+
+    release_events = [
+        (index, event)
+        for index, event in enumerate(events)
+        if index > terminal_index and event.get("event") == "writer-lease-released"
+    ]
+    if not release_events:
+        errors.append("implementation dispatch trace: writer lease release must follow terminal receipt")
+    elif release_events[0][1].get("lease") != lease_id:
+        errors.append("implementation dispatch trace: released lease must match the acquired lease")
+    elif accepted_handoff_index is not None and release_events[0][0] <= accepted_handoff_index:
+        errors.append("implementation dispatch trace: lease release must follow accepted handoff")
 
     return errors
 
@@ -1345,29 +2053,61 @@ def validate_review_escalation_trace(events: list[dict[str, str]]) -> list[str]:
             dispatch_indexes[position + 1] if position + 1 < len(dispatch_indexes) else len(events)
         )
         window = events[dispatch_index + 1 : next_dispatch_index]
-        receipt_offset = next(
-            (
-                offset
-                for offset, event in enumerate(window)
-                if event.get("event") == "review-routing-receipt"
-            ),
-            None,
-        )
-        result_offset = next(
-            (offset for offset, event in enumerate(window) if event.get("event") == "review-result"),
-            None,
-        )
-        if receipt_offset is None:
-            errors.append("review escalation trace: review routing receipt must follow exact dispatch")
+        receipts = [
+            (offset, event)
+            for offset, event in enumerate(window)
+            if event.get("event") == "review-routing-receipt"
+        ]
+        running_receipts = [
+            (offset, receipt)
+            for offset, receipt in receipts
+            if receipt.get("run_status") == "running"
+        ]
+        terminal_receipts = [
+            (offset, receipt)
+            for offset, receipt in receipts
+            if receipt.get("run_status") in {"completed", "failed"}
+        ]
+        activations = [
+            (offset, event)
+            for offset, event in enumerate(window)
+            if event.get("event") == "review-agent-activated"
+        ]
+        results = [
+            (offset, event)
+            for offset, event in enumerate(window)
+            if event.get("event") == "review-result"
+        ]
+        if len(running_receipts) != 1:
+            errors.append(
+                "review escalation trace: exact review requires one selected running routing receipt"
+            )
+        if len(activations) != 1:
+            errors.append("review escalation trace: exact review requires one matching activation event")
+        if len(results) != 1:
+            errors.append("review escalation trace: selected reviewer must return one structured result")
+        if not running_receipts or not activations or not results:
             continue
-        if result_offset is None:
-            errors.append("review escalation trace: selected reviewer must return a structured result")
-            continue
-        if receipt_offset >= result_offset:
-            errors.append("review escalation trace: review routing receipt must precede reviewer result")
 
-        receipt = window[receipt_offset]
-        result = window[result_offset]
+        running_offset, running = running_receipts[0]
+        selected_terminal_receipts = [
+            (offset, receipt)
+            for offset, receipt in terminal_receipts
+            if offset > running_offset
+        ]
+        if len(selected_terminal_receipts) != 1:
+            errors.append(
+                "review escalation trace: exact review requires one terminal receipt after selected running routing"
+            )
+            continue
+        activation_offset, activation = activations[0]
+        terminal_offset, terminal = selected_terminal_receipts[0]
+        result_offset, result = results[0]
+        if not running_offset < activation_offset < terminal_offset < result_offset:
+            errors.append(
+                "review escalation trace: lifecycle must be running receipt, activation, terminal receipt, then result"
+            )
+
         required_receipt = {
             "diff_revision",
             "risk_floor",
@@ -1376,31 +2116,150 @@ def validate_review_escalation_trace(events: list[dict[str, str]]) -> list[str]:
             "requested_tier",
             "dispatch_method",
             "configured_model",
+            "model_reasoning_effort",
             "observed_agent",
             "observed_model",
+            "terminal_event",
+            "activated",
+            "run_status",
             "sandbox",
             "dispatch_result",
             "fallback_reason",
+            "process_tree_stopped",
+            "run_dir",
+            "worker_pid",
+            "worker_process_identity",
+            "codex_pid",
+            "codex_process_identity",
+            "codex_exit_evidence",
+            "codex_exit_code",
+            "result_evidence",
         }
-        missing_receipt = sorted(field for field in required_receipt if field not in receipt)
-        if missing_receipt:
-            errors.append(f"review escalation trace: routing receipt missing fields {missing_receipt}")
-        if receipt.get("diff_revision") != diff_revision:
-            errors.append("review escalation trace: receipt diff revision must match dispatch")
-        if receipt.get("risk_floor") != expected_start:
-            errors.append("review escalation trace: receipt must record the risk review floor")
-        if receipt.get("requested_agent") != expected_agent or receipt.get("requested_tier") != tier:
-            errors.append("review escalation trace: receipt must name the exact requested reviewer")
-        if receipt.get("task_name") != task_name:
-            errors.append("review escalation trace: receipt task_name must match the separate task label")
-        if receipt.get("dispatch_method") not in {"per-spawn-model", "exact-custom-agent"}:
+        for phase, receipt in (("running", running), ("terminal", terminal)):
+            missing_receipt = sorted(field for field in required_receipt if field not in receipt)
+            if missing_receipt:
+                errors.append(
+                    f"review escalation trace: {phase} routing receipt missing fields {missing_receipt}"
+                )
+            if receipt.get("diff_revision") != diff_revision:
+                errors.append(f"review escalation trace: {phase} receipt diff revision must match dispatch")
+            if receipt.get("risk_floor") != expected_start:
+                errors.append(f"review escalation trace: {phase} receipt must record the risk review floor")
+            if receipt.get("requested_agent") != expected_agent or receipt.get("requested_tier") != tier:
+                errors.append(f"review escalation trace: {phase} receipt must name the exact requested reviewer")
+            if receipt.get("task_name") != task_name:
+                errors.append(f"review escalation trace: {phase} receipt task_name must match")
+
+        dispatch_method = running.get("dispatch_method")
+        if dispatch_method not in EXACT_DISPATCH_METHODS:
             errors.append("review escalation trace: reviewer requires an exact dispatch method")
-        if receipt.get("sandbox") != "read-only":
+        if dispatch_method == "codex-exec-explicit-model":
+            if not running.get("model_reasoning_effort"):
+                errors.append("review escalation trace: explicit-model receipt needs model_reasoning_effort")
+            if any(offset < running_offset for offset, _ in receipts):
+                errors.append(
+                    "review escalation trace: primary explicit runner cannot follow an earlier routing receipt"
+                )
+        else:
+            prior_receipts = [
+                prior_receipt
+                for offset, prior_receipt in receipts
+                if offset < running_offset
+            ]
+            errors.extend(
+                validate_prior_terminal_runner_failure(
+                    prior_receipts,
+                    label="review escalation trace",
+                    bindings={
+                        "diff_revision": diff_revision,
+                        "risk_floor": expected_start,
+                        "requested_agent": expected_agent,
+                        "task_name": task_name,
+                        "requested_tier": tier,
+                    },
+                )
+            )
+            if dispatch_method == "per-spawn-model" and (
+                running.get("configured_model") in {None, "", "unknown", "unobservable"}
+                or running.get("model_reasoning_effort") in {None, "", "unknown", "unobservable"}
+            ):
+                errors.append(
+                    "review escalation trace: per-spawn native fallback requires direct model and reasoning effort"
+                )
+        if running.get("activated") is not False or running.get("terminal_event") not in {None, "none"}:
+            errors.append("review escalation trace: running receipt must be unactivated and non-terminal")
+        if running.get("process_tree_stopped") is not False:
+            errors.append("review escalation trace: running receipt cannot claim a stopped process tree")
+        running_exit_code = running.get("codex_exit_code")
+        if (
+            running.get("codex_exit_evidence") != "missing"
+            or (running_exit_code is not None and running_exit_code != "unknown")
+            or running.get("result_evidence") != "missing"
+        ):
+            errors.append(
+                "review escalation trace: running receipt must carry missing/unknown/missing evidence"
+            )
+        if running.get("dispatch_result") != "selected" or running.get("fallback_reason") not in {"", "none"}:
+            errors.append("review escalation trace: running receipt must preserve selected routing")
+        for field in ("run_dir", "worker_pid", "worker_process_identity", "codex_pid", "codex_process_identity"):
+            if not running.get(field):
+                errors.append(f"review escalation trace: running receipt requires {field}")
+        if running.get("sandbox") != "read-only":
             errors.append("review escalation trace: reviewer sandbox must be read-only")
-        if receipt.get("dispatch_result") != "selected":
-            errors.append("review escalation trace: receipt must confirm selected reviewer")
-        if receipt.get("fallback_reason") not in {"", "none"}:
-            errors.append("review escalation trace: selected reviewer receipt must not report fallback")
+
+        activation_bindings = {
+            "diff_revision": diff_revision,
+            "requested_agent": expected_agent,
+            "task_name": task_name,
+            "run_dir": running.get("run_dir"),
+            "worker_process_identity": running.get("worker_process_identity"),
+            "codex_process_identity": running.get("codex_process_identity"),
+        }
+        for field, expected in activation_bindings.items():
+            if activation.get(field) != expected:
+                errors.append(f"review escalation trace: activation changed {field}")
+        if activation.get("activated") is not True:
+            errors.append("review escalation trace: activation event must confirm activated true")
+
+        immutable_fields = {
+            "diff_revision",
+            "risk_floor",
+            "requested_agent",
+            "task_name",
+            "requested_tier",
+            "dispatch_method",
+            "configured_model",
+            "model_reasoning_effort",
+            "sandbox",
+            "run_dir",
+            "worker_pid",
+            "worker_process_identity",
+            "codex_pid",
+            "codex_process_identity",
+        }
+        for field in immutable_fields:
+            if terminal.get(field) != running.get(field):
+                errors.append(f"review escalation trace: terminal receipt changed routing field {field}")
+        if terminal.get("activated") is not True or terminal.get("process_tree_stopped") is not True:
+            errors.append("review escalation trace: terminal receipt must confirm activation and stopped process tree")
+        if terminal.get("run_status") != "completed":
+            errors.append("review escalation trace: reviewer result requires a completed terminal receipt")
+        if terminal.get("dispatch_result") != "selected" or terminal.get("fallback_reason") not in {"", "none"}:
+            errors.append("review escalation trace: terminal receipt must preserve selected routing")
+        if terminal.get("terminal_event") != "turn.completed":
+            errors.append("review escalation trace: completed explicit-model receipt requires turn.completed")
+        if terminal.get("observed_agent") != expected_agent:
+            errors.append("review escalation trace: terminal receipt must observe the exact reviewer")
+        errors.extend(
+            validate_explicit_terminal_evidence(
+                terminal,
+                label="review escalation trace",
+            )
+        )
+        if not explicit_success_evidence_is_valid(terminal):
+            errors.append(
+                "review escalation trace: terminal receipt needs exit code zero and valid result evidence"
+            )
 
         required_result = {
             "diff_revision",
@@ -1875,6 +2734,18 @@ def validate_usage_routing_contract(
 ) -> list[str]:
     errors: list[str] = []
 
+    explicit_discovery = markdown_section(skill_text, "## Explicit Code Discovery Delegation")
+    for token in [
+        "first use `tool_search` to expose multi-agent tools if they are not already visible",
+        "spawn a read-only `explorer` subagent with `model: gpt-5.3-codex-spark`",
+        "delegate repository search, `rg`, `Get-Content`, and local file reading to that subagent",
+        "compact evidence map with `path:line`, symbol/route, snippet/signature, and why it matters",
+        "do targeted main-process reads only after the subagent result",
+        "Fallback to local `rg` only when subagents are unavailable, the search is trivial, or the relevant file is already known",
+    ]:
+        if token not in explicit_discovery:
+            errors.append(f"SKILL.md explicit code discovery delegation: missing {token}")
+
     search_preflight = markdown_section(skill_text, "## Initialize search routing")
     for token in [
         "Before locating a specification",
@@ -1882,8 +2753,11 @@ def validate_usage_routing_contract(
         "every repository lookup",
         "any new file/symbol/grep lookup",
         "Spawn the custom agent named `openbuild_search_separate`",
+        "scripts/agent_runner.py",
+        "codex-exec-explicit-model",
         "A generic subagent, a descriptive task name",
         "exact dispatch succeeds or returns an allowed fallback reason",
+        "Use a native spawn only after the launcher records an allowed terminal failure",
     ]:
         if token not in search_preflight:
             category = "exact agent dispatch" if "agent" in token or "exact dispatch" in token else "search preflight"
@@ -1928,9 +2802,16 @@ def validate_usage_routing_contract(
         "quota-exhausted",
         "spawn-failed",
         "routing receipt",
+        "agent_runner.py",
+        "codex-exec-explicit-model",
+        "turn.completed",
         "configured_model",
         "observed_model",
         "fallback_reason",
+        "unactivated `running` routing receipt",
+        "only then consume the evidence",
+        "exit code of zero",
+        "same-named project/user profiles cannot override it",
     ]:
         if token not in search_order:
             if token in SEARCH_DISPATCH_FAILURES:
@@ -1963,13 +2844,19 @@ def validate_usage_routing_contract(
         "critical work requires the strongest proven route",
         "stop before every test or production code edit",
         "rather than silently lowering the risk floor",
-        "Dispatch the exact selected profile before every test or production code edit",
+        "acquire the single-writer lease for the exact selected profile",
+        "`running` Implementation routing receipt",
+        "implementation-agent-activated",
         "`agent_name`",
         "`task_name`",
         "Implementation routing receipt",
+        "implementation-handoff-accepted",
+        "agent_runner.py",
+        "codex-exec-explicit-model",
+        "turn.completed",
     ]:
         if token not in implementation_route:
-            category = "exact writer dispatch" if token.startswith("Dispatch the exact") else "implementation routing"
+            category = "exact writer dispatch" if "single-writer lease" in token else "implementation routing"
             errors.append(f"model-routing.md {category}: missing {token}")
 
     review_route = markdown_section(model_routing, "### Exact sequential reviewer dispatch")
@@ -1982,6 +2869,13 @@ def validate_usage_routing_contract(
         "fast → balanced → strong → strongest",
         "Move exactly one proven tier higher",
         "Review routing receipt",
+        "unactivated `running` Review routing receipt",
+        "review-agent-activated",
+        "creation-bound exit code zero",
+        "valid result evidence",
+        "agent_runner.py",
+        "codex-exec-explicit-model",
+        "turn.completed",
         "`agent_name`",
         "`task_name`",
         "Reviewers remain read-only",
@@ -2040,6 +2934,9 @@ def validate_usage_routing_contract(
         "do not pay for repeated failed attempts",
         "before the root runs any new repository search command",
         "generic spawn or task label",
+        "agent_runner.py",
+        "codex-exec-explicit-model",
+        "turn.completed",
     ]:
         if token not in mandatory_search:
             category = "exact agent dispatch" if "root runs" in token or "generic spawn" in token else "usage routing"
@@ -2053,9 +2950,15 @@ def validate_usage_routing_contract(
         "configured_model:",
         "observed_agent:",
         "observed_model:",
+        "activated: true | false",
         "pool:",
         "dispatch_result:",
         "fallback_reason:",
+        "search-agent-activated",
+        "search-evidence-consumed",
+        "A failed run never emits `search-evidence-consumed`",
+        "codex_exit_evidence:",
+        "result_evidence:",
         "usage dashboard as secondary evidence",
     ]:
         if token not in routing_receipt:
@@ -2075,6 +2978,9 @@ def validate_usage_routing_contract(
         "`agent_name`",
         "`task_name`",
         "Implementation routing receipt",
+        "codex_exit_evidence:",
+        "implementation-handoff-accepted",
+        "Every terminal explicit-model receipt",
     ]:
         if token not in implementation:
             if token.startswith("Dispatch that exact"):
@@ -2093,10 +2999,17 @@ def validate_usage_routing_contract(
         "critical` → `openbuild_review_strongest",
         "fast → balanced → strong → strongest",
         "Review routing receipt",
+        "review-agent-activated",
+        "run_status:",
+        "process_tree_stopped:",
+        "codex_exit_evidence:",
+        "codex_exit_code:",
+        "result_evidence:",
         "task_name:",
         "sandbox: <read-only",
         "A configured profile with unobservable model metadata may satisfy low or medium selection",
         "High and critical floors still require proven strong/strongest capability",
+        "exact non-terminal evidence tuple",
     ]:
         if token not in review_dispatch:
             errors.append(f"review-protocol.md exact reviewer routing: missing {token}")
@@ -2116,13 +3029,18 @@ def validate_usage_routing_contract(
             "openbuild_implementation_fast",
             "openbuild_implementation_balanced",
             "Implementation routing receipt",
+            "implementation-handoff-accepted",
             "Progressive review uses the same `agent_name`/`task_name` separation",
             "openbuild_review_balanced",
             "openbuild_review_strongest",
             "Review routing receipt",
+            "review-agent-activated",
+            "creation-bound exit code zero",
+            "valid result evidence",
             "fast → balanced → strong → strongest",
             "Escalation",
             "model_reasoning_effort",
+            "search-evidence-consumed",
         ]:
             if token not in readme_usage:
                 errors.append(f"README.md usage-aware model routing: missing {token}")
@@ -2142,13 +3060,18 @@ def validate_usage_routing_contract(
             "openbuild_implementation_fast",
             "openbuild_implementation_balanced",
             "Implementation routing receipt",
+            "implementation-handoff-accepted",
             "Progressive review применяет то же разделение `agent_name`/`task_name`",
             "openbuild_review_balanced",
             "openbuild_review_strongest",
             "Review routing receipt",
+            "review-agent-activated",
+            "creation-bound exit code zero",
+            "valid result evidence",
             "fast → balanced → strong → strongest",
             "Эскалация",
             "model_reasoning_effort",
+            "search-evidence-consumed",
         ]:
             if token not in readme_ru_usage:
                 errors.append(f"README.ru.md usage-aware model routing: missing {token}")
@@ -2456,6 +3379,71 @@ def main() -> int:
     if "this Build skill" not in metadata_text or "auto mode" not in metadata_text:
         fail(errors, "agents/openai.yaml: default prompt must be invocation-neutral and select auto mode")
 
+    runner_text = read_text(AGENT_RUNNER, errors)
+    for token in [
+        "codex-exec-explicit-model",
+        "model_reasoning_effort",
+        "turn.completed",
+        "CODEX_API_KEY",
+        "OPENAI_API_KEY",
+        "ChatGPT",
+        "Do not spawn or delegate to another agent",
+        "features.multi_agent=false",
+        "forced_login_method",
+        "model_provider",
+        "--lease-id",
+        "process_tree_stopped",
+        "activate",
+        "process_identity",
+        "process_identity_from_popen",
+        "create_windows_kill_job",
+        "windows_directory_is_private",
+        "darwin_process_start_time",
+        "ps_process_group_status",
+        "codex_exit_evidence",
+        "codex-exit.json",
+        "ACTIVE_WORKER_FINALIZING",
+        "process_tree_record_state",
+        "refusing group signal",
+        "activation does not match the live creation-bound Codex process",
+        "communicate_after_activation",
+        "process_record_state",
+        "model_providers",
+        "final_result_error",
+        "prompt.md",
+        "Python 3.11",
+        "startup cleanup is unconfirmed",
+    ]:
+        if token not in runner_text:
+            fail(errors, f"agent_runner.py: missing explicit-model contract {token}")
+    fixed_search_resolution = runner_text.find('if agent_name == "openbuild_search_separate":')
+    custom_scope_resolution = runner_text.find(
+        'scopes = [repo.resolve() / ".codex" / "agents", codex_home.resolve() / "agents"]'
+    )
+    if (
+        fixed_search_resolution < 0
+        or custom_scope_resolution < 0
+        or fixed_search_resolution > custom_scope_resolution
+    ):
+        fail(
+            errors,
+            "agent_runner.py: packaged Spark profile must resolve before every project/user custom scope",
+        )
+    windows_job_position = runner_text.find("ACTIVE_WINDOWS_JOB = create_windows_kill_job()")
+    worker_auth_position = runner_text.find(
+        'require_chatgpt_login(request["command"][0], environment)'
+    )
+    if windows_job_position < 0 or worker_auth_position < 0 or windows_job_position > worker_auth_position:
+        fail(errors, "agent_runner.py: Windows Job Object must exist before worker auth subprocess")
+
+    packaged_profile_text = read_text(PACKAGED_SEARCH_PROFILE, errors)
+    try:
+        packaged_profile = tomllib.loads(packaged_profile_text)
+    except tomllib.TOMLDecodeError as exc:
+        fail(errors, f"openbuild_search_separate.toml: invalid TOML ({exc})")
+        packaged_profile = {}
+    errors.extend(validate_packaged_search_profile(packaged_profile))
+
     readme = read_text(ROOT / "README.md", errors)
     readme_ru = read_text(ROOT / "README.ru.md", errors)
     required_docs_tokens = [
@@ -2597,10 +3585,13 @@ def main() -> int:
         for marker in forbidden:
             if marker in text:
                 fail(errors, f"{relative}: forbidden marker {marker!r}")
-        if fixed_model.search(text):
+        model_scan_text = text.replace(PACKAGED_SEARCH_MODEL, "")
+        if fixed_model.search(model_scan_text):
             fail(errors, f"{relative}: fixed model slug is not allowed")
         assignment = active_model_assignment.search(text)
-        if assignment:
+        if assignment and path != ROOT / "scripts" / "test_agent_runner.py" and not (
+            path == PACKAGED_SEARCH_PROFILE and assignment.group(1) == PACKAGED_SEARCH_MODEL
+        ):
             fail(errors, f"{relative}: active fixed model assignment is not allowed ({assignment.group(1)!r})")
         if path.suffix.lower() == ".md":
             validate_local_links(path, text, errors)

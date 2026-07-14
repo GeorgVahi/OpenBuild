@@ -7,6 +7,8 @@ import unittest
 from validate_package import (
     BLINDSPOT_PROTOCOL,
     IMPLEMENTATION_DELEGATION,
+    PACKAGED_SEARCH_INSTRUCTIONS,
+    PACKAGED_SEARCH_MODEL,
     REVIEW_PROTOCOL,
     ROOT,
     SKILL,
@@ -21,6 +23,7 @@ from validate_package import (
     validate_decision_authority_trace,
     validate_implementation_delegation_contract,
     validate_implementation_dispatch_trace,
+    validate_packaged_search_profile,
     validate_profile_migration_trace,
     validate_release_docs_contract,
     validate_review_escalation_trace,
@@ -321,18 +324,18 @@ class ChangelogContractTests(unittest.TestCase):
     def test_release_manifest_version_and_latest_release_are_documented(self) -> None:
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
         self.assertIn("## [0.4.0] - 2026-07-12", changelog)
-        self.assertEqual(validate_changelog_contract(changelog, "2.0.1"), [])
+        self.assertEqual(validate_changelog_contract(changelog, "2.1.0"), [])
 
-        mutated = changelog.replace("## [2.0.1] - 2026-07-13", "## [next] - 2026-07-13")
-        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "2.0.1")))
+        mutated = changelog.replace("## [2.1.0] - 2026-07-13", "## [next] - 2026-07-13")
+        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "2.1.0")))
 
     def test_released_version_is_pinned_in_both_install_channels(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         readme_ru = (ROOT / "README.ru.md").read_text(encoding="utf-8")
-        self.assertEqual(validate_release_docs_contract(readme, readme_ru, "2.0.1"), [])
+        self.assertEqual(validate_release_docs_contract(readme, readme_ru, "2.1.0"), [])
 
-        mutated = readme.replace("--ref v2.0.1", "--ref main")
-        self.assertTrue(any("README.md" in error for error in validate_release_docs_contract(mutated, readme_ru, "2.0.1")))
+        mutated = readme.replace("--ref v2.1.0", "--ref main")
+        self.assertTrue(any("README.md" in error for error in validate_release_docs_contract(mutated, readme_ru, "2.1.0")))
 
 
 class DecisionAuthorityTraceTests(unittest.TestCase):
@@ -1341,6 +1344,39 @@ class UsageRoutingContractTests(unittest.TestCase):
         model_routing = self.model_routing.replace(separate, "__SEARCH_ORDER__").replace(efficient, separate).replace("__SEARCH_ORDER__", efficient)
         self.assertTrue(any("separate pool must precede" in error for error in self.validate(model_routing=model_routing)))
 
+    def test_explicit_cli_runner_is_packaged_and_is_the_primary_dispatch(self) -> None:
+        self.assertTrue((SKILL / "scripts" / "agent_runner.py").is_file())
+        for text in [
+            self.skill_text,
+            self.model_routing,
+            self.code_discovery,
+            self.implementation,
+            self.review_protocol,
+            self.readme,
+            self.readme_ru,
+        ]:
+            self.assertIn("codex-exec-explicit-model", text)
+        self.assertIn("agent_runner.py", self.skill_text)
+        self.assertIn("turn.completed", self.model_routing)
+
+    def test_packaged_explorer_instruction_is_exact_not_token_matched(self) -> None:
+        profile = {
+            "name": "openbuild_search_separate",
+            "model": PACKAGED_SEARCH_MODEL,
+            "model_reasoning_effort": "low",
+            "sandbox_mode": "read-only",
+            "developer_instructions": PACKAGED_SEARCH_INSTRUCTIONS,
+        }
+        self.assertEqual(validate_packaged_search_profile(profile), [])
+
+        profile["developer_instructions"] = (
+            PACKAGED_SEARCH_INSTRUCTIONS
+            + "Semantically alter the contract while retaining all required tokens.\n"
+        )
+        self.assertTrue(
+            any("exact canonical" in error for error in validate_packaged_search_profile(profile))
+        )
+
     def test_search_preflight_precedes_repository_lookup(self) -> None:
         initialized = "## Initialize search routing"
         selection = "## Select the specification safely"
@@ -1523,172 +1559,394 @@ class UsageRoutingContractTests(unittest.TestCase):
 
 
 class SearchDispatchTraceTests(unittest.TestCase):
-    def test_canonical_agent_name_is_separate_from_task_name(self) -> None:
-        trace = [
+    @staticmethod
+    def selected_trace() -> list[dict[str, object]]:
+        running = {
+            "event": "search-routing-receipt",
+            "search_agent": "openbuild_search_separate",
+            "task_name": "fixture_task",
+            "dispatch_method": "codex-exec-explicit-model",
+            "configured_model": "gpt-5.3-codex-spark",
+            "model_reasoning_effort": "low",
+            "sandbox": "read-only",
+            "observed_agent": "unknown",
+            "observed_model": "unknown",
+            "terminal_event": "none",
+            "activated": False,
+            "run_status": "running",
+            "pool": "separate",
+            "dispatch_result": "selected",
+            "fallback_reason": "none",
+            "process_tree_stopped": False,
+            "run_dir": "C:/runs/search-1",
+            "worker_pid": "111",
+            "worker_process_identity": "worker-created-1",
+            "codex_pid": "222",
+            "codex_process_identity": "codex-created-1",
+        }
+        return [
             {
                 "event": "search-dispatch",
                 "agent_name": "openbuild_search_separate",
-                "task_name": "map_routing_contract",
+                "task_name": "fixture_task",
                 "result": "selected",
                 "fallback_reason": "none",
+            },
+            running,
+            {
+                "event": "search-agent-activated",
+                "search_agent": "openbuild_search_separate",
+                "task_name": "fixture_task",
+                "run_dir": "C:/runs/search-1",
+                "worker_process_identity": "worker-created-1",
+                "codex_process_identity": "codex-created-1",
+                "activated": True,
+            },
+            {"event": "repository-search", "actor": "openbuild_search_separate"},
+            running
+            | {
+                "observed_agent": "openbuild_search_separate",
+                "observed_model": "gpt-5.3-codex-spark",
+                "terminal_event": "turn.completed",
+                "activated": True,
+                "run_status": "completed",
+                "process_tree_stopped": True,
+                "codex_exit_evidence": "valid",
+                "codex_exit_code": 0,
+                "result_evidence": "valid",
+            },
+            {
+                "event": "search-evidence-consumed",
+                "actor": "root",
+                "search_agent": "openbuild_search_separate",
+                "run_dir": "C:/runs/search-1",
+            },
+        ]
+
+    @staticmethod
+    def failed_trace(reason: str = "selector-unavailable") -> list[dict[str, object]]:
+        return [
+            {
+                "event": "search-dispatch",
+                "agent_name": "openbuild_search_separate",
+                "task_name": "fixture_task",
+                "result": "failed",
+                "fallback_reason": reason,
             },
             {
                 "event": "search-routing-receipt",
                 "search_agent": "openbuild_search_separate",
-                "task_name": "map_routing_contract",
-                "dispatch_method": "exact-custom-agent",
+                "task_name": "fixture_task",
+                "dispatch_method": "unavailable",
                 "configured_model": "separate-search-model",
-                "observed_agent": "openbuild_search_separate",
+                "model_reasoning_effort": "unknown",
+                "sandbox": "unknown",
+                "observed_agent": "unknown",
                 "observed_model": "unknown",
-                "pool": "separate",
-                "fallback_reason": "none",
+                "terminal_event": "none",
+                "activated": False,
+                "run_status": "failed",
+                "pool": "unknown",
+                "dispatch_result": "failed",
+                "fallback_reason": reason,
+                "process_tree_stopped": True,
+                "run_dir": "none",
+                "worker_pid": "none",
+                "worker_process_identity": "none",
+                "codex_pid": "none",
+                "codex_process_identity": "none",
             },
-            {
-                "event": "repository-search",
-                "actor": "openbuild_search_separate",
-            },
+            {"event": "repository-search", "actor": "openbuild_search_fallback"},
         ]
 
+    @classmethod
+    def timeout_trace(cls) -> list[dict[str, object]]:
+        trace = cls.selected_trace()
+        running = trace[1]
+        terminal = running | {
+            "terminal_event": "none",
+            "activated": True,
+            "run_status": "failed",
+            "pool": "unknown",
+            "dispatch_result": "failed",
+            "fallback_reason": "worker-timeout",
+            "process_tree_stopped": True,
+            "codex_exit_evidence": "missing",
+            "codex_exit_code": "unknown",
+            "result_evidence": "missing",
+        }
+        return [
+            trace[0],
+            running,
+            trace[2],
+            {
+                "event": "agent-cancellation-confirmed",
+                "worker_pid": "111",
+                "codex_pid": "222",
+                "codex_started": True,
+                "worker_stopped": True,
+                "codex_stopped": True,
+            },
+            terminal,
+            {"event": "repository-search", "actor": "openbuild_search_fallback"},
+        ]
+
+    def test_canonical_agent_name_is_separate_from_task_name(self) -> None:
+        trace = self.selected_trace()
         self.assertEqual(validate_search_dispatch_trace(trace), [])
 
     def test_task_name_alone_cannot_select_a_profile(self) -> None:
-        trace = [
-            {
-                "event": "search-dispatch",
-                "task_name": "openbuild_search_separate",
-                "result": "selected",
-                "fallback_reason": "none",
-            },
-            {
-                "event": "repository-search",
-                "actor": "openbuild_search_separate",
-            },
-        ]
+        trace = self.selected_trace()
+        trace[0].pop("agent_name")
+        trace[0]["task_name"] = "openbuild_search_separate"
 
         errors = validate_search_dispatch_trace(trace)
         self.assertTrue(any("agent_name" in error for error in errors))
 
     def test_exact_named_agent_owns_first_search(self) -> None:
-        trace = [
-            {
-                "event": "search-dispatch",
-                "agent_name": "openbuild_search_separate",
-                "task_name": "fixture_task",
-                "result": "selected",
-                "fallback_reason": "none",
-            },
-            {
-                "event": "search-routing-receipt",
-                "search_agent": "openbuild_search_separate",
-                "task_name": "fixture_task",
-                "dispatch_method": "exact-custom-agent",
-                "configured_model": "separate-search-model",
-                "observed_agent": "openbuild_search_separate",
-                "observed_model": "unknown",
-                "pool": "separate",
-                "fallback_reason": "none",
-            },
-            {
-                "event": "repository-search",
-                "actor": "openbuild_search_separate",
-            },
-        ]
+        trace = self.selected_trace()
+        trace[3]["actor"] = "root"
 
-        self.assertEqual(validate_search_dispatch_trace(trace), [])
+        self.assertTrue(any("own the first" in error for error in validate_search_dispatch_trace(trace)))
+
+    def test_selected_worker_owns_every_search_until_its_terminal_receipt(self) -> None:
+        trace = self.selected_trace()
+        trace.pop()
+        trace[4] = trace[4] | {
+            "terminal_event": "turn.failed",
+            "run_status": "failed",
+            "dispatch_result": "failed",
+            "fallback_reason": "runner-failed",
+            "codex_exit_code": 1,
+            "result_evidence": "missing",
+        }
+        trace.insert(4, {"event": "repository-search", "actor": "openbuild_search_fallback"})
+
+        errors = validate_search_dispatch_trace(trace)
+        self.assertTrue(any("every repository search" in error for error in errors))
+
+    def test_selected_worker_cannot_search_after_its_terminal_receipt(self) -> None:
+        trace = self.selected_trace()
+        trace.append({"event": "repository-search", "actor": "openbuild_search_separate"})
+
+        errors = validate_search_dispatch_trace(trace)
+        self.assertTrue(any("after its terminal receipt" in error for error in errors))
 
     def test_root_or_generic_search_cannot_silently_skip_exact_dispatch(self) -> None:
-        trace = [
-            {
-                "event": "repository-search",
-                "actor": "root",
-            },
-        ]
+        trace = [{"event": "repository-search", "actor": "root"}]
 
         self.assertTrue(any("exact agent dispatch" in error for error in validate_search_dispatch_trace(trace)))
 
     def test_fallback_requires_an_observable_allowed_reason(self) -> None:
-        trace = [
-            {
-                "event": "search-dispatch",
-                "agent_name": "openbuild_search_separate",
-                "task_name": "fixture_task",
-                "result": "failed",
-                "fallback_reason": "unknown-problem",
-            },
-            {
-                "event": "search-routing-receipt",
-                "search_agent": "openbuild_search_separate",
-                "task_name": "fixture_task",
-                "dispatch_method": "unavailable",
-                "configured_model": "separate-search-model",
-                "observed_agent": "unknown",
-                "observed_model": "unknown",
-                "pool": "unknown",
-                "fallback_reason": "unknown-problem",
-            },
-            {
-                "event": "repository-search",
-                "actor": "openbuild_search_fallback",
-            },
-        ]
+        trace = self.failed_trace("unknown-problem")
 
         self.assertTrue(any("allowed fallback reason" in error for error in validate_search_dispatch_trace(trace)))
 
     def test_allowed_fallback_and_receipt_remain_consistent(self) -> None:
-        trace = [
-            {
-                "event": "search-dispatch",
-                "agent_name": "openbuild_search_separate",
-                "task_name": "fixture_task",
-                "result": "failed",
-                "fallback_reason": "selector-unavailable",
-            },
-            {
-                "event": "search-routing-receipt",
-                "search_agent": "openbuild_search_separate",
-                "task_name": "fixture_task",
-                "dispatch_method": "unavailable",
-                "configured_model": "separate-search-model",
-                "observed_agent": "unknown",
-                "observed_model": "unknown",
-                "pool": "unknown",
-                "fallback_reason": "selector-unavailable",
-            },
-            {
-                "event": "repository-search",
-                "actor": "openbuild_search_fallback",
-            },
-        ]
+        trace = self.failed_trace()
+        self.assertEqual(validate_search_dispatch_trace(trace), [])
+
+    def test_native_selected_search_requires_a_prior_terminal_packaged_runner_failure(self) -> None:
+        trace = self.selected_trace()
+        trace[1]["dispatch_method"] = "per-spawn-model"
+        trace[4]["dispatch_method"] = "per-spawn-model"
+
+        errors = validate_search_dispatch_trace(trace)
+        self.assertTrue(any("packaged runner" in error for error in errors))
+
+    def test_native_selected_search_accepts_a_prior_terminal_packaged_runner_failure(self) -> None:
+        trace = self.selected_trace()
+        runner_failure = trace[1] | {
+            "dispatch_method": "codex-exec-explicit-model",
+            "configured_model": "gpt-5.3-codex-spark",
+            "terminal_event": "turn.failed",
+            "run_status": "failed",
+            "dispatch_result": "failed",
+            "fallback_reason": "runner-failed",
+            "process_tree_stopped": True,
+            "run_dir": "C:/runs/search-runner-failed",
+            "worker_pid": "101",
+            "worker_process_identity": "worker-created-0",
+            "codex_pid": "202",
+            "codex_process_identity": "codex-created-0",
+            "codex_exit_evidence": "valid",
+            "codex_exit_code": 1,
+            "result_evidence": "missing",
+        }
+        trace.insert(1, runner_failure)
+        trace[2]["dispatch_method"] = "per-spawn-model"
+        trace[5]["dispatch_method"] = "per-spawn-model"
 
         self.assertEqual(validate_search_dispatch_trace(trace), [])
 
-    def test_receipt_must_follow_the_dispatch_attempt(self) -> None:
-        trace = [
-            {
-                "event": "search-routing-receipt",
-                "search_agent": "openbuild_search_separate",
-                "task_name": "fixture_task",
-                "dispatch_method": "exact-custom-agent",
-                "configured_model": "separate-search-model",
-                "observed_agent": "openbuild_search_separate",
-                "observed_model": "unknown",
-                "pool": "separate",
-                "fallback_reason": "none",
-            },
-            {
-                "event": "search-dispatch",
-                "agent_name": "openbuild_search_separate",
-                "task_name": "fixture_task",
-                "result": "selected",
-                "fallback_reason": "none",
-            },
-            {
-                "event": "repository-search",
-                "actor": "openbuild_search_separate",
-            },
-        ]
+        unknown_selector = [dict(event) for event in trace]
+        for receipt in (unknown_selector[2], unknown_selector[5]):
+            receipt["configured_model"] = "unknown"
+            receipt["model_reasoning_effort"] = "unknown"
+        self.assertTrue(
+            any(
+                "direct model and reasoning effort" in error
+                for error in validate_search_dispatch_trace(unknown_selector)
+            )
+        )
 
-        self.assertTrue(any("must follow" in error for error in validate_search_dispatch_trace(trace)))
+        writable = [dict(event) for event in trace]
+        for receipt in (writable[2], writable[5]):
+            receipt["sandbox"] = "workspace-write"
+        self.assertTrue(
+            any("read-only" in error for error in validate_search_dispatch_trace(writable))
+        )
+
+    def test_failed_explicit_dispatch_accepts_turn_failed_before_fallback(self) -> None:
+        trace = self.failed_trace("model-unavailable")
+        trace[1]["dispatch_method"] = "codex-exec-explicit-model"
+        trace[1]["sandbox"] = "read-only"
+        trace[1]["model_reasoning_effort"] = "low"
+        trace[1]["terminal_event"] = "turn.failed"
+        trace[1]["codex_exit_evidence"] = "valid"
+        trace[1]["codex_exit_code"] = 1
+        trace[1]["result_evidence"] = "missing"
+
+        self.assertEqual(validate_search_dispatch_trace(trace), [])
+
+    def test_failed_explicit_dispatch_requires_complete_exit_and_result_evidence(self) -> None:
+        trace = self.failed_trace("runner-failed")
+        trace[1]["dispatch_method"] = "codex-exec-explicit-model"
+        trace[1]["sandbox"] = "read-only"
+        trace[1]["model_reasoning_effort"] = "low"
+        trace[1]["terminal_event"] = "turn.failed"
+
+        errors = validate_search_dispatch_trace(trace)
+        self.assertTrue(any("missing evidence fields" in error for error in errors))
+
+    def test_worker_timeout_fallback_requires_confirmed_process_tree_stop(self) -> None:
+        trace = self.timeout_trace()
+
+        self.assertEqual(validate_search_dispatch_trace(trace), [])
+        without_confirmation = [event for event in trace if event["event"] != "agent-cancellation-confirmed"]
+        self.assertTrue(
+            any(
+                "cancellation confirmation" in error
+                for error in validate_search_dispatch_trace(without_confirmation)
+            )
+        )
+
+        before_codex_start = [dict(event) for event in trace]
+        confirmation = before_codex_start[3]
+        confirmation["codex_started"] = False
+        confirmation.pop("codex_pid")
+        self.assertEqual(validate_search_dispatch_trace(before_codex_start), [])
+
+    def test_receipt_must_follow_the_dispatch_attempt(self) -> None:
+        trace = self.selected_trace()
+        receipt = trace.pop(1)
+        trace.insert(0, receipt)
+
+        self.assertTrue(any("routing receipt" in error for error in validate_search_dispatch_trace(trace)))
+
+    def test_terminal_receipt_must_precede_evidence_consumption(self) -> None:
+        trace = self.selected_trace()
+        terminal = trace.pop(4)
+        trace.insert(6, terminal)
+
+        self.assertTrue(any("precede search evidence" in error for error in validate_search_dispatch_trace(trace)))
+
+    def test_completed_search_rejects_unbound_or_duplicate_evidence_consumption(self) -> None:
+        unbound = self.selected_trace()
+        unbound.append(
+            {
+                "event": "search-evidence-consumed",
+                "actor": "root",
+                "search_agent": "openbuild_search_separate",
+                "run_dir": "C:/runs/unknown-search",
+            }
+        )
+        self.assertTrue(
+            any("exactly one run-bound" in error for error in validate_search_dispatch_trace(unbound))
+        )
+
+        duplicate = self.selected_trace()
+        duplicate.append(dict(duplicate[-1]))
+        self.assertTrue(
+            any("exactly one run-bound" in error for error in validate_search_dispatch_trace(duplicate))
+        )
+
+    def test_failed_turn_completed_requires_independent_failure_evidence(self) -> None:
+        for exit_evidence, exit_code, result_evidence in [
+            ("valid", 7, "valid"),
+            ("missing", "unknown", "valid"),
+            ("malformed", "unknown", "valid"),
+            ("identity-mismatch", "unknown", "valid"),
+            ("valid", 0, "missing"),
+        ]:
+            with self.subTest(
+                exit_evidence=exit_evidence,
+                exit_code=exit_code,
+                result_evidence=result_evidence,
+            ):
+                trace = self.failed_trace("runner-failed")
+                trace[1].update(
+                    {
+                        "dispatch_method": "codex-exec-explicit-model",
+                        "sandbox": "read-only",
+                        "terminal_event": "turn.completed",
+                        "codex_exit_evidence": exit_evidence,
+                        "codex_exit_code": exit_code,
+                        "result_evidence": result_evidence,
+                    }
+                )
+                self.assertEqual(validate_search_dispatch_trace(trace), [])
+
+        invalid = self.failed_trace("runner-failed")
+        invalid[1].update(
+            {
+                "dispatch_method": "codex-exec-explicit-model",
+                "sandbox": "read-only",
+                "terminal_event": "turn.completed",
+                "codex_exit_evidence": "valid",
+                "codex_exit_code": 0,
+                "result_evidence": "valid",
+            }
+        )
+
+        self.assertTrue(any("independent" in error for error in validate_search_dispatch_trace(invalid)))
+
+    def test_failed_search_evidence_is_never_consumed(self) -> None:
+        trace = self.selected_trace()
+        trace[4].update(
+            {
+                "run_status": "failed",
+                "terminal_event": "turn.failed",
+                "dispatch_result": "failed",
+                "fallback_reason": "runner-failed",
+                "codex_exit_evidence": "valid",
+                "codex_exit_code": 1,
+                "result_evidence": "missing",
+            }
+        )
+
+        errors = validate_search_dispatch_trace(trace)
+        self.assertTrue(any("cannot be consumed" in error for error in errors))
+
+        trace[-1]["run_dir"] = "C:/runs/different-search"
+        errors = validate_search_dispatch_trace(trace)
+        self.assertTrue(any("cannot be consumed" in error for error in errors))
+
+    def test_nonvalid_exit_evidence_cannot_carry_an_exit_code(self) -> None:
+        trace = self.failed_trace("runner-failed")
+        trace[1].update(
+            {
+                "dispatch_method": "codex-exec-explicit-model",
+                "sandbox": "read-only",
+                "terminal_event": "turn.failed",
+                "codex_exit_evidence": "identity-mismatch",
+                "codex_exit_code": 0,
+                "result_evidence": "missing",
+            }
+        )
+
+        errors = validate_search_dispatch_trace(trace)
+        self.assertTrue(any("cannot carry" in error for error in errors))
 
 
 class ProfileMigrationTraceTests(unittest.TestCase):
@@ -1701,22 +1959,22 @@ class ProfileMigrationTraceTests(unittest.TestCase):
         }[action]
         entry: dict[str, object] = {
             "scope": "user",
-            "source_path": "openbuild-search-separate.toml",
-            "target_path": "openbuild_search_separate.toml",
+            "source_path": "openbuild-search-fallback.toml",
+            "target_path": "openbuild_search_fallback.toml",
             "root_fingerprint": "d" * 64,
-            "legacy_name": "openbuild-search-separate",
-            "target_name": "openbuild_search_separate",
+            "legacy_name": "openbuild-search-fallback",
+            "target_name": "openbuild_search_fallback",
             "source_sha256": "a" * 64,
             "target_sha256": target_sha256,
             "rendered_sha256": "b" * 64,
             "exact_diff": (
-                '-name = "openbuild-search-separate"\n'
-                '+name = "openbuild_search_separate"'
+                '-name = "openbuild-search-fallback"\n'
+                '+name = "openbuild_search_fallback"'
             ),
             "action": action,
         }
         entry["entry_id"] = migration_entry_id(entry)
-        detected = ["openbuild-search-separate"]
+        detected = ["openbuild-search-fallback"]
         preview: dict[str, object] = {
             "event": "profile-migration-preview",
             "supported_mappings": migration_supported_mappings(),
@@ -1819,7 +2077,7 @@ class ProfileMigrationTraceTests(unittest.TestCase):
     def test_preview_inventory_must_cover_every_detected_profile(self) -> None:
         preview = self.preview()
         preview["detected_legacy_names"] = [
-            "openbuild-search-separate",
+            "openbuild-search-fallback",
             "openbuild-review-fast",
         ]
         preview["plan_id"] = migration_plan_id(
@@ -1878,137 +2136,344 @@ class ProfileMigrationTraceTests(unittest.TestCase):
 
 
 class ImplementationDispatchTraceTests(unittest.TestCase):
-    def test_canonical_writer_agent_name_is_separate_from_task_name(self) -> None:
-        trace = [
+    @staticmethod
+    def valid_trace(
+        *,
+        risk: str = "high",
+        tier: str = "strongest",
+        agent: str = "openbuild_implementation_strongest",
+        task_name: str = "fixture_task",
+        lease: str = "M1",
+    ) -> list[dict[str, str]]:
+        base_receipt = {
+            "event": "implementation-routing-receipt",
+            "risk": risk,
+            "requested_agent": agent,
+            "task_name": task_name,
+            "requested_tier": tier,
+            "dispatch_method": "codex-exec-explicit-model",
+            "configured_model": f"{tier}-code-model",
+            "model_reasoning_effort": "high",
+            "observed_agent": agent,
+            "observed_model": "unknown",
+            "sandbox": "workspace-write",
+            "lease": lease,
+            "dispatch_result": "selected",
+            "fallback_reason": "none",
+            "run_dir": "C:/runs/M1",
+            "worker_pid": "111",
+            "worker_process_identity": "worker-created-1",
+            "codex_pid": "222",
+            "codex_process_identity": "codex-created-1",
+            "process_tree_stopped": False,
+        }
+        return [
+            {
+                "event": "writer-lease-acquired",
+                "lease": lease,
+                "owner": agent,
+            },
             {
                 "event": "implementation-dispatch",
-                "risk": "high",
-                "agent_name": "openbuild_implementation_strongest",
-                "task_name": "implement_m3",
+                "risk": risk,
+                "agent_name": agent,
+                "task_name": task_name,
+                "lease": lease,
                 "result": "selected",
                 "fallback_reason": "none",
             },
+            base_receipt
+            | {"run_status": "running", "terminal_event": "none", "activated": False},
             {
-                "event": "implementation-routing-receipt",
-                "risk": "high",
-                "requested_agent": "openbuild_implementation_strongest",
-                "task_name": "implement_m3",
-                "requested_tier": "strongest",
-                "dispatch_method": "exact-custom-agent",
-                "configured_model": "strong-code-model",
-                "observed_agent": "openbuild_implementation_strongest",
-                "observed_model": "unknown",
-                "sandbox": "workspace-write",
-                "lease": "M3",
-                "dispatch_result": "selected",
-                "fallback_reason": "none",
+                "event": "implementation-agent-activated",
+                "lease": lease,
+                "agent_name": agent,
+                "task_name": task_name,
+                "run_dir": "C:/runs/M1",
+                "worker_process_identity": "worker-created-1",
+                "codex_process_identity": "codex-created-1",
+                "activated": True,
+            },
+            {"event": "code-write", "actor": agent},
+            base_receipt
+            | {
+                "run_status": "completed",
+                "terminal_event": "turn.completed",
+                "process_tree_stopped": True,
+                "activated": True,
+                "codex_exit_evidence": "valid",
+                "codex_exit_code": 0,
+                "result_evidence": "valid",
             },
             {
-                "event": "code-write",
-                "actor": "openbuild_implementation_strongest",
+                "event": "implementation-handoff-accepted",
+                "lease": lease,
+                "agent_name": agent,
+                "task_name": task_name,
+                "run_dir": "C:/runs/M1",
+                "worker_process_identity": "worker-created-1",
+                "codex_process_identity": "codex-created-1",
+                "result_evidence": "valid",
             },
+            {"event": "writer-lease-released", "lease": lease},
         ]
 
-        self.assertEqual(validate_implementation_dispatch_trace(trace), [])
+    def test_canonical_writer_agent_name_is_separate_from_task_name(self) -> None:
+        self.assertEqual(
+            validate_implementation_dispatch_trace(
+                self.valid_trace(task_name="implement_m3", lease="M3")
+            ),
+            [],
+        )
 
     def test_low_risk_exact_fast_writer_owns_first_edit(self) -> None:
-        trace = [
-            {
-                "event": "implementation-dispatch",
-                "risk": "low",
-                "agent_name": "openbuild_implementation_fast",
-                "task_name": "fixture_task",
-                "result": "selected",
-                "fallback_reason": "none",
-            },
-            {
-                "event": "implementation-routing-receipt",
-                "risk": "low",
-                "requested_agent": "openbuild_implementation_fast",
-                "task_name": "fixture_task",
-                "requested_tier": "fast",
-                "dispatch_method": "exact-custom-agent",
-                "configured_model": "fast-code-model",
-                "observed_agent": "openbuild_implementation_fast",
-                "observed_model": "unknown",
-                "sandbox": "workspace-write",
-                "lease": "M1",
-                "dispatch_result": "selected",
-                "fallback_reason": "none",
-            },
-            {
-                "event": "test-write",
-                "actor": "openbuild_implementation_fast",
-            },
-        ]
+        trace = self.valid_trace(
+            risk="low",
+            tier="fast",
+            agent="openbuild_implementation_fast",
+        )
+        trace[4]["event"] = "test-write"
+        self.assertEqual(validate_implementation_dispatch_trace(trace), [])
+
+    def test_medium_risk_cannot_silently_jump_to_strongest_writer(self) -> None:
+        trace = self.valid_trace(risk="medium")
+        self.assertTrue(
+            any(
+                "openbuild_implementation_balanced" in error
+                for error in validate_implementation_dispatch_trace(trace)
+            )
+        )
+
+    def test_running_receipt_must_precede_edit_and_be_write_capable(self) -> None:
+        trace = self.valid_trace()
+        trace[2]["sandbox"] = "read-only"
+        self.assertTrue(
+            any("workspace-write" in error for error in validate_implementation_dispatch_trace(trace))
+        )
+
+    def test_native_writer_requires_a_prior_terminal_runner_failure_and_direct_effort(self) -> None:
+        trace = self.valid_trace()
+        for receipt in (trace[2], trace[5]):
+            receipt["dispatch_method"] = "per-spawn-model"
+            receipt["model_reasoning_effort"] = ""
+
+        errors = validate_implementation_dispatch_trace(trace)
+        self.assertTrue(any("prior terminal runner failure" in error for error in errors))
+        self.assertTrue(any("direct model and reasoning effort" in error for error in errors))
+
+    def test_native_writer_accepts_a_bound_stopped_terminal_runner_failure(self) -> None:
+        trace = self.valid_trace()
+        runner_failure = trace[2] | {
+            "run_status": "failed",
+            "terminal_event": "turn.failed",
+            "activated": False,
+            "dispatch_result": "failed",
+            "fallback_reason": "runner-failed",
+            "process_tree_stopped": True,
+            "run_dir": "C:/runs/M1-runner-failed",
+            "worker_pid": "101",
+            "worker_process_identity": "worker-created-0",
+            "codex_pid": "202",
+            "codex_process_identity": "codex-created-0",
+            "codex_exit_evidence": "valid",
+            "codex_exit_code": 1,
+            "result_evidence": "missing",
+        }
+        trace.insert(2, runner_failure)
+        for receipt in (trace[3], trace[6]):
+            receipt["dispatch_method"] = "per-spawn-model"
 
         self.assertEqual(validate_implementation_dispatch_trace(trace), [])
 
-    def test_medium_risk_cannot_silently_jump_to_generic_or_strongest_writer(self) -> None:
-        trace = [
-            {
-                "event": "implementation-dispatch",
-                "risk": "medium",
-                "agent_name": "openbuild_implementation_strongest",
-                "task_name": "fixture_task",
-                "result": "selected",
-                "fallback_reason": "none",
-            },
-            {
-                "event": "implementation-routing-receipt",
-                "risk": "medium",
-                "requested_agent": "openbuild_implementation_strongest",
-                "task_name": "fixture_task",
-                "requested_tier": "strongest",
-                "dispatch_method": "exact-custom-agent",
-                "configured_model": "strong-code-model",
-                "observed_agent": "openbuild_implementation_strongest",
-                "observed_model": "unknown",
-                "sandbox": "workspace-write",
-                "lease": "M1",
-                "dispatch_result": "selected",
-                "fallback_reason": "none",
-            },
-            {
-                "event": "code-write",
-                "actor": "openbuild_implementation_strongest",
-            },
-        ]
+    def test_running_receipt_must_be_recorded_before_activation(self) -> None:
+        trace = self.valid_trace()
+        trace[2]["activated"] = True
+        self.assertTrue(
+            any(
+                "before activation" in error
+                for error in validate_implementation_dispatch_trace(trace)
+            )
+        )
 
-        self.assertTrue(any("openbuild_implementation_balanced" in error for error in validate_implementation_dispatch_trace(trace)))
+    def test_terminal_receipt_must_confirm_activation(self) -> None:
+        trace = self.valid_trace()
+        trace[5]["activated"] = False
+        self.assertTrue(
+            any(
+                "confirm activation" in error
+                for error in validate_implementation_dispatch_trace(trace)
+            )
+        )
 
-    def test_writer_receipt_must_precede_the_edit_and_be_write_capable(self) -> None:
-        trace = [
-            {
-                "event": "implementation-dispatch",
-                "risk": "high",
-                "agent_name": "openbuild_implementation_strongest",
-                "task_name": "fixture_task",
-                "result": "selected",
-                "fallback_reason": "none",
-            },
-            {
-                "event": "implementation-routing-receipt",
-                "risk": "high",
-                "requested_agent": "openbuild_implementation_strongest",
-                "task_name": "fixture_task",
-                "requested_tier": "strongest",
-                "dispatch_method": "exact-custom-agent",
-                "configured_model": "strong-code-model",
-                "observed_agent": "openbuild_implementation_strongest",
-                "observed_model": "unknown",
-                "sandbox": "read-only",
-                "lease": "M1",
-                "dispatch_result": "selected",
-                "fallback_reason": "none",
-            },
-            {
-                "event": "code-write",
-                "actor": "openbuild_implementation_strongest",
-            },
-        ]
+    def test_activation_event_must_precede_first_edit(self) -> None:
+        trace = self.valid_trace()
+        activation = trace.pop(3)
+        trace.insert(5, activation)
+        self.assertTrue(
+            any(
+                "activation event" in error
+                for error in validate_implementation_dispatch_trace(trace)
+            )
+        )
 
-        self.assertTrue(any("workspace-write" in error for error in validate_implementation_dispatch_trace(trace)))
+    def test_activation_event_cannot_drift_to_another_process(self) -> None:
+        trace = self.valid_trace()
+        trace[3]["codex_process_identity"] = "different-codex"
+        self.assertTrue(
+            any(
+                "codex_process_identity" in error
+                for error in validate_implementation_dispatch_trace(trace)
+            )
+        )
+
+    def test_terminal_receipt_and_release_must_follow_writer_edits(self) -> None:
+        trace = self.valid_trace()
+        terminal = trace.pop(5)
+        trace.insert(4, terminal)
+        self.assertTrue(
+            any(
+                "terminal routing receipt" in error
+                for error in validate_implementation_dispatch_trace(trace)
+            )
+        )
+
+    def test_every_write_and_terminal_field_stay_bound_to_the_lease(self) -> None:
+        trace = self.valid_trace()
+        trace.insert(5, {"event": "code-write", "actor": "root"})
+        trace[6]["configured_model"] = "different-model"
+        errors = validate_implementation_dispatch_trace(trace)
+        self.assertTrue(any("every code edit" in error for error in errors))
+        self.assertTrue(any("configured_model" in error for error in errors))
+
+    def test_lease_cannot_release_before_terminal_receipt(self) -> None:
+        trace = self.valid_trace()
+        trace.insert(4, {"event": "writer-lease-released", "lease": "M1"})
+        self.assertTrue(
+            any(
+                "released before terminal" in error
+                for error in validate_implementation_dispatch_trace(trace)
+            )
+        )
+
+    def test_failed_writer_can_release_matching_lease_but_not_handoff(self) -> None:
+        trace = self.valid_trace()
+        trace.pop(6)
+        terminal = trace[5]
+        terminal.update(
+            {
+                "run_status": "failed",
+                "terminal_event": "turn.failed",
+                "dispatch_result": "failed",
+                "fallback_reason": "runner-failed",
+                "process_tree_stopped": True,
+                "codex_exit_code": 1,
+                "result_evidence": "missing",
+            }
+        )
+        self.assertEqual(validate_implementation_dispatch_trace(trace), [])
+
+    def test_failed_writer_cannot_authorize_an_accepted_handoff(self) -> None:
+        trace = self.valid_trace()
+        trace[6]["lease"] = "wrong-lease"
+        terminal = trace[5]
+        terminal.update(
+            {
+                "run_status": "failed",
+                "terminal_event": "turn.failed",
+                "dispatch_result": "failed",
+                "fallback_reason": "runner-failed",
+                "codex_exit_code": 1,
+                "result_evidence": "missing",
+            }
+        )
+
+        errors = validate_implementation_dispatch_trace(trace)
+        self.assertTrue(any("cannot be accepted" in error for error in errors))
+
+    def test_accepted_handoff_before_dispatch_is_never_ignored(self) -> None:
+        completed = self.valid_trace()
+        completed.insert(0, dict(completed[6]))
+        self.assertTrue(
+            any("accepted handoff" in error for error in validate_implementation_dispatch_trace(completed))
+        )
+
+        failed = self.valid_trace()
+        early_handoff = failed.pop(6)
+        failed.insert(0, early_handoff)
+        failed[6].update(
+            {
+                "run_status": "failed",
+                "terminal_event": "turn.failed",
+                "dispatch_result": "failed",
+                "fallback_reason": "runner-failed",
+                "codex_exit_code": 1,
+                "result_evidence": "missing",
+            }
+        )
+        self.assertTrue(
+            any("cannot be accepted" in error for error in validate_implementation_dispatch_trace(failed))
+        )
+
+    def test_completed_writer_requires_run_bound_handoff_after_terminal_evidence(self) -> None:
+        missing = self.valid_trace()
+        missing.pop(6)
+        self.assertTrue(
+            any(
+                "accepted handoff" in error
+                for error in validate_implementation_dispatch_trace(missing)
+            )
+        )
+
+        drifted = self.valid_trace()
+        drifted[6]["codex_process_identity"] = "different-codex"
+        self.assertTrue(
+            any(
+                "codex_process_identity" in error
+                for error in validate_implementation_dispatch_trace(drifted)
+            )
+        )
+
+    def test_failed_completed_writer_can_release_with_independent_failure_evidence(self) -> None:
+        for exit_evidence, exit_code, result_evidence in [
+            ("valid", 7, "valid"),
+            ("missing", "unknown", "valid"),
+            ("malformed", "unknown", "valid"),
+            ("identity-mismatch", "unknown", "valid"),
+            ("valid", 0, "invalid"),
+        ]:
+            with self.subTest(exit_evidence=exit_evidence, result_evidence=result_evidence):
+                trace = self.valid_trace()
+                trace.pop(6)
+                terminal = trace[5]
+                terminal.update(
+                    {
+                        "run_status": "failed",
+                        "terminal_event": "turn.completed",
+                        "dispatch_result": "failed",
+                        "fallback_reason": "runner-failed",
+                        "process_tree_stopped": True,
+                        "codex_exit_evidence": exit_evidence,
+                        "codex_exit_code": exit_code,
+                        "result_evidence": result_evidence,
+                    }
+                )
+                self.assertEqual(validate_implementation_dispatch_trace(trace), [])
+
+        invalid = self.valid_trace()
+        invalid.pop(6)
+        invalid[5].update(
+            {
+                "run_status": "failed",
+                "dispatch_result": "failed",
+                "fallback_reason": "runner-failed",
+            }
+        )
+        self.assertTrue(
+            any(
+                "independent exit/result" in error
+                for error in validate_implementation_dispatch_trace(invalid)
+            )
+        )
 
 
 class ReviewEscalationTraceTests(unittest.TestCase):
@@ -2021,7 +2486,35 @@ class ReviewEscalationTraceTests(unittest.TestCase):
         verdict: str,
         findings: str,
         escalation_reason: str,
-    ) -> list[dict[str, str]]:
+    ) -> list[dict[str, object]]:
+        running: dict[str, object] = {
+            "event": "review-routing-receipt",
+            "diff_revision": revision,
+            "risk_floor": "fast",
+            "requested_agent": agent,
+            "task_name": "fixture_task",
+            "requested_tier": tier,
+            "dispatch_method": "codex-exec-explicit-model",
+            "configured_model": f"{tier}-review-model",
+            "model_reasoning_effort": "high",
+            "observed_agent": "unknown",
+            "observed_model": "unknown",
+            "terminal_event": "none",
+            "activated": False,
+            "run_status": "running",
+            "sandbox": "read-only",
+            "dispatch_result": "selected",
+            "fallback_reason": "none",
+            "process_tree_stopped": False,
+            "run_dir": f"C:/runs/review-{revision}-{tier}",
+            "worker_pid": "311",
+            "worker_process_identity": f"worker-{revision}-{tier}",
+            "codex_pid": "322",
+            "codex_process_identity": f"codex-{revision}-{tier}",
+            "codex_exit_evidence": "missing",
+            "codex_exit_code": None,
+            "result_evidence": "missing",
+        }
         return [
             {
                 "event": "review-dispatch",
@@ -2032,20 +2525,28 @@ class ReviewEscalationTraceTests(unittest.TestCase):
                 "diff_revision": revision,
                 "result": "selected",
             },
+            running,
             {
-                "event": "review-routing-receipt",
+                "event": "review-agent-activated",
                 "diff_revision": revision,
-                "risk_floor": "fast",
                 "requested_agent": agent,
                 "task_name": "fixture_task",
-                "requested_tier": tier,
-                "dispatch_method": "exact-custom-agent",
-                "configured_model": f"{tier}-review-model",
+                "run_dir": f"C:/runs/review-{revision}-{tier}",
+                "worker_process_identity": f"worker-{revision}-{tier}",
+                "codex_process_identity": f"codex-{revision}-{tier}",
+                "activated": True,
+            },
+            running
+            | {
                 "observed_agent": agent,
-                "observed_model": "unknown",
-                "sandbox": "read-only",
-                "dispatch_result": "selected",
-                "fallback_reason": "none",
+                "observed_model": f"{tier}-review-model",
+                "terminal_event": "turn.completed",
+                "activated": True,
+                "run_status": "completed",
+                "process_tree_stopped": True,
+                "codex_exit_evidence": "valid",
+                "codex_exit_code": 0,
+                "result_evidence": "valid",
             },
             {
                 "event": "review-result",
@@ -2179,6 +2680,140 @@ class ReviewEscalationTraceTests(unittest.TestCase):
 
         errors = validate_review_escalation_trace(trace)
         self.assertTrue(any("must start at exact strong reviewer" in error for error in errors))
+
+    def test_review_requires_a_matching_activation_event(self) -> None:
+        trace = self.review_cycle(
+            "fast",
+            "openbuild_review_fast",
+            "D1",
+            verdict="ACCEPT",
+            findings="none",
+            escalation_reason="none",
+        )
+        trace.pop(2)
+
+        errors = validate_review_escalation_trace(trace)
+        self.assertTrue(any("activation event" in error for error in errors))
+
+    def test_native_reviewer_requires_a_prior_terminal_runner_failure_and_direct_effort(self) -> None:
+        trace = self.review_cycle(
+            "fast",
+            "openbuild_review_fast",
+            "D1",
+            verdict="ACCEPT",
+            findings="none",
+            escalation_reason="none",
+        )
+        for receipt in (trace[1], trace[3]):
+            receipt["dispatch_method"] = "per-spawn-model"
+            receipt["model_reasoning_effort"] = ""
+
+        errors = validate_review_escalation_trace(trace)
+        self.assertTrue(any("prior terminal runner failure" in error for error in errors))
+        self.assertTrue(any("direct model and reasoning effort" in error for error in errors))
+
+    def test_native_reviewer_accepts_a_bound_stopped_terminal_runner_failure(self) -> None:
+        trace = self.review_cycle(
+            "fast",
+            "openbuild_review_fast",
+            "D1",
+            verdict="ACCEPT",
+            findings="none",
+            escalation_reason="none",
+        )
+        runner_failure = trace[1] | {
+            "run_status": "failed",
+            "terminal_event": "turn.failed",
+            "activated": False,
+            "dispatch_result": "failed",
+            "fallback_reason": "runner-failed",
+            "process_tree_stopped": True,
+            "run_dir": "C:/runs/review-D1-fast-runner-failed",
+            "worker_pid": "301",
+            "worker_process_identity": "worker-D1-fast-0",
+            "codex_pid": "302",
+            "codex_process_identity": "codex-D1-fast-0",
+            "codex_exit_evidence": "valid",
+            "codex_exit_code": 1,
+            "result_evidence": "missing",
+        }
+        trace.insert(1, runner_failure)
+        for receipt in (trace[2], trace[4]):
+            receipt["dispatch_method"] = "per-spawn-model"
+
+        self.assertEqual(validate_review_escalation_trace(trace), [])
+
+    def test_review_result_must_follow_the_terminal_receipt(self) -> None:
+        trace = self.review_cycle(
+            "fast",
+            "openbuild_review_fast",
+            "D1",
+            verdict="ACCEPT",
+            findings="none",
+            escalation_reason="none",
+        )
+        trace[3], trace[4] = trace[4], trace[3]
+
+        errors = validate_review_escalation_trace(trace)
+        self.assertTrue(any("lifecycle" in error for error in errors))
+
+    def test_review_terminal_requires_independent_exit_and_result_evidence(self) -> None:
+        trace = self.review_cycle(
+            "fast",
+            "openbuild_review_fast",
+            "D1",
+            verdict="ACCEPT",
+            findings="none",
+            escalation_reason="none",
+        )
+        trace[3]["codex_exit_code"] = 1
+
+        errors = validate_review_escalation_trace(trace)
+        self.assertTrue(any("exit code zero" in error for error in errors))
+
+    def test_review_terminal_rejects_a_string_exit_code(self) -> None:
+        trace = self.review_cycle(
+            "fast",
+            "openbuild_review_fast",
+            "D1",
+            verdict="ACCEPT",
+            findings="none",
+            escalation_reason="none",
+        )
+        trace[3]["codex_exit_code"] = "0"
+
+        errors = validate_review_escalation_trace(trace)
+        self.assertTrue(any("integer Codex exit code" in error for error in errors))
+
+    def test_review_terminal_cannot_change_process_identity(self) -> None:
+        trace = self.review_cycle(
+            "fast",
+            "openbuild_review_fast",
+            "D1",
+            verdict="ACCEPT",
+            findings="none",
+            escalation_reason="none",
+        )
+        trace[3]["codex_process_identity"] = "reused-process"
+
+        errors = validate_review_escalation_trace(trace)
+        self.assertTrue(any("codex_process_identity" in error for error in errors))
+
+    def test_review_running_receipt_cannot_claim_terminal_evidence(self) -> None:
+        trace = self.review_cycle(
+            "fast",
+            "openbuild_review_fast",
+            "D1",
+            verdict="ACCEPT",
+            findings="none",
+            escalation_reason="none",
+        )
+        trace[1]["codex_exit_evidence"] = "valid"
+        trace[1]["codex_exit_code"] = 0
+        trace[1]["result_evidence"] = "valid"
+
+        errors = validate_review_escalation_trace(trace)
+        self.assertTrue(any("missing/unknown/missing" in error for error in errors))
 
 
 if __name__ == "__main__":

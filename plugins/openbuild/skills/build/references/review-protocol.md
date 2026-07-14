@@ -23,27 +23,50 @@ Use a fresh context with conversation-history inheritance disabled when the runt
 
 ## Exact dispatch and routing receipt
 
-Select the exact starting reviewer from task risk: `low` → `openbuild_review_fast`, `medium` → `openbuild_review_balanced`, `high` → `openbuild_review_strong`, and `critical` → `openbuild_review_strongest`. Bind a confirmed model through a direct per-spawn selector when exposed; otherwise pass the canonical profile ID through `agent_name` and a separate descriptive label through `task_name`. Do not accept a generic reviewer or a prompt that merely names the profile as selection evidence.
+Select the exact starting reviewer from task risk: `low` → `openbuild_review_fast`, `medium` → `openbuild_review_balanced`, `high` → `openbuild_review_strong`, and `critical` → `openbuild_review_strongest`. Start it through `<build-skill-root>/scripts/agent_runner.py`; the primary `codex-exec-explicit-model` route pins the configured model, reasoning effort, and read-only sandbox in a separate process. Durably record the returned unactivated `running` Review routing receipt before calling `activate`, record the matching run/process-bound `review-agent-activated` event, and then wait for the stopped terminal receipt. Accept a review result only after that terminal receipt records `turn.completed`, creation-bound exit code zero, and valid result evidence. Use a native direct selector only after a recorded runner failure and only when it exposes both model and reasoning effort; a name-only compatibility fallback passes the canonical profile ID through `agent_name` and a separate descriptive `task_name` while recording model/effort as unknown. Do not accept a generic reviewer or a prompt that merely names the profile as selection evidence.
 
-Run a strictly sequential ladder, starting at the floor and moving at most one step at a time: `fast → balanced → strong → strongest`. After every dispatch and before using the result, record:
+Run a strictly sequential ladder, starting at the floor and moving at most one step at a time: `fast → balanced → strong → strongest`. After every dispatch, record this complete lifecycle before using the result:
 
 ```text
-Review routing receipt:
+Review routing receipt (first `running`, then terminal):
 diff_revision: <commit/status/hash identity>
 risk_floor: <fast|balanced|strong|strongest>
 requested_agent: <exact openbuild_review_* profile>
 task_name: <independent descriptive task label>
 requested_tier: <fast|balanced|strong|strongest>
-dispatch_method: <per-spawn-model|exact-custom-agent|unavailable>
+dispatch_method: <codex-exec-explicit-model|per-spawn-model|exact-custom-agent|unavailable>
 configured_model: <profile model or unknown>
+model_reasoning_effort: <profile effort or unknown>
 observed_agent: <runtime agent or unknown>
 observed_model: <runtime model or unknown>
+terminal_event: <turn.completed|turn.failed|none>
+activated: <false in the recorded running receipt; true in the terminal receipt>
+run_status: <running|completed|failed>
 sandbox: <read-only or observed value>
 dispatch_result: <selected|failed>
-fallback_reason: <none|profile-not-discoverable|selector-unavailable|model-unavailable|quota-exhausted|spawn-failed|tier-unproven>
+fallback_reason: <none|profile-not-discoverable|profile-incomplete|cli-unavailable|chatgpt-auth-unavailable|selector-unavailable|model-unavailable|quota-exhausted|runner-failed|spawn-failed|tier-unproven>
+process_tree_stopped: <false in running; true in terminal>
+run_dir: <protected run artifact directory>
+worker_pid: <worker PID>
+worker_process_identity: <creation-bound identity>
+codex_pid: <Codex PID>
+codex_process_identity: <creation-bound identity>
+codex_exit_evidence: <missing while running; valid|missing|malformed|identity-mismatch when terminal>
+codex_exit_code: <integer|unknown|null>
+result_evidence: <missing while running; valid|missing|empty|invalid when terminal>
+
+Review activation event:
+event: review-agent-activated
+diff_revision: <same diff identity>
+requested_agent: <same exact profile>
+task_name: <same independent label>
+run_dir: <same run directory>
+worker_process_identity: <same creation-bound identity>
+codex_process_identity: <same creation-bound identity>
+activated: true
 ```
 
-The receipt proves routing intent and observed selection separately. A configured profile with unobservable model metadata may satisfy low or medium selection when no evidence contradicts it. High and critical floors still require proven strong/strongest capability. Any fallback must be read-only and proven at or above the floor; name the actual reviewer instead of impersonating the unavailable profile.
+The two receipts and activation event prove routing intent, process continuity, and observed selection separately. The running receipt must carry the exact non-terminal evidence tuple `codex_exit_evidence: missing`, `codex_exit_code: unknown|null`, and `result_evidence: missing`. The terminal receipt must preserve every routing and process identity from the running receipt, positively confirm the process tree stopped, and carry valid exit/result evidence before `review-result`. A configured profile with unobservable model metadata may satisfy low or medium selection when no evidence contradicts the explicit CLI selection. High and critical floors still require proven strong/strongest capability. Any fallback must be read-only and proven at or above the floor; name the actual reviewer instead of impersonating the unavailable profile.
 
 ## Required result
 

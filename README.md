@@ -15,9 +15,17 @@ It packages one explicit skill, **Build**, with six modes:
 
 OpenBuild is self-contained. It does not require separate discovery, TDD, or review skills, telemetry, a hosted service, or background network access.
 
-> OpenBuild `2.0.1` is the current release. Its immutable release tag is `v2.0.1`; pin it for reproducible installation or use `main` intentionally for unreleased changes.
+> OpenBuild `2.1.0` is the current release. Its immutable release tag is `v2.1.0`; pin it for reproducible installation or use `main` intentionally for unreleased changes.
 
-The manifest packaged in the release commit, immutable tag, and GitHub Release are synchronized at `2.0.1`. Earlier `v1.1.1` artifacts remain immutable.
+The manifest packaged in the release commit, immutable tag, and GitHub Release are synchronized at `2.1.0`. Earlier `v2.0.1` and `v1.1.1` artifacts remain immutable.
+
+## What shipped in 2.1.0
+
+- real external Codex agents launched through explicit `-m`, `model_reasoning_effort`, and sandbox arguments instead of relying on name-only native spawning;
+- two-phase `start → recorded receipt → activate` agents with creation-bound process identities, protected per-run artifacts, JSONL, creation-bound exit codes, final results, and mandatory terminal `turn.completed` evidence;
+- zero-profile-setup read-only discovery on `gpt-5.3-codex-spark` with the exact delegated `rg`/`Get-Content` compact evidence-map instruction;
+- ChatGPT subscription authentication and the built-in OpenAI provider enforced for external workers, with provider redirects rejected and the stable multi-agent capability disabled;
+- runner-first fallback enforcement, exactly-once run-bound search evidence consumption, pre-spawn crash tracking, and null/unknown exit evidence instead of synthetic failure codes.
 
 ## What shipped in 2.0.1
 
@@ -85,19 +93,20 @@ flowchart LR
 ## Requirements
 
 - A current Codex surface that supports skills. Plugin installation is available in Codex CLI and supported plugin surfaces.
+- Python 3.11 or newer for the packaged explicit-model runner (`python` on Windows, commonly `python3` on POSIX).
 - Git, when Build is expected to create milestone commits or review a task diff.
-- Windows unit, package, syntax, diff, clean-checkout, and independent-review checks were completed for `v2.0.1`. Codex CLI install/runtime smoke was unavailable in the release environment; macOS and Linux remain unverified.
+- Windows unit, package, syntax, diff, clean-install, real Codex CLI runtime-smoke, and independent-review checks were completed for `v2.1.0`. macOS and Linux remain unverified.
 
-OpenBuild `2.0.1` and the earlier `1.1.1` release support Codex only. They do not claim compatibility with Claude Code, Cursor, Gemini CLI, or other coding agents.
+OpenBuild `2.1.0` and the earlier `2.0.1`/`1.1.1` releases support Codex only. They do not claim compatibility with Claude Code, Cursor, Gemini CLI, or other coding agents.
 
 ## Install as a plugin — recommended
 
 The plugin is the primary distribution channel. It gives you versioned marketplace installation and the namespaced invocation `$openbuild:build`.
 
-### Current pinned release `v2.0.1`
+### Current pinned release `v2.1.0`
 
 ```bash
-codex plugin marketplace add GeorgVahi/OpenBuild --ref v2.0.1
+codex plugin marketplace add GeorgVahi/OpenBuild --ref v2.1.0
 codex plugin add openbuild@openbuild
 ```
 
@@ -141,11 +150,11 @@ A versioned/tag-pinned marketplace is fixed to its selected tag. To move from on
 ```bash
 codex plugin remove openbuild@openbuild
 codex plugin marketplace remove openbuild
-codex plugin marketplace add GeorgVahi/OpenBuild --ref v2.0.1
+codex plugin marketplace add GeorgVahi/OpenBuild --ref v2.1.0
 codex plugin add openbuild@openbuild
 ```
 
-Replace `v2.0.1` with the target release tag.
+Replace `v2.1.0` with the target release tag.
 
 ### Uninstall the plugin
 
@@ -159,10 +168,10 @@ codex plugin marketplace remove openbuild
 Standalone installation gives you the shorter `$build` invocation. Ask the preinstalled system skill installer to install the canonical Build folder:
 
 ```text
-Use $skill-installer to install the skill from https://github.com/GeorgVahi/OpenBuild/tree/v2.0.1/plugins/openbuild/skills/build
+Use $skill-installer to install the skill from https://github.com/GeorgVahi/OpenBuild/tree/v2.1.0/plugins/openbuild/skills/build
 ```
 
-To test unreleased changes, use the same path with `/tree/main/`; keep `v2.0.1` for a reproducible tagged installation.
+To test unreleased changes, use the same path with `/tree/main/`; keep `v2.1.0` for a reproducible tagged installation.
 
 Start a new Codex thread after installation. Open `/skills` or type `$` and verify that `build` appears, then invoke:
 
@@ -265,7 +274,9 @@ Explicit `new`, `refine`, `run`, or `full` remains authoritative. `auto` and a b
 $build setup-models
 ```
 
-Build first checks the capabilities exposed by the current Codex runtime. If native selection already provides every route, no files are needed. Otherwise it may propose read-only `openbuild_search_separate` and `openbuild_search_fallback`; write-capable `openbuild_implementation_fast`, `openbuild_implementation_balanced`, and `openbuild_implementation_strongest`; and read-only `openbuild_review_fast`, `balanced`, `strong`, and `strongest` profiles. Existing `openbuild-discovery` remains a legacy route and is treated as separate-pool search only when its mapping is proven. Hyphenated OpenBuild profile names are legacy identifiers; setup detects them and proposes their underscore equivalents instead of dispatching them.
+Build first checks the Codex CLI, saved ChatGPT authentication, the fixed packaged `openbuild_search_separate` route, and capabilities exposed by the current runtime. It may propose read-only `openbuild_search_fallback`; write-capable `openbuild_implementation_fast`, `openbuild_implementation_balanced`, and `openbuild_implementation_strongest`; and read-only `openbuild_review_fast`, `balanced`, `strong`, and `strongest` profiles. Existing `openbuild-discovery` remains a legacy route and is treated as separate-pool search only when its mapping is proven. Supported hyphenated OpenBuild profile names are legacy identifiers; setup detects them and proposes their underscore equivalents instead of dispatching them.
+
+Code discovery needs no model-profile setup: OpenBuild ships a read-only `openbuild_search_separate` profile pinned exclusively to `gpt-5.3-codex-spark` with low reasoning and the compact evidence-map instruction. Codex CLI, saved ChatGPT authentication, and Python 3.11+ are still required. Same-named project or user profiles are ignored, so unavailable entitlement/model evidence opens the documented fallback circuit breaker instead of silently running another model as Spark. Other implementation and review routes remain account/runtime-configured.
 
 Before writing anything, Build must show:
 
@@ -274,7 +285,7 @@ Before writing anything, Build must show:
 - user scope (`~/.codex/agents`) or project scope (`.codex/agents`);
 - exact target files and exact diff.
 
-It writes only after separate permission, shows every `workspace-write` implementation profile separately, never overwrites an existing profile, validates TOML, and requires a reload or new session before use. Configured profile evidence is recorded separately from observed runtime metadata. Declining setup leaves search, specification, and read-only review operational with honest fallbacks; implementation proceeds only when the selected low, medium, high, or critical risk tier is satisfied.
+It writes only after separate permission, shows every `workspace-write` implementation profile separately, never overwrites an existing profile, and validates TOML. Setup then runs one explicit launcher smoke per distinct model/effort/sandbox tuple and accepts it only on terminal `turn.completed`. Configured profile intent is recorded separately from accepted CLI selection evidence. Declining setup leaves search, specification, and read-only review operational with honest built-in/native fallbacks; implementation proceeds only when the selected low, medium, high, or critical risk tier is satisfied.
 
 Legacy migration is preview-first and resumable. Build shows the complete supported mapping and detected inventory, an immutable canonical-SHA `plan_id`, a content-bound `entry_id` per detected profile, scope-relative paths, root fingerprint, SHA-256 source/target/rendered-canonical values, exact TOML diffs, and one action per entry: `create-if-absent`, `already-migrated`, or `config-conflict`. Permission is stored per entry with the exact precondition hashes and action; divergent targets are never overwritten, hash drift reopens only the affected entry, and each result receipt records observed preconditions plus the result hash or `not-written`. Legacy cleanup is a later, separately approved plan after reload and exact-selection smoke.
 
@@ -286,7 +297,7 @@ A legacy specification marked `Ready` is not trusted blindly. If it lacks the cu
 
 ## How automatic code discovery works
 
-Before any `rg`, `rg --files`, file/symbol lookup, repository grep, dependency trace, route/test/config/schema search, or log scan, the root agent creates a compact search plan and dispatches the exact `openbuild_search_separate` custom agent. A direct per-spawn model selector wins when the runtime exposes one; otherwise Build passes the canonical ID through `agent_name` and an independent descriptive label through `task_name`. A generic worker, descriptive task name, or profile mention is not accepted as model selection. Workers return only an evidence map with `path:line`, symbol or route, a confirmed fact, relevance, negative results, and confidence.
+Before any `rg`, `rg --files`, file/symbol lookup, repository grep, dependency trace, route/test/config/schema search, or log scan, the root agent creates a compact search plan and dispatches the exact `openbuild_search_separate` custom agent through the packaged `scripts/agent_runner.py`. This primary `codex-exec-explicit-model` path resolves only the fixed packaged Spark profile and starts a separate `codex exec` process with explicit `-m`, `model_reasoning_effort`, and sandbox arguments. A direct native selector is a fallback only when it exposes both model and effort; a name-only spawn is never accepted as proof of model switching. The canonical ID stays in `agent_name` and an independent descriptive label stays in `task_name`. Workers return only an evidence map with `path:line`, symbol or route, a confirmed fact, relevance, negative results, and confidence.
 
 The root agent remains the orchestrator: it deduplicates evidence, verifies already-known critical files and lines with targeted reads, turns material product and architecture choices into decision packets, records the user's selections, makes only outcome-neutral technical decisions autonomously, owns post-decision specification/version edits, validates, owns Git, and writes the final answer. A new grep or lookup returns to the search worker. Search workers never edit or decide architecture; implementation edits use the separate risk-matched single-writer lease described below.
 
@@ -343,29 +354,33 @@ flowchart TB
     class Z done;
 ```
 
-Search always attempts a confirmed separate-usage route first, normally the exact custom agent `openbuild_search_separate` or an equivalent native selector. The current Spark preview is an official example of a separately limited, near-instant text model when the account and runtime expose it, but OpenBuild never pins that example universally. Before the first lookup, Build records the requested agent, dispatch method, configured and observed model, pool, result, and fallback reason. It may fall back only after `profile-not-discoverable`, `selector-unavailable`, `model-unavailable`, `quota-exhausted`, `spawn-failed`, or a selected worker's timeout/unusable evidence. It then opens the current-run circuit breaker and tries `openbuild_search_fallback`, explorer, a generic read-only subagent, and finally minimum root search. It does not scrape the private usage dashboard, guess remaining quota, or retry a failed separate route for every grep.
+Search always attempts a confirmed separate-usage route first through `agent_runner.py`; the primary route is the exact custom agent `openbuild_search_separate`. The launcher requires saved ChatGPT authentication, forces the built-in OpenAI provider and ChatGPT login method, rejects redirects/custom OpenAI providers across user and project config layers, disables the stable multi-agent capability, snapshots the prompt, and records private profile/process-identity/JSONL/stderr/result/exit-code artifacts. Run directories use mode `0700` on POSIX and a protected current-user-only DACL on Windows; Linux/macOS process creation identities are precise enough to reject PID reuse before group signalling, and zombie-only POSIX groups are reaped without false liveness. `start` holds Codex stdin; Build records its unactivated receipt and only then calls `activate`, and an interrupted receipt write cleans up the still-unactivated process tree. The activated explorer performs the repository search, then Build records its stopped terminal receipt before `search-evidence-consumed`; a terminal claim can never be fabricated before the search it describes. A bounded parent wait timeout or unknown liveness is non-terminal; fallback starts only after completion, failure, or explicit `cancel` positively confirms every started process stopped. Success and cancellation recovery both require a creation-bound exit code of zero, a readable non-empty result, and exactly one final `turn.completed` JSONL event. Before the first lookup, Build records the requested agent, configured model and reasoning effort, pool, result, terminal event, and fallback reason. It then opens the current-run circuit breaker and tries an exposed direct model-plus-effort native selector, an exact-name compatibility selector with observed model/effort `unknown`, `openbuild_search_fallback`, an explorer, a generic read-only subagent, and finally minimum root search. It does not scrape the private usage dashboard, guess remaining quota, or retry a failed route for every grep.
 
 ```text
 search_agent: openbuild_search_separate
 task_name: <independent descriptive task label>
-dispatch_method: per-spawn-model | exact-custom-agent | unavailable
+dispatch_method: codex-exec-explicit-model | per-spawn-model | exact-custom-agent | unavailable
 configured_model: <profile/runtime value or unknown>
+model_reasoning_effort: <profile/runtime value or unknown>
+sandbox: read-only | unknown before any process starts
 observed_agent: <runtime value or unknown>
 observed_model: <runtime value or unknown>
+terminal_event: turn.completed | turn.failed | none
+activated: true | false
 pool: separate | main | unknown
 dispatch_result: selected | failed
 fallback_reason: none | <recorded allowed reason>
 ```
 
-This routing receipt is the primary acceptance signal. The account usage dashboard remains useful secondary evidence, but it does not replace an observable exact-agent dispatch.
+The explicit CLI argv plus terminal `turn.completed` is the primary operational acceptance signal. It proves that Codex accepted the requested model/effort selection; it is not a cryptographic audit of provider-internal routing. The account usage dashboard remains optional secondary evidence.
 
-Code edits use an exact risk-matched writer while preserving the same Ready, TDD, minimality, single-writer, validation, and review gates at every tier. Before the first test or production edit, Build dispatches `openbuild_implementation_fast` for low risk, `openbuild_implementation_balanced` for medium risk, or `openbuild_implementation_strongest` for high/critical risk and emits an Implementation routing receipt. The profile ID travels in `agent_name`; `task_name` remains a separate task label. A generic worker, task label, profile mention, or stronger-than-requested agent does not count. Missing model metadata alone does not block an exact configured low or medium route, but Build records it as `unknown` and never claims an observed switch or saving. High and critical work still require their strong/strongest floor.
+Code edits use an exact risk-matched writer while preserving the same Ready, TDD, minimality, single-writer, validation, and review gates at every tier. Before the first test or production edit, Build acquires the single-writer lease, then starts `openbuild_implementation_fast` for low risk, `openbuild_implementation_balanced` for medium risk, or `openbuild_implementation_strongest` for high/critical risk through `codex-exec-explicit-model --lease-id <id>`. It records the unactivated Implementation routing receipt before calling `activate`, then records the matching lease/run-bound `implementation-agent-activated` event before the first edit; the runner cannot send the task prompt earlier. The lease remains active through all edits. A successful terminal receipt with `turn.completed`, exit code zero, and valid result evidence must precede the run-bound `implementation-handoff-accepted` event, result consumption, and release. A matching failed/cancelled receipt needs complete independent failure evidence and all processes positively stopped, forbids accepted handoff, and permits release only while the milestone stays incomplete. The profile ID travels in `agent_name`; `task_name` remains a separate task label. A generic worker, task label, profile mention, or stronger-than-requested agent does not count; high and critical work still require their strong/strongest floor.
 
-Progressive review uses the same `agent_name`/`task_name` separation in read-only mode: low starts with `openbuild_review_fast`, medium with `openbuild_review_balanced`, high with `openbuild_review_strong`, and critical with `openbuild_review_strongest`. Each dispatch produces a Review routing receipt. Reviewers run sequentially through fast → balanced → strong → strongest from the risk floor; Build stops on sufficient acceptance evidence and advances exactly one proven tier only when a concrete trigger remains after root remediation and green validation.
+Progressive review uses the same `agent_name`/`task_name` separation and explicit CLI launcher in read-only mode: low starts with `openbuild_review_fast`, medium with `openbuild_review_balanced`, high with `openbuild_review_strong`, and critical with `openbuild_review_strongest`. Each `codex-exec-explicit-model` dispatch records an unactivated `running` Review routing receipt, a matching `review-agent-activated` event, and a stopped terminal receipt with unchanged process identities. Build consumes `review-result` only after terminal `turn.completed`, creation-bound exit code zero, and valid result evidence. Reviewers run sequentially through fast → balanced → strong → strongest from the risk floor; Build stops on sufficient acceptance evidence and advances exactly one proven tier only when a concrete trigger remains after root remediation and green validation.
 
 Escalation is evidence-driven: Build moves to the next writer tier only when scope or risk increases, the current worker reports insufficient confidence, the red/green signal exposes a deeper owner-layer problem, validation fails for a task-scoped reason, or review confirms an actionable finding. It never launches stronger writers merely to demonstrate model switching. Exact `model` and `model_reasoning_effort` values stay in user- or project-scoped custom-agent files rather than the portable plugin.
 
-Codex officially supports per-agent `model`, `model_reasoning_effort`, and sandbox settings, and documents the Spark preview as separately limited. Because availability changes, `$build setup-models` must verify the current account/runtime mapping before writing profiles: [Codex pricing and usage limits](https://learn.chatgpt.com/docs/pricing#what-are-the-usage-limits-for-my-plan), [Codex subagents and model choice](https://learn.chatgpt.com/docs/agent-configuration/subagents#choosing-models-and-reasoning).
+Codex officially supports per-agent `model`, `model_reasoning_effort`, and sandbox settings and documents `gpt-5.3-codex-spark` as a separately limited preview. OpenBuild ships that exact model only for its zero-profile-setup read-only discovery profile; the runner prerequisites above still apply. Other roles remain account/runtime-configured through `$build setup-models`: [Codex pricing and usage limits](https://learn.chatgpt.com/docs/pricing#what-are-the-usage-limits-for-my-plan), [Codex subagents and model choice](https://learn.chatgpt.com/docs/agent-configuration/subagents#choosing-models-and-reasoning).
 
 ## How blind-spot critique works
 
@@ -423,7 +438,7 @@ flowchart LR
     class K done;
 ```
 
-After `Ready`, each milestone selects `root-only`, `bounded-worker`, or `sequential-workers`, then dispatches the exact minimum sufficient writer profile from milestone risk and records its routing receipt before a lease or edit. Reasoning effort scales from low/minimal for mechanical changes to the deepest supported effort for critical work. A worker is used only when the owning files, acceptance criteria, red or primary signal, and stop conditions are clear; `root-only` remains limited to documented safety cases and requires the root to satisfy the selected tier. An unavailable required tier blocks that milestone instead of authorizing a risk-floor downgrade.
+After `Ready`, each milestone selects `root-only`, `bounded-worker`, or `sequential-workers`, acquires the single-writer lease for the exact minimum sufficient writer profile, starts it with that lease ID, records the unactivated `running` receipt, and then calls `activate` before any edit. The terminal receipt follows worker edits and precedes lease release. Reasoning effort scales from low/minimal for mechanical changes to the deepest supported effort for critical work. A worker is used only when the owning files, acceptance criteria, red or primary signal, and stop conditions are clear; `root-only` remains limited to documented safety cases and requires the root to satisfy the selected tier. An unavailable required tier blocks that milestone instead of authorizing a risk-floor downgrade.
 
 The shared checkout has one active writer. A worker receives a baseline and exact allowed files, cannot edit the specification, version, changelog, or unrelated files, cannot make product or architecture decisions, and cannot stage, commit, push, publish, or deploy. The root does not edit while the lease is active. After handoff, the root rechecks the complete diff, rereads changed code, reruns focused and risk-based validation, updates durable records and versioning, and only then starts progressive review or Git actions. Multiple worker milestones run strictly sequentially.
 
@@ -491,7 +506,7 @@ You installed both channels. They use the same source but are separate local ins
 
 ### Model switching is reported as unavailable or unverified
 
-Run `$build setup-models`, reload Codex or start a new thread, and inspect the search routing receipt on the next Build run. Without a native selector or configured custom-agent profiles, OpenBuild cannot prove that search used a separate quota or that an observed model switch occurred. A generic subagent or task name does not count as selecting `openbuild_search_separate`; Build must report an explicit fallback reason instead. It can still use honest read-only fallbacks. For implementation, configured fast or balanced named profiles may proceed with runtime metadata recorded as `unknown`; high and critical milestones stop unless their required strong/strongest route can be selected.
+Run `$build setup-models`, reload Codex or start a new thread, and inspect the search routing receipt on the next Build run. If the fixed packaged Spark route fails and no direct native selector exposes model plus effort, OpenBuild cannot prove that a fallback used a separate quota or that an observed model switch occurred. A generic subagent or task name does not count as selecting `openbuild_search_separate`; Build must report an explicit fallback reason instead. It can still use honest read-only fallbacks. For implementation, configured fast or balanced named profiles may proceed with runtime metadata recorded as `unknown`; high and critical milestones stop unless their required strong/strongest route can be selected.
 
 ### Build refuses to overwrite a specification
 
