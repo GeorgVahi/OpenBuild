@@ -63,7 +63,7 @@ For specification critics and diff review, use the exact packaged or canonical `
 
 ### Exact sequential reviewer dispatch
 
-Dispatch the exact starting reviewer through `agent_runner.py` before every progressive-review ladder: `low` → `openbuild_review_fast`, `medium` → `openbuild_review_balanced`, `high` → `openbuild_review_strong`, and `critical` → `openbuild_review_strongest`. Persist the unactivated `running` Review routing receipt, call `activate`, record the matching `review-agent-activated` event, and require the stopped terminal receipt with `codex-exec-explicit-model`, `turn.completed`, creation-bound exit code zero, valid result evidence, and a semantically completed review; only then use the result. Failure blocks the gate instead of selecting another reviewer route.
+Dispatch the exact starting reviewer through `agent_runner.py` before every progressive-review ladder: `low` → `openbuild_review_fast`, `medium` → `openbuild_review_balanced`, `high` → `openbuild_review_balanced`, and `critical` → `openbuild_review_strongest`. Persist the unactivated `running` Review routing receipt, call `activate`, record the matching `review-agent-activated` event, and require the stopped terminal receipt with `codex-exec-explicit-model`, `turn.completed`, creation-bound exit code zero, valid result evidence, and a semantically completed review; only then use the result. Failure blocks the gate instead of selecting another reviewer route.
 
 Run reviewers one at a time in this order: fast → balanced → strong → strongest. Begin at the complexity floor, never below it. Stop after an evidence-backed `ACCEPT` with sufficient confidence, complete acceptance coverage, green validation, and no actionable finding. Move exactly one proven tier higher only when the previous structured result records a trigger from [the review protocol](review-protocol.md). The root adjudicates and remediates confirmed findings through TDD/minimality, reruns affected validation, and only then dispatches the next exact reviewer. Reviewers remain read-only and never fix their own findings.
 
@@ -75,7 +75,7 @@ Emit one unactivated `running` and one stopped terminal Review routing receipt a
 |---|---|---|---|
 | `low` | Documentation, copy, or local mechanical work | Fast/economy when proven suitable | Fast/economy |
 | `medium` | Contained behavior or refactoring with clear tests | Balanced | Balanced |
-| `high` | Cross-layer behavior, public contracts, persistence, concurrency, auth, permissions, privacy | Strong | Strong |
+| `high` | Cross-layer behavior, public contracts, persistence, concurrency, auth, permissions, privacy | Balanced | Balanced unless concrete evidence triggers Strong |
 | `critical` | Irreversible actions, live infrastructure, secrets, destructive migration, very high blast radius | Strongest | Strongest |
 
 Use the highest applicable risk. Discovery can use a cheaper read-only tier than final review, but the root must verify its evidence. A required review tier must be proven by the exact runner receipt; otherwise leave the gate incomplete.
@@ -99,8 +99,9 @@ For broad repository search, use the full search-plan, evidence-map, fallback, a
 Choose an Implementation worker only after the current specification revision passes the Ready gate. Classify the milestone before every lease and select the minimum sufficient proven coding tier:
 
 - `openbuild_implementation_fast` for low-risk Direct documentation, cosmetic, or mechanical work with no behavior change;
-- `openbuild_implementation_balanced` for medium-risk contained logic or refactoring with clear contracts and supported tests;
-- `openbuild_implementation_strongest` for high-risk cross-layer behavior, public contracts, persistence, concurrency, auth, permissions, privacy, or sensitive state, and for critical work at the deepest supported effort.
+- `openbuild_implementation_balanced` as the starting route for medium-risk contained logic and high-risk cross-layer behavior;
+- `openbuild_implementation_strong` only after a completed balanced worker returns a valid pre-edit capability escalation;
+- `openbuild_implementation_strongest` directly for critical work at the deepest supported effort.
 
 Before every test or production code edit, acquire the single-writer lease for the exact selected profile, then start it through `agent_runner.py` as `codex-exec-explicit-model` with `--lease-id <id>`. Separate the canonical `agent_name` from the descriptive `task_name`. Record the lease-bound unactivated `running` Implementation routing receipt, call `activate`, record `implementation-agent-activated`, and keep the lease active through all worker writes. A completed receipt with `turn.completed`, creation-bound exit code zero, valid result evidence, and a semantically completed task must precede `implementation-handoff-accepted`, result consumption, and release. A failed, cancelled, or semantically unsuccessful receipt permits lease release only with the milestone incomplete and forbids another writer route.
 
@@ -108,9 +109,9 @@ Never use `openbuild_search_separate`, legacy `openbuild-discovery`, or `openbui
 
 Pass only the milestone, baseline, allowed files, acceptance criteria, red or primary signal, focused green command, and stop conditions defined in [adaptive implementation delegation](implementation-delegation.md). The root independently verifies the returned diff and validation before review or Git actions.
 
-**Escalate only on evidence.** Move from fast to balanced or balanced to strong/strongest when scope or risk increases, the selected agent reports insufficient confidence, the red/green signal exposes a deeper owner-layer problem, validation fails for a task-scoped reason, or review confirms an actionable gap. Do not fan out or escalate merely because a stronger model exists, and never repeat an unchanged task at the same tier.
+**Escalate only on evidence.** Before any edit, the selected worker may return `NEEDS_ESCALATION` only after a completed transport-success run with valid terminal evidence, concrete observed model evidence, a stopped process tree, and verified zero writes. The root then records approval and advances exactly one tier: fast → balanced for low, or balanced → strong for medium/high. Strongest is critical-only. Once any edit occurs, the same writer owns the complete milestone and escalation is forbidden. Do not fan out or escalate merely because a stronger model exists, and never repeat an unchanged task at the same tier.
 
-Every created implementation agent must have concrete model, effort, and sandbox evidence from the runner receipt. When the required exact route cannot be selected or the semantic handoff fails, stop before further test or production edits rather than lowering the risk floor, and record the limitation.
+Every created implementation agent must have concrete model, effort, and sandbox evidence from the runner receipt. Infrastructure or transport failure—including CLI, authentication, quota, model availability, sandbox, spawn, runner, timeout, or unusable evidence—never authorizes a stronger writer. When the exact route cannot be selected or the semantic handoff fails without a valid pre-edit escalation result, stop before further test or production edits rather than lowering the risk floor, and record the limitation.
 
 ## `$build setup-models`
 
@@ -118,7 +119,7 @@ Every created implementation agent must have concrete model, effort, and sandbox
 
 1. Verify `codex`, saved ChatGPT authentication, `scripts/agent_runner.py`, discoverable agent roles/profiles, and the model catalog when exposed.
 2. Identify whether current official guidance, runtime metadata, or the user confirms a separate-usage search model for this account/surface. Do not infer pool membership from a model slug alone.
-3. Identify proven fast, balanced, and strong/strongest coding tiers for optional canonical overrides.
+3. Identify proven fast, balanced, strong, and strongest coding tiers for optional canonical overrides.
 4. If complete exact profiles already provide every proven route, run one launcher smoke per distinct model/effort/sandbox tuple and avoid creating redundant files.
 5. If only catalog IDs are available, do not invent usage-pool membership or strength ordering. Use official product guidance, documented `upgrade`, supported reasoning-effort descriptions, runtime tier metadata, or a user-confirmed mapping.
 6. Deduplicate roles that resolve to the same effective model, effort, sandbox, and usage pool.
@@ -129,8 +130,9 @@ Every created implementation agent must have concrete model, effort, and sandbox
 The packaged `openbuild_search_separate` route is fixed and is never proposed as a writable profile. The packaged implementation/review profiles work without setup; propose only requested canonical overrides:
 
 - `openbuild_implementation_fast`: a proven efficient coding route for low-risk Direct work, write-capable only inside the parent-approved workspace and a single-writer lease;
-- `openbuild_implementation_balanced`: a proven balanced coding route for medium-risk contained behavior, write-capable only inside the parent-approved workspace and a single-writer lease;
-- `openbuild_implementation_strongest`: a proven strong/strongest coding route for high or critical work, write-capable only inside the parent-approved workspace and a single-writer lease;
+- `openbuild_implementation_balanced`: the starting coding route for medium- and high-risk work, write-capable only inside the parent-approved workspace and a single-writer lease;
+- `openbuild_implementation_strong`: the evidence-gated escalation route for medium- and high-risk work before any edit;
+- `openbuild_implementation_strongest`: the direct critical-only coding route at the deepest supported effort;
 - `openbuild_review_fast`: low-risk documentation and mechanical-change review;
 - `openbuild_review_balanced`: normal contained changes;
 - `openbuild_review_strong`: high-risk or escalated review;
@@ -158,6 +160,7 @@ Map the supported legacy names to canonical runtime-safe IDs without changing th
 |---|---|
 | `openbuild-implementation-fast` | `openbuild_implementation_fast` |
 | `openbuild-implementation-balanced` | `openbuild_implementation_balanced` |
+| `openbuild-implementation-strong` | `openbuild_implementation_strong` |
 | `openbuild-implementation-strongest` | `openbuild_implementation_strongest` |
 | `openbuild-review-fast` | `openbuild_review_fast` |
 | `openbuild-review-balanced` | `openbuild_review_balanced` |
@@ -175,7 +178,7 @@ Validate TOML, reload or start a new session, verify canonical discoverability a
 Use the runtime-supported custom-agent schema. Typical generated profiles are:
 
 ```toml
-name = "openbuild_implementation_<fast|balanced|strongest>"
+name = "openbuild_implementation_<fast|balanced|strong|strongest>"
 description = "Risk-matched OpenBuild coding worker for one bounded single-writer lease."
 model = "<confirmed-model-id-for-the-tier>"
 model_reasoning_effort = "<tier-appropriate-supported-effort>"
@@ -197,7 +200,7 @@ Do not ship placeholders as active configuration.
 - Require explicit permission for durable configuration writes.
 - Never overwrite or silently merge an existing file.
 - On collision, propose a unique suffix or an explicit reviewed update.
-- Keep search and review profiles read-only. Create each `openbuild_implementation_fast`, `openbuild_implementation_balanced`, and `openbuild_implementation_strongest` profile with `workspace-write` only after separately showing its exact scope and receiving permission.
+- Keep search and review profiles read-only. Create each `openbuild_implementation_fast`, `openbuild_implementation_balanced`, `openbuild_implementation_strong`, and `openbuild_implementation_strongest` profile with `workspace-write` only after separately showing its exact scope and receiving permission.
 - Validate TOML after writing.
 - Ask for reload or a new session when configuration discovery needs it, then verify each role with `agent_runner.py`, terminal `turn.completed`, and a semantically successful result.
 - Until explicit-model smoke succeeds, report setup as configured but unverified.

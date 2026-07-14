@@ -23,7 +23,7 @@ Use a fresh context with conversation-history inheritance disabled when the runt
 
 ## Exact dispatch and routing receipt
 
-Select the exact starting reviewer from task risk: `low` → `openbuild_review_fast`, `medium` → `openbuild_review_balanced`, `high` → `openbuild_review_strong`, and `critical` → `openbuild_review_strongest`. Start it through `<build-skill-root>/scripts/agent_runner.py`; `codex-exec-explicit-model` pins the resolved model, reasoning effort, and read-only sandbox in a separate process. Record the unactivated `running` receipt, call `activate`, record `review-agent-activated`, and wait for the stopped terminal receipt. Accept a review only after that receipt records `turn.completed`, creation-bound exit code zero, valid result evidence, and a semantically completed review. Failure blocks the exact review/release gate; create no replacement reviewer.
+Select the exact starting reviewer from task risk: `low` → `openbuild_review_fast`, `medium` → `openbuild_review_balanced`, `high` → `openbuild_review_balanced`, and `critical` → `openbuild_review_strongest`. Start it through `<build-skill-root>/scripts/agent_runner.py`; `codex-exec-explicit-model` pins the resolved model, reasoning effort, and read-only sandbox in a separate process. Record the unactivated `running` receipt, call `activate`, record `review-agent-activated`, and wait for the stopped terminal receipt. Accept a review only after that receipt records `turn.completed`, creation-bound exit code zero, valid result evidence, and a semantically completed review. Failure blocks the exact review/release gate; create no replacement reviewer.
 
 Run a strictly sequential ladder, starting at the floor and moving at most one step at a time: `fast → balanced → strong → strongest`. After every dispatch, record this complete lifecycle before using the result:
 
@@ -145,7 +145,7 @@ After adjudication and remediation, move one proven tier higher when any trigger
 - relevant validation fails or cannot be interpreted;
 - a high or critical finding remains unresolved;
 - the diff changed materially after the previous review;
-- the task's complexity floor requires a stronger final tier.
+- a material dispute remains after a strong review and needs a final strongest adjudication.
 
 Escalation means a stronger confirmed model/profile or supported reasoning effort. Changing only the prompt, role label, or thread is not a model escalation; report it accurately.
 
@@ -177,4 +177,4 @@ Accept a milestone only when all are true:
 - reviewer confidence and tier satisfy the complexity floor;
 - the current diff, not a stale earlier diff, was reviewed.
 
-For `high` and `critical` work, a high score from a cheaper reviewer never replaces the required strong or strongest final pass. If exact tier selection fails, keep the gate incomplete and report the terminal reason.
+For `high` work, an evidence-backed balanced `ACCEPT` may close the gate when coverage is complete, validation is green, confidence is sufficient, and no actionable trigger remains. Move to strong only after a concrete trigger; use strongest only after strong for a final unresolved material dispute. `critical` work starts and finishes at strongest. If exact tier selection fails, keep the gate incomplete and report the terminal reason.

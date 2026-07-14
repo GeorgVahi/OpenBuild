@@ -4,7 +4,7 @@
 
 OpenBuild is an explicit Codex workflow that can take a plain-language task or an existing specification from repository discovery through implementation, validation, and review. The default route is automatic: invoke Build, describe the outcome, and let it choose the first incomplete phase.
 
-Current release: `2.1.3` ([pinned skill source](https://github.com/GeorgVahi/OpenBuild/tree/v2.1.3/plugins/openbuild/skills/build)).
+Current release: `2.1.4` ([pinned skill source](https://github.com/GeorgVahi/OpenBuild/tree/v2.1.4/plugins/openbuild/skills/build)).
 
 ## Diagrams
 
@@ -14,7 +14,7 @@ Current release: `2.1.3` ([pinned skill source](https://github.com/GeorgVahi/Ope
 
 ### Exact model routing
 
-![Exact model routing](plugins/openbuild/lib/usage-v2-en.png)
+![Exact model routing](plugins/openbuild/lib/usage-v3-en.png)
 
 ### Implementation delegation
 
@@ -41,7 +41,7 @@ codex plugin marketplace remove openbuild
 Add the latest pinned release and install it:
 
 ```powershell
-codex plugin marketplace add GeorgVahi/OpenBuild --ref v2.1.3
+codex plugin marketplace add GeorgVahi/OpenBuild --ref v2.1.4
 codex plugin add openbuild@openbuild
 ```
 
@@ -68,6 +68,8 @@ OpenBuild ships ready-to-use profiles for discovery, implementation, and review.
 Profile precedence is project override, user override, then packaged default. The packaged Spark discovery profile is immutable so code search consistently uses the same read-only contract. Native Explorer, name-only custom agents, generic workers, and other routes that cannot prove model and effort are not used.
 
 If exact discovery fails, Build records the reason and performs only the minimum targeted root search needed to continue. An exact implementation or review failure leaves that gate incomplete instead of substituting an agent with unknown model metadata.
+
+Implementation starts on Terra for low, medium, and high risk; Sol high is used only after a completed pre-edit `NEEDS_ESCALATION`, while critical work starts on Sol xhigh. Review similarly starts low on Luna, medium/high on Terra, and reaches Sol only on evidence or for critical work.
 
 ## Progressive review
 

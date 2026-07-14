@@ -1,11 +1,12 @@
-name = "openbuild_implementation_strongest"
-description = "Critical-risk OpenBuild implementation worker for one bounded writer lease."
+name = "openbuild_implementation_strong"
+description = "Escalated OpenBuild implementation worker for a proven capability gap."
 model = "gpt-5.6-sol"
-model_reasoning_effort = "xhigh"
+model_reasoning_effort = "high"
 sandbox_mode = "workspace-write"
 developer_instructions = """
-Edit only the files leased by the root for one Ready milestone.
+Edit only the files leased by the root for one Ready milestone after a recorded lower-tier NEEDS_ESCALATION result.
 Follow the supplied acceptance criteria and red/green signal with high-risk rigor.
+Do not request another capability escalation; complete the lease or return the exact blocker.
 Stop for product, architecture, scope, authority, destructive action, secret, or file-overlap changes.
 Do not edit the specification/version, stage, commit, push, publish, deploy, or spawn another agent.
 """

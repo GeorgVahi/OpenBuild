@@ -324,7 +324,7 @@ class ImplementationDelegationContractTests(unittest.TestCase):
         self.assertTrue(any("root handoff" in error for error in self.validate(protocol_text=protocol)))
 
         protocol = self.protocol_text.replace(
-            "Do not repair that milestone through the root or a replacement lease",
+            "Do not repair an edited or failed milestone through the root or a replacement lease",
             "Repair that milestone through a new route",
         )
         self.assertTrue(any("root handoff" in error for error in self.validate(protocol_text=protocol)))
@@ -340,19 +340,19 @@ class ImplementationDelegationContractTests(unittest.TestCase):
 class ChangelogContractTests(unittest.TestCase):
     def test_release_manifest_version_and_latest_release_are_documented(self) -> None:
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-        self.assertEqual(validate_changelog_contract(changelog, "2.1.3"), [])
+        self.assertEqual(validate_changelog_contract(changelog, "2.1.4"), [])
         self.assertNotIn("## [2.1.1]", changelog)
 
-        mutated = changelog.replace("## [2.1.3] - 2026-07-14", "## [next] - 2026-07-14")
-        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "2.1.3")))
+        mutated = changelog.replace("## [2.1.4] - 2026-07-14", "## [next] - 2026-07-14")
+        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "2.1.4")))
 
     def test_released_version_is_pinned_in_both_install_channels(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         readme_ru = (ROOT / "README.ru.md").read_text(encoding="utf-8")
-        self.assertEqual(validate_release_docs_contract(readme, readme_ru, "2.1.3"), [])
+        self.assertEqual(validate_release_docs_contract(readme, readme_ru, "2.1.4"), [])
 
-        mutated = readme.replace("--ref v2.1.3", "--ref main")
-        self.assertTrue(any("README.md" in error for error in validate_release_docs_contract(mutated, readme_ru, "2.1.3")))
+        mutated = readme.replace("--ref v2.1.4", "--ref main")
+        self.assertTrue(any("README.md" in error for error in validate_release_docs_contract(mutated, readme_ru, "2.1.4")))
 
 
 class DecisionAuthorityTraceTests(unittest.TestCase):
@@ -1556,6 +1556,7 @@ class UsageRoutingContractTests(unittest.TestCase):
             "openbuild_search_separate",
             "openbuild_implementation_fast",
             "openbuild_implementation_balanced",
+            "openbuild_implementation_strong",
             "openbuild_implementation_strongest",
             "openbuild_review_fast",
             "openbuild_review_balanced",
@@ -1625,6 +1626,7 @@ class UsageRoutingContractTests(unittest.TestCase):
         for profile in [
             "openbuild_implementation_fast",
             "openbuild_implementation_balanced",
+            "openbuild_implementation_strong",
             "openbuild_implementation_strongest",
         ]:
             model_routing = self.model_routing.replace(profile, "missing-writer-profile")
@@ -1675,9 +1677,9 @@ class UsageRoutingContractTests(unittest.TestCase):
         )
         self.assertTrue(any("implementation-delegation.md" in error for error in self.validate(implementation=implementation)))
 
-    def test_high_and_critical_writer_floors_cannot_be_relaxed(self) -> None:
+    def test_high_start_and_critical_writer_floor_cannot_be_relaxed(self) -> None:
         implementation = self.implementation.replace(
-            "`high` | exact `openbuild_implementation_strongest` profile",
+            "`high` | exact `openbuild_implementation_balanced` starting profile",
             "`high` | any configured profile",
         )
         self.assertTrue(any("implementation-delegation.md" in error for error in self.validate(implementation=implementation)))
@@ -2280,8 +2282,8 @@ class ImplementationDispatchTraceTests(unittest.TestCase):
     def valid_trace(
         *,
         risk: str = "high",
-        tier: str = "strongest",
-        agent: str = "openbuild_implementation_strongest",
+        tier: str = "balanced",
+        agent: str = "openbuild_implementation_balanced",
         task_name: str = "fixture_task",
         lease: str = "M1",
     ) -> list[dict[str, str]]:
@@ -2358,6 +2360,110 @@ class ImplementationDispatchTraceTests(unittest.TestCase):
             {"event": "writer-lease-released", "lease": lease},
         ]
 
+    @classmethod
+    def escalated_trace(
+        cls,
+        *,
+        risk: str = "high",
+        from_tier: str = "balanced",
+        from_agent: str = "openbuild_implementation_balanced",
+        to_tier: str = "strong",
+        to_agent: str = "openbuild_implementation_strong",
+        reason: str = "task-complexity-above-tier",
+    ) -> list[dict[str, object]]:
+        running: dict[str, object] = {
+            "event": "implementation-routing-receipt",
+            "risk": risk,
+            "requested_agent": from_agent,
+            "task_name": "capability_probe",
+            "requested_tier": from_tier,
+            "dispatch_method": "codex-exec-explicit-model",
+            "configured_model": "gpt-5.6-terra",
+            "model_reasoning_effort": "medium",
+            "observed_agent": "unknown",
+            "observed_model": "unknown",
+            "sandbox": "workspace-write",
+            "lease": "M0",
+            "dispatch_result": "selected",
+            "fallback_reason": "none",
+            "run_dir": "C:/runs/M0",
+            "worker_pid": "101",
+            "worker_process_identity": "worker-created-0",
+            "codex_pid": "202",
+            "codex_process_identity": "codex-created-0",
+            "process_tree_stopped": False,
+            "run_status": "running",
+            "terminal_event": "none",
+            "activated": False,
+        }
+        return [
+            {"event": "writer-lease-acquired", "lease": "M0", "owner": from_agent},
+            {
+                "event": "implementation-dispatch",
+                "risk": risk,
+                "tier": from_tier,
+                "agent_name": from_agent,
+                "task_name": "capability_probe",
+                "lease": "M0",
+                "result": "selected",
+                "fallback_reason": "none",
+            },
+            running,
+            {
+                "event": "implementation-agent-activated",
+                "lease": "M0",
+                "agent_name": from_agent,
+                "task_name": "capability_probe",
+                "run_dir": "C:/runs/M0",
+                "worker_process_identity": "worker-created-0",
+                "codex_process_identity": "codex-created-0",
+                "activated": True,
+            },
+            running
+            | {
+                "observed_agent": from_agent,
+                "observed_model": "gpt-5.6-terra",
+                "process_tree_stopped": True,
+                "run_status": "completed",
+                "terminal_event": "turn.completed",
+                "activated": True,
+                "codex_exit_evidence": "valid",
+                "codex_exit_code": 0,
+                "result_evidence": "valid",
+            },
+            {
+                "event": "implementation-result",
+                "outcome": "needs-escalation",
+                "reason": reason,
+                "risk": risk,
+                "tier": from_tier,
+                "agent_name": from_agent,
+                "lease": "M0",
+                "run_dir": "C:/runs/M0",
+            },
+            {"event": "writer-lease-released", "lease": "M0"},
+            {
+                "event": "implementation-escalation-approved",
+                "actor": "root",
+                "risk": risk,
+                "from_tier": from_tier,
+                "to_tier": to_tier,
+                "reason": reason,
+                "lease": "M0",
+                "run_dir": "C:/runs/M0",
+                "verified_no_writes": True,
+                "process_tree_stopped": True,
+                "result_evidence": "valid",
+            },
+            *cls.valid_trace(
+                risk=risk,
+                tier=to_tier,
+                agent=to_agent,
+                task_name="implement_after_escalation",
+                lease="M1",
+            ),
+        ]
+
     def test_canonical_writer_agent_name_is_separate_from_task_name(self) -> None:
         self.assertEqual(
             validate_implementation_dispatch_trace(
@@ -2376,7 +2482,11 @@ class ImplementationDispatchTraceTests(unittest.TestCase):
         self.assertEqual(validate_implementation_dispatch_trace(trace), [])
 
     def test_medium_risk_cannot_silently_jump_to_strongest_writer(self) -> None:
-        trace = self.valid_trace(risk="medium")
+        trace = self.valid_trace(
+            risk="medium",
+            tier="strongest",
+            agent="openbuild_implementation_strongest",
+        )
         self.assertTrue(
             any(
                 "openbuild_implementation_balanced" in error
@@ -2398,6 +2508,65 @@ class ImplementationDispatchTraceTests(unittest.TestCase):
 
         errors = validate_implementation_dispatch_trace(trace)
         self.assertTrue(any("exact dispatch method" in error for error in errors))
+
+    def test_high_risk_starts_with_balanced_writer(self) -> None:
+        self.assertEqual(validate_implementation_dispatch_trace(self.valid_trace()), [])
+
+    def test_critical_risk_starts_with_strongest_writer(self) -> None:
+        trace = self.valid_trace(
+            risk="critical",
+            tier="strongest",
+            agent="openbuild_implementation_strongest",
+        )
+
+        self.assertEqual(validate_implementation_dispatch_trace(trace), [])
+
+    def test_semantic_needs_escalation_allows_exact_next_writer_before_edit(self) -> None:
+        self.assertEqual(
+            validate_implementation_dispatch_trace(self.escalated_trace()),
+            [],
+        )
+
+    def test_infrastructure_failure_never_authorizes_writer_escalation(self) -> None:
+        trace = self.escalated_trace()
+        trace[4].update(
+            {
+                "run_status": "failed",
+                "terminal_event": "turn.failed",
+                "dispatch_result": "failed",
+                "fallback_reason": "runner-failed",
+                "codex_exit_code": 1,
+                "result_evidence": "missing",
+            }
+        )
+
+        errors = validate_implementation_dispatch_trace(trace)
+        self.assertTrue(any("infrastructure" in error for error in errors))
+
+    def test_writer_escalation_cannot_skip_a_tier(self) -> None:
+        trace = self.escalated_trace(
+            to_tier="strongest",
+            to_agent="openbuild_implementation_strongest",
+        )
+
+        errors = validate_implementation_dispatch_trace(trace)
+        self.assertTrue(any("one tier" in error for error in errors))
+
+    def test_writer_escalation_is_forbidden_after_any_edit(self) -> None:
+        trace = self.escalated_trace()
+        trace.insert(4, {"event": "code-write", "actor": "openbuild_implementation_balanced"})
+
+        errors = validate_implementation_dispatch_trace(trace)
+        self.assertTrue(any("before any edit" in error for error in errors))
+
+    def test_writer_escalation_cannot_change_the_milestone_risk(self) -> None:
+        trace = self.escalated_trace()
+        for event in trace[8:]:
+            if "risk" in event:
+                event["risk"] = "critical"
+
+        errors = validate_implementation_dispatch_trace(trace)
+        self.assertTrue(any("cannot change the milestone risk" in error for error in errors))
 
     def test_failed_writer_cannot_be_replaced_before_edit(self) -> None:
         trace = self.valid_trace()
@@ -2422,12 +2591,12 @@ class ImplementationDispatchTraceTests(unittest.TestCase):
             {
                 "event": "writer-lease-acquired",
                 "lease": "M0",
-                "owner": "openbuild_implementation_strongest",
+                "owner": "openbuild_implementation_balanced",
             },
             {
                 "event": "implementation-dispatch",
                 "risk": "high",
-                "agent_name": "openbuild_implementation_strongest",
+                "agent_name": "openbuild_implementation_balanced",
                 "task_name": "failed_fixture",
                 "lease": "M0",
                 "result": "selected",
@@ -2641,11 +2810,13 @@ class ReviewEscalationTraceTests(unittest.TestCase):
         verdict: str,
         findings: str,
         escalation_reason: str,
+        risk: str = "low",
+        risk_floor: str = "fast",
     ) -> list[dict[str, object]]:
         running: dict[str, object] = {
             "event": "review-routing-receipt",
             "diff_revision": revision,
-            "risk_floor": "fast",
+            "risk_floor": risk_floor,
             "requested_agent": agent,
             "task_name": "fixture_task",
             "requested_tier": tier,
@@ -2673,7 +2844,7 @@ class ReviewEscalationTraceTests(unittest.TestCase):
         return [
             {
                 "event": "review-dispatch",
-                "risk": "low",
+                "risk": risk,
                 "tier": tier,
                 "agent_name": agent,
                 "task_name": "fixture_task",
@@ -2821,7 +2992,7 @@ class ReviewEscalationTraceTests(unittest.TestCase):
 
         self.assertTrue(any("requires the next reviewer tier" in error for error in validate_review_escalation_trace(trace)))
 
-    def test_high_risk_starts_with_exact_strong_read_only_reviewer(self) -> None:
+    def test_high_risk_starts_with_balanced_read_only_reviewer(self) -> None:
         trace = self.review_cycle(
             "balanced",
             "openbuild_review_balanced",
@@ -2829,12 +3000,90 @@ class ReviewEscalationTraceTests(unittest.TestCase):
             verdict="ACCEPT",
             findings="none",
             escalation_reason="none",
+            risk="high",
+            risk_floor="balanced",
         )
-        trace[0]["risk"] = "high"
-        trace[1]["risk_floor"] = "strong"
+
+        self.assertEqual(validate_review_escalation_trace(trace), [])
+
+    def test_critical_risk_starts_with_strongest_read_only_reviewer(self) -> None:
+        trace = self.review_cycle(
+            "strongest",
+            "openbuild_review_strongest",
+            "D1",
+            verdict="ACCEPT",
+            findings="none",
+            escalation_reason="none",
+            risk="critical",
+            risk_floor="strongest",
+        )
+
+        self.assertEqual(validate_review_escalation_trace(trace), [])
+
+    def test_high_risk_escalates_from_terra_to_sol_only_after_a_finding(self) -> None:
+        trace = self.review_cycle(
+            "balanced",
+            "openbuild_review_balanced",
+            "D1",
+            verdict="REVISE",
+            findings="F-1",
+            escalation_reason="unresolved-high-impact-finding",
+            risk="high",
+            risk_floor="balanced",
+        )
+        trace.extend(
+            [
+                {"event": "root-remediation"},
+                {"event": "validation", "result": "green"},
+            ]
+        )
+        trace.extend(
+            self.review_cycle(
+                "strong",
+                "openbuild_review_strong",
+                "D2",
+                verdict="ACCEPT",
+                findings="none",
+                escalation_reason="none",
+                risk="high",
+                risk_floor="balanced",
+            )
+        )
+
+        self.assertEqual(validate_review_escalation_trace(trace), [])
+
+    def test_review_escalation_cannot_change_the_diff_risk(self) -> None:
+        trace = self.review_cycle(
+            "balanced",
+            "openbuild_review_balanced",
+            "D1",
+            verdict="REVISE",
+            findings="F-1",
+            escalation_reason="unresolved-high-impact-finding",
+            risk="high",
+            risk_floor="balanced",
+        )
+        trace.extend(
+            [
+                {"event": "root-remediation"},
+                {"event": "validation", "result": "green"},
+            ]
+        )
+        trace.extend(
+            self.review_cycle(
+                "strong",
+                "openbuild_review_strong",
+                "D2",
+                verdict="ACCEPT",
+                findings="none",
+                escalation_reason="none",
+                risk="critical",
+                risk_floor="strongest",
+            )
+        )
 
         errors = validate_review_escalation_trace(trace)
-        self.assertTrue(any("must start at exact strong reviewer" in error for error in errors))
+        self.assertTrue(any("cannot change the diff risk" in error for error in errors))
 
     def test_review_requires_a_matching_activation_event(self) -> None:
         trace = self.review_cycle(

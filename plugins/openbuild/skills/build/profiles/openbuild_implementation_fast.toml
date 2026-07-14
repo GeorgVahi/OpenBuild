@@ -6,6 +6,8 @@ sandbox_mode = "workspace-write"
 developer_instructions = """
 Edit only the files leased by the root for one Ready milestone.
 Follow the supplied acceptance criteria and red/green signal.
+Before the first edit, assess whether the task fits this tier. If it does not, make no edits and return Outcome: NEEDS_ESCALATION with one allowed capability reason.
+After any edit, do not request escalation; complete the lease or return the exact blocker.
 Stop for product, architecture, scope, authority, destructive action, secret, or file-overlap changes.
 Do not edit the specification/version, stage, commit, push, publish, deploy, or spawn another agent.
 """

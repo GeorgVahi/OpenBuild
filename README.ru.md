@@ -4,7 +4,7 @@
 
 OpenBuild — явно вызываемый workflow для Codex, который может провести задачу или существующую спецификацию от поиска по репозиторию до реализации, проверок и review. Основной маршрут автоматический: вызовите Build, опишите результат, а он сам выберет первый незавершённый этап.
 
-Текущий релиз: `2.1.3` ([закреплённый исходник skill](https://github.com/GeorgVahi/OpenBuild/tree/v2.1.3/plugins/openbuild/skills/build)).
+Текущий релиз: `2.1.4` ([закреплённый исходник skill](https://github.com/GeorgVahi/OpenBuild/tree/v2.1.4/plugins/openbuild/skills/build)).
 
 ## Схемы
 
@@ -14,7 +14,7 @@ OpenBuild — явно вызываемый workflow для Codex, которы�
 
 ### Точная маршрутизация моделей
 
-![Точная маршрутизация моделей](plugins/openbuild/lib/usage-v2-ru.png)
+![Точная маршрутизация моделей](plugins/openbuild/lib/usage-v3-ru.png)
 
 ### Делегирование реализации
 
@@ -41,7 +41,7 @@ codex plugin marketplace remove openbuild
 Добавьте последний закреплённый релиз и установите plugin:
 
 ```powershell
-codex plugin marketplace add GeorgVahi/OpenBuild --ref v2.1.3
+codex plugin marketplace add GeorgVahi/OpenBuild --ref v2.1.4
 codex plugin add openbuild@openbuild
 ```
 
@@ -68,6 +68,8 @@ OpenBuild поставляет готовые профили для поиска
 Приоритет профилей: override проекта, override пользователя, затем встроенный профиль. Встроенный Spark-профиль поиска неизменяем, поэтому поиск по коду всегда использует один read-only контракт. Native Explorer, name-only custom agents, generic workers и другие маршруты без доказуемых model/effort не используются.
 
 Если точный поиск не запустился, Build фиксирует причину и выполняет только минимальный targeted root search. Ошибка точного implementation- или review-агента оставляет gate незавершённым вместо подмены агентом с неизвестной моделью.
+
+Реализация стартует на Terra для низкого, среднего и высокого риска; Sol high разрешён только после завершённого pre-edit `NEEDS_ESCALATION`, а критическая работа сразу получает Sol xhigh. Review аналогично стартует на Luna для low, на Terra для medium/high и доходит до Sol только по доказательству либо для critical.
 
 ## Progressive review
 

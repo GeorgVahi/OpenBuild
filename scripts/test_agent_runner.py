@@ -164,6 +164,7 @@ class AgentProfileResolutionTests(unittest.TestCase):
                 "openbuild_search_separate": ("gpt-5.3-codex-spark", "low", "read-only"),
                 "openbuild_implementation_fast": ("gpt-5.6-terra", "low", "workspace-write"),
                 "openbuild_implementation_balanced": ("gpt-5.6-terra", "medium", "workspace-write"),
+                "openbuild_implementation_strong": ("gpt-5.6-sol", "high", "workspace-write"),
                 "openbuild_implementation_strongest": ("gpt-5.6-sol", "xhigh", "workspace-write"),
                 "openbuild_review_fast": ("gpt-5.6-luna", "low", "read-only"),
                 "openbuild_review_balanced": ("gpt-5.6-terra", "medium", "read-only"),

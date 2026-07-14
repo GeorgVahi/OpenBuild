@@ -24,6 +24,7 @@ PACKAGED_AGENT_DEFAULTS = {
     "openbuild_search_separate": (PACKAGED_SEARCH_MODEL, "low", "read-only"),
     "openbuild_implementation_fast": ("gpt-5.6-terra", "low", "workspace-write"),
     "openbuild_implementation_balanced": ("gpt-5.6-terra", "medium", "workspace-write"),
+    "openbuild_implementation_strong": ("gpt-5.6-sol", "high", "workspace-write"),
     "openbuild_implementation_strongest": ("gpt-5.6-sol", "xhigh", "workspace-write"),
     "openbuild_review_fast": ("gpt-5.6-luna", "low", "read-only"),
     "openbuild_review_balanced": ("gpt-5.6-terra", "medium", "read-only"),
@@ -101,11 +102,30 @@ SEARCH_DISPATCH_FAILURES = {
     "unusable-evidence",
 }
 EXACT_DISPATCH_METHODS = {"codex-exec-explicit-model"}
-IMPLEMENTATION_AGENT_BY_RISK = {
+IMPLEMENTATION_AGENT_BY_TIER = {
+    "fast": "openbuild_implementation_fast",
+    "balanced": "openbuild_implementation_balanced",
+    "strong": "openbuild_implementation_strong",
+    "strongest": "openbuild_implementation_strongest",
+}
+IMPLEMENTATION_START_BY_RISK = {
     "low": ("fast", "openbuild_implementation_fast"),
     "medium": ("balanced", "openbuild_implementation_balanced"),
-    "high": ("strongest", "openbuild_implementation_strongest"),
+    "high": ("balanced", "openbuild_implementation_balanced"),
     "critical": ("strongest", "openbuild_implementation_strongest"),
+}
+IMPLEMENTATION_MAX_TIER_BY_RISK = {
+    "low": "balanced",
+    "medium": "strong",
+    "high": "strong",
+    "critical": "strongest",
+}
+IMPLEMENTATION_TIERS = tuple(IMPLEMENTATION_AGENT_BY_TIER)
+IMPLEMENTATION_ESCALATION_REASONS = {
+    "task-complexity-above-tier",
+    "unresolved-cross-layer-reasoning",
+    "validation-strategy-uncertain",
+    "capability-gap",
 }
 REVIEW_AGENT_BY_TIER = {
     "fast": "openbuild_review_fast",
@@ -116,7 +136,7 @@ REVIEW_AGENT_BY_TIER = {
 REVIEW_START_BY_RISK = {
     "low": "fast",
     "medium": "balanced",
-    "high": "strong",
+    "high": "balanced",
     "critical": "strongest",
 }
 REVIEW_TIERS = tuple(REVIEW_AGENT_BY_TIER)
@@ -132,6 +152,7 @@ REVIEW_ESCALATION_REASONS = {
 CANONICAL_AGENT_IDS = {
     "openbuild_implementation_fast": "openbuild-implementation-fast",
     "openbuild_implementation_balanced": "openbuild-implementation-balanced",
+    "openbuild_implementation_strong": "openbuild-implementation-strong",
     "openbuild_implementation_strongest": "openbuild-implementation-strongest",
     "openbuild_review_fast": "openbuild-review-fast",
     "openbuild_review_balanced": "openbuild-review-balanced",
@@ -1616,7 +1637,12 @@ def validate_decision_authority_trace(events: list[dict[str, str]]) -> list[str]
     return errors
 
 
-def validate_implementation_dispatch_trace(events: list[dict[str, str]]) -> list[str]:
+def _validate_single_implementation_dispatch_trace(
+    events: list[dict[str, object]],
+    *,
+    expected_tier_override: str | None = None,
+    expected_agent_override: str | None = None,
+) -> list[str]:
     """Validate lease → dispatch → running receipt → writes → terminal receipt → release."""
 
     errors: list[str] = []
@@ -1664,11 +1690,17 @@ def validate_implementation_dispatch_trace(events: list[dict[str, str]]) -> list
 
     dispatch = dispatches[-1]
     risk = dispatch.get("risk", "")
-    expected = IMPLEMENTATION_AGENT_BY_RISK.get(risk)
+    expected = IMPLEMENTATION_START_BY_RISK.get(risk)
     if expected is None:
         errors.append("implementation dispatch trace: risk must be low, medium, high, or critical")
         return errors
     expected_tier, expected_agent = expected
+    if expected_tier_override is not None or expected_agent_override is not None:
+        if expected_tier_override is None or expected_agent_override is None:
+            errors.append("implementation dispatch trace: incomplete expected escalation route")
+        else:
+            expected_tier = expected_tier_override
+            expected_agent = expected_agent_override
     agent_name = dispatch.get("agent_name", "")
     task_name = dispatch.get("task_name", "")
     if agent_name != expected_agent:
@@ -1936,6 +1968,339 @@ def validate_implementation_dispatch_trace(events: list[dict[str, str]]) -> list
     return errors
 
 
+def _validate_prewrite_implementation_escalation_cycle(
+    events: list[dict[str, object]],
+    *,
+    risk: str,
+    expected_tier: str,
+    expected_agent: str,
+    expected_next_tier: str,
+) -> list[str]:
+    """Validate one completed no-edit capability probe before a stronger lease."""
+
+    errors: list[str] = []
+    if any(event.get("event") in {"test-write", "code-write"} for event in events):
+        errors.append(
+            "implementation dispatch trace: NEEDS_ESCALATION is allowed only before any edit"
+        )
+    if any(event.get("event") == "implementation-handoff-accepted" for event in events):
+        errors.append(
+            "implementation dispatch trace: escalation probe cannot authorize an implementation handoff"
+        )
+
+    def exactly_one(event_name: str) -> tuple[int, dict[str, object]] | None:
+        matches = [
+            (index, event)
+            for index, event in enumerate(events)
+            if event.get("event") == event_name
+        ]
+        if len(matches) != 1:
+            errors.append(
+                f"implementation dispatch trace: escalation cycle requires exactly one {event_name}"
+            )
+            return None
+        return matches[0]
+
+    lease_record = exactly_one("writer-lease-acquired")
+    dispatch_record = exactly_one("implementation-dispatch")
+    activation_record = exactly_one("implementation-agent-activated")
+    result_record = exactly_one("implementation-result")
+    release_record = exactly_one("writer-lease-released")
+    approval_record = exactly_one("implementation-escalation-approved")
+    receipts = [
+        (index, event)
+        for index, event in enumerate(events)
+        if event.get("event") == "implementation-routing-receipt"
+    ]
+    running_receipts = [item for item in receipts if item[1].get("run_status") == "running"]
+    terminal_receipts = [
+        item for item in receipts if item[1].get("run_status") in {"completed", "failed", "cancelled"}
+    ]
+    if len(running_receipts) != 1:
+        errors.append(
+            "implementation dispatch trace: escalation cycle requires one unactivated running receipt"
+        )
+    if len(terminal_receipts) != 1:
+        errors.append(
+            "implementation dispatch trace: escalation cycle requires one terminal receipt"
+        )
+    if (
+        lease_record is None
+        or dispatch_record is None
+        or activation_record is None
+        or result_record is None
+        or release_record is None
+        or approval_record is None
+        or len(running_receipts) != 1
+        or len(terminal_receipts) != 1
+    ):
+        return errors
+
+    lease_index, lease_event = lease_record
+    dispatch_index, dispatch = dispatch_record
+    running_index, running = running_receipts[0]
+    activation_index, activation = activation_record
+    terminal_index, terminal = terminal_receipts[0]
+    result_index, result = result_record
+    release_index, release = release_record
+    approval_index, approval = approval_record
+    if not (
+        lease_index
+        < dispatch_index
+        < running_index
+        < activation_index
+        < terminal_index
+        < result_index
+        < release_index
+        < approval_index
+    ):
+        errors.append(
+            "implementation dispatch trace: escalation lifecycle must be lease, dispatch, running receipt, "
+            "activation, terminal receipt, result, release, then root approval"
+        )
+
+    lease_id = lease_event.get("lease")
+    task_name = dispatch.get("task_name")
+    if not lease_id or lease_event.get("owner") != expected_agent:
+        errors.append("implementation dispatch trace: escalation lease must bind the exact lower tier")
+    if (
+        dispatch.get("risk") != risk
+        or dispatch.get("tier") != expected_tier
+        or dispatch.get("agent_name") != expected_agent
+    ):
+        errors.append(
+            "implementation dispatch trace: escalation cycle must start at the exact expected tier"
+        )
+    if not task_name or task_name == expected_agent:
+        errors.append("implementation dispatch trace: escalation task_name must remain descriptive")
+    if dispatch.get("lease") != lease_id or dispatch.get("result") != "selected":
+        errors.append("implementation dispatch trace: escalation dispatch must bind the selected lease")
+    if dispatch.get("fallback_reason") not in {"", "none"}:
+        errors.append("implementation dispatch trace: escalation probe is not a fallback route")
+
+    immutable = {
+        "risk": risk,
+        "requested_agent": expected_agent,
+        "task_name": task_name,
+        "requested_tier": expected_tier,
+        "dispatch_method": "codex-exec-explicit-model",
+        "sandbox": "workspace-write",
+        "lease": lease_id,
+    }
+    for phase, receipt in (("running", running), ("terminal", terminal)):
+        for field, expected_value in immutable.items():
+            if receipt.get(field) != expected_value:
+                errors.append(
+                    f"implementation dispatch trace: {phase} escalation receipt changed {field}"
+                )
+        if not receipt.get("configured_model") or not receipt.get("model_reasoning_effort"):
+            errors.append(
+                f"implementation dispatch trace: {phase} escalation receipt needs concrete model and effort"
+            )
+    if (
+        running.get("activated") is not False
+        or running.get("process_tree_stopped") is not False
+        or running.get("terminal_event") not in {None, "none"}
+    ):
+        errors.append(
+            "implementation dispatch trace: escalation running receipt must be unactivated and non-terminal"
+        )
+    activation_bindings = {
+        "lease": lease_id,
+        "agent_name": expected_agent,
+        "task_name": task_name,
+        "run_dir": running.get("run_dir"),
+        "worker_process_identity": running.get("worker_process_identity"),
+        "codex_process_identity": running.get("codex_process_identity"),
+        "activated": True,
+    }
+    for field, expected_value in activation_bindings.items():
+        if activation.get(field) != expected_value:
+            errors.append(
+                f"implementation dispatch trace: escalation activation changed {field}"
+            )
+
+    for field in (
+        "configured_model",
+        "model_reasoning_effort",
+        "run_dir",
+        "worker_pid",
+        "worker_process_identity",
+        "codex_pid",
+        "codex_process_identity",
+    ):
+        if terminal.get(field) != running.get(field):
+            errors.append(
+                f"implementation dispatch trace: terminal escalation receipt changed {field}"
+            )
+    transport_success = (
+        terminal.get("run_status") == "completed"
+        and terminal.get("dispatch_result") == "selected"
+        and terminal.get("fallback_reason") in {"", "none"}
+        and terminal.get("activated") is True
+        and terminal.get("process_tree_stopped") is True
+        and terminal.get("terminal_event") == "turn.completed"
+        and explicit_success_evidence_is_valid(terminal)
+    )
+    if not transport_success:
+        errors.append(
+            "implementation dispatch trace: infrastructure or transport failure blocks replacement dispatch and edits; it cannot authorize escalation"
+        )
+    if terminal.get("observed_agent") != expected_agent or terminal.get("observed_model") in {
+        None,
+        "",
+        "unknown",
+    }:
+        errors.append(
+            "implementation dispatch trace: escalation terminal receipt needs concrete observed agent and model"
+        )
+
+    reason = result.get("reason")
+    if (
+        result.get("outcome") != "needs-escalation"
+        or reason not in IMPLEMENTATION_ESCALATION_REASONS
+    ):
+        errors.append(
+            "implementation dispatch trace: stronger writer requires a completed NEEDS_ESCALATION capability reason"
+        )
+    result_bindings = {
+        "risk": risk,
+        "tier": expected_tier,
+        "agent_name": expected_agent,
+        "lease": lease_id,
+        "run_dir": terminal.get("run_dir"),
+    }
+    for field, expected_value in result_bindings.items():
+        if result.get(field) != expected_value:
+            errors.append(f"implementation dispatch trace: escalation result changed {field}")
+    if release.get("lease") != lease_id:
+        errors.append("implementation dispatch trace: escalation must release the completed probe lease")
+
+    approval_bindings = {
+        "actor": "root",
+        "risk": risk,
+        "from_tier": expected_tier,
+        "to_tier": expected_next_tier,
+        "reason": reason,
+        "lease": lease_id,
+        "run_dir": terminal.get("run_dir"),
+        "verified_no_writes": True,
+        "process_tree_stopped": True,
+        "result_evidence": "valid",
+    }
+    for field, expected_value in approval_bindings.items():
+        if approval.get(field) != expected_value:
+            errors.append(
+                f"implementation dispatch trace: root escalation approval changed {field}"
+            )
+    return errors
+
+
+def validate_implementation_dispatch_trace(
+    events: list[dict[str, object]],
+) -> list[str]:
+    """Validate one exact writer or a bounded pre-edit capability escalation ladder."""
+
+    dispatch_indexes = [
+        index for index, event in enumerate(events) if event.get("event") == "implementation-dispatch"
+    ]
+    lease_indexes = [
+        index for index, event in enumerate(events) if event.get("event") == "writer-lease-acquired"
+    ]
+    if len(dispatch_indexes) <= 1:
+        return _validate_single_implementation_dispatch_trace(events)
+    if len(dispatch_indexes) != len(lease_indexes):
+        return [
+            "implementation dispatch trace: every escalation dispatch requires a separate sequential lease"
+        ]
+
+    first_dispatch = events[dispatch_indexes[0]]
+    risk = str(first_dispatch.get("risk", ""))
+    start = IMPLEMENTATION_START_BY_RISK.get(risk)
+    max_tier = IMPLEMENTATION_MAX_TIER_BY_RISK.get(risk)
+    if start is None or max_tier is None:
+        return ["implementation dispatch trace: risk must be low, medium, high, or critical"]
+    start_tier, _ = start
+    start_rank = IMPLEMENTATION_TIERS.index(start_tier)
+    max_rank = IMPLEMENTATION_TIERS.index(max_tier)
+    escalation_count = len(dispatch_indexes) - 1
+    final_rank = start_rank + escalation_count
+    errors: list[str] = []
+    if any(events[index].get("risk") != risk for index in dispatch_indexes):
+        errors.append(
+            "implementation dispatch trace: escalation cannot change the milestone risk"
+        )
+    if final_rank >= len(IMPLEMENTATION_TIERS):
+        errors.append("implementation dispatch trace: escalation exceeded the available writer ladder")
+        final_rank = len(IMPLEMENTATION_TIERS) - 1
+    if final_rank > max_rank:
+        errors.append(
+            "implementation dispatch trace: stronger writer exceeded the risk ceiling; strongest is critical-only"
+        )
+
+    for position, lease_index in enumerate(lease_indexes[:-1]):
+        next_lease_index = lease_indexes[position + 1]
+        expected_rank = start_rank + position
+        next_rank = expected_rank + 1
+        if next_rank >= len(IMPLEMENTATION_TIERS):
+            errors.append("implementation dispatch trace: escalation cannot move beyond strongest")
+            break
+        expected_tier = IMPLEMENTATION_TIERS[expected_rank]
+        expected_next_tier = IMPLEMENTATION_TIERS[next_rank]
+        expected_agent = IMPLEMENTATION_AGENT_BY_TIER[expected_tier]
+        cycle = events[lease_index:next_lease_index]
+        cycle_dispatches = [
+            event for event in cycle if event.get("event") == "implementation-dispatch"
+        ]
+        next_dispatch = events[dispatch_indexes[position + 1]]
+        next_tier = next_dispatch.get("tier")
+        if not next_tier:
+            next_tier = next(
+                (
+                    event.get("requested_tier")
+                    for event in events[dispatch_indexes[position + 1] + 1 :]
+                    if event.get("event") == "implementation-routing-receipt"
+                ),
+                None,
+            )
+        if (
+            not cycle_dispatches
+            or cycle_dispatches[0].get("tier") != expected_tier
+            or next_tier != expected_next_tier
+        ):
+            errors.append(
+                "implementation dispatch trace: capability escalation must advance exactly one tier"
+            )
+        if any(
+            event.get("event") == "implementation-routing-receipt"
+            and event.get("run_status") in {"failed", "cancelled"}
+            for event in cycle
+        ):
+            errors.append(
+                "implementation dispatch trace: infrastructure failure blocks replacement dispatch and edits"
+            )
+        errors.extend(
+            _validate_prewrite_implementation_escalation_cycle(
+                cycle,
+                risk=risk,
+                expected_tier=expected_tier,
+                expected_agent=expected_agent,
+                expected_next_tier=expected_next_tier,
+            )
+        )
+
+    final_tier = IMPLEMENTATION_TIERS[final_rank]
+    final_agent = IMPLEMENTATION_AGENT_BY_TIER[final_tier]
+    errors.extend(
+        _validate_single_implementation_dispatch_trace(
+            events[lease_indexes[-1] :],
+            expected_tier_override=final_tier,
+            expected_agent_override=final_agent,
+        )
+    )
+    return errors
+
+
 def validate_review_escalation_trace(events: list[dict[str, str]]) -> list[str]:
     """Validate exact read-only reviewer dispatch and evidence-gated tier escalation."""
 
@@ -1950,6 +2315,8 @@ def validate_review_escalation_trace(events: list[dict[str, str]]) -> list[str]:
     prior_tier: str | None = None
     prior_result_index: int | None = None
     prior_result: dict[str, str] | None = None
+    initial_risk = events[dispatch_indexes[0]].get("risk", "")
+    initial_start = REVIEW_START_BY_RISK.get(initial_risk)
 
     for position, dispatch_index in enumerate(dispatch_indexes):
         dispatch = events[dispatch_index]
@@ -1964,6 +2331,10 @@ def validate_review_escalation_trace(events: list[dict[str, str]]) -> list[str]:
         if expected_start is None:
             errors.append("review escalation trace: risk must be low, medium, high, or critical")
             continue
+        if risk != initial_risk:
+            errors.append("review escalation trace: escalation cannot change the diff risk")
+        if initial_start is not None:
+            expected_start = initial_start
         if position == 0 and tier != expected_start:
             errors.append(
                 f"review escalation trace: {risk} risk must start at exact {expected_start} reviewer"
@@ -2528,7 +2899,7 @@ def validate_implementation_delegation_contract(
         "version/changelog/documentation",
         "progressive review",
         "Git exclusively root-owned",
-        "Do not repair that milestone through the root or a replacement lease",
+        "Do not repair an edited or failed milestone through the root or a replacement lease",
     ]:
         if token not in handoff:
             errors.append(f"implementation-delegation.md root handoff: missing {token}")
@@ -2650,7 +3021,12 @@ def validate_usage_routing_contract(
         if token not in skill_discovery:
             errors.append(f"SKILL.md usage routing: missing {token}")
     skill_implementation = markdown_section(skill_text, "## Implement milestones")
-    for token in ["risk-matched writer tier", "Escalate only on task evidence", "preserve the same TDD/minimality/validation gates"]:
+    for token in [
+        "risk-matched writer tier",
+        "Escalate only on task evidence",
+        "`NEEDS_ESCALATION` before any edit",
+        "preserve the same TDD/minimality/validation gates",
+    ]:
         if token not in skill_implementation:
             errors.append(f"SKILL.md risk-matched writer routing: missing {token}")
 
@@ -2698,8 +3074,13 @@ def validate_usage_routing_contract(
         "minimum sufficient proven coding tier",
         "openbuild_implementation_fast",
         "openbuild_implementation_balanced",
+        "openbuild_implementation_strong",
         "openbuild_implementation_strongest",
         "Escalate only on evidence",
+        "`NEEDS_ESCALATION`",
+        "Before any edit",
+        "exactly one tier",
+        "Infrastructure or transport failure",
         "Every created implementation agent must have concrete model, effort, and sandbox evidence",
         "stop before further test or production edits",
         "Before every test or production code edit",
@@ -2754,6 +3135,7 @@ def validate_usage_routing_contract(
         "openbuild_search_separate",
         "openbuild_implementation_fast",
         "openbuild_implementation_balanced",
+        "openbuild_implementation_strong",
         "openbuild_implementation_strongest",
         "openbuild_review_fast",
         "openbuild_review_balanced",
@@ -2837,11 +3219,13 @@ def validate_usage_routing_contract(
         "risk-matched coding model for every complexity class",
         "openbuild_implementation_fast",
         "openbuild_implementation_balanced",
+        "openbuild_implementation_strong",
         "openbuild_implementation_strongest",
         "Read-only search/discovery",
         "Every created implementation run requires concrete model, effort, and sandbox evidence",
-        "`high` | exact `openbuild_implementation_strongest` profile",
+        "`high` | exact `openbuild_implementation_balanced` starting profile",
         "`critical` | exact `openbuild_implementation_strongest` profile",
+        "`NEEDS_ESCALATION` before any edit",
         "stop before further test and production code edits",
         "Dispatch that exact profile before every test or production code edit",
         "Implementation routing receipt",
@@ -2862,7 +3246,7 @@ def validate_usage_routing_contract(
     for token in [
         "low` → `openbuild_review_fast",
         "medium` → `openbuild_review_balanced",
-        "high` → `openbuild_review_strong",
+        "high` → `openbuild_review_balanced",
         "critical` → `openbuild_review_strongest",
         "fast → balanced → strong → strongest",
         "Review routing receipt",

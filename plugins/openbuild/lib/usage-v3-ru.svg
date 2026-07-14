@@ -1,0 +1,144 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000" viewBox="0 0 1600 1000">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#03070c"/>
+      <stop offset="1" stop-color="#09050f"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="5" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#eaf2ff"/>
+    </marker>
+    <style>
+      text { font-family: "Segoe UI", Arial, sans-serif; fill: #f4f7fb; }
+      .muted { fill: #aab7c7; }
+      .tiny { font-size: 15px; }
+      .small { font-size: 18px; }
+      .body { font-size: 21px; }
+      .label { font-size: 24px; font-weight: 650; }
+      .title { font-size: 35px; font-weight: 720; }
+      .line { fill: none; stroke: #eaf2ff; stroke-width: 2.5; marker-end: url(#arrow); }
+      .cyan { stroke: #00e8f2; }
+      .blue { stroke: #1688ff; }
+      .purple { stroke: #c65cff; }
+      .yellow { stroke: #ffd400; }
+      .green { stroke: #36ef4b; }
+      .box { fill: #07111b; stroke-width: 2; rx: 16; }
+      .panel { fill: #050a10; fill-opacity: .82; stroke-width: 2; rx: 22; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="1000" fill="url(#bg)"/>
+  <text x="800" y="55" text-anchor="middle" class="title">OpenBuild 2.1.4 · сначала достаточная слабая модель</text>
+  <rect x="570" y="78" width="460" height="62" class="box yellow" fill="#1a1502"/>
+  <text x="800" y="117" text-anchor="middle" class="label" fill="#ffe34d">РИСК ЗАДАЧИ + RUNTIME-ДОКАЗАТЕЛЬСТВА</text>
+
+  <rect x="24" y="170" width="468" height="730" class="panel cyan"/>
+  <rect x="516" y="170" width="568" height="730" class="panel blue"/>
+  <rect x="1108" y="170" width="468" height="730" class="panel purple"/>
+
+  <text x="55" y="216" class="label" fill="#00e8f2">⌕  ПОИСК · ТОЛЬКО ЧТЕНИЕ</text>
+  <text x="547" y="216" class="label" fill="#1688ff">⚙  РЕАЛИЗАЦИЯ · ОДИН ПИСАТЕЛЬ</text>
+  <text x="1139" y="216" class="label" fill="#c65cff">◉  REVIEW · ТОЛЬКО ЧТЕНИЕ</text>
+
+  <rect x="58" y="252" width="400" height="88" class="box cyan"/>
+  <text x="258" y="285" text-anchor="middle" class="body">Компактный план поиска</text>
+  <text x="258" y="315" text-anchor="middle" class="small muted">path:line · символ · зачем важно</text>
+  <path d="M258 340 V382" class="line"/>
+
+  <rect x="58" y="382" width="400" height="110" class="box cyan"/>
+  <text x="258" y="418" text-anchor="middle" class="small muted">ТОЧНЫЙ ОТДЕЛЬНЫЙ ПРОЦЕСС</text>
+  <text x="258" y="452" text-anchor="middle" class="body">openbuild_search_separate</text>
+  <text x="258" y="478" text-anchor="middle" class="small" fill="#6ff8ff">Spark · low · read-only</text>
+  <path d="M258 492 V535" class="line"/>
+
+  <rect x="58" y="535" width="400" height="88" class="box cyan"/>
+  <text x="258" y="570" text-anchor="middle" class="body">Квитанция до первого поиска</text>
+  <text x="258" y="599" text-anchor="middle" class="small muted">модель + effort + процесс</text>
+
+  <path d="M258 623 V680" class="line"/>
+  <path d="M258 651 H105 V680" class="line"/>
+  <text x="120" y="646" class="tiny" fill="#ffd400">зафиксирован сбой</text>
+  <rect x="58" y="680" width="195" height="112" class="box yellow"/>
+  <text x="155" y="718" text-anchor="middle" class="body">Автоматический</text>
+  <text x="155" y="747" text-anchor="middle" class="body">предохранитель</text>
+  <text x="155" y="775" text-anchor="middle" class="tiny muted">без запасного агента</text>
+  <rect x="269" y="680" width="189" height="112" class="box cyan"/>
+  <text x="363" y="718" text-anchor="middle" class="body">Точечный поиск</text>
+  <text x="363" y="747" text-anchor="middle" class="body">корневым агентом</text>
+  <text x="363" y="775" text-anchor="middle" class="tiny muted">только минимум</text>
+  <path d="M253 736 H269" class="line"/>
+  <text x="258" y="846" text-anchor="middle" class="small" fill="#6ff8ff">Для поиска по коду всегда фиксирован Spark</text>
+
+  <text x="551" y="260" class="small muted">СТАРТОВЫЙ МАРШРУТ</text>
+  <rect x="550" y="278" width="255" height="92" class="box blue"/>
+  <text x="575" y="310" class="small" fill="#8fc9ff">НИЗКИЙ</text>
+  <text x="575" y="338" class="body">implementation_fast</text>
+  <text x="575" y="360" class="tiny muted">Terra · low</text>
+
+  <rect x="550" y="397" width="255" height="105" class="box blue"/>
+  <text x="575" y="430" class="small" fill="#8fc9ff">СРЕДНИЙ / ВЫСОКИЙ</text>
+  <text x="575" y="458" class="small">implementation_balanced</text>
+  <text x="575" y="484" class="tiny muted">Terra · medium</text>
+
+  <rect x="550" y="650" width="255" height="105" class="box blue"/>
+  <text x="575" y="683" class="small" fill="#8fc9ff">КРИТИЧЕСКИЙ</text>
+  <text x="575" y="711" class="small">implementation_strongest</text>
+  <text x="575" y="737" class="tiny muted">Sol · xhigh</text>
+
+  <rect x="842" y="397" width="207" height="105" class="box yellow"/>
+  <text x="945" y="429" text-anchor="middle" class="small" fill="#ffe34d">NEEDS_ESCALATION</text>
+  <text x="945" y="456" text-anchor="middle" class="small" fill="#ffe34d">до правок</text>
+  <text x="945" y="482" text-anchor="middle" class="tiny muted">успех + ноль записей</text>
+  <path d="M805 449 H842" class="line"/>
+
+  <rect x="842" y="535" width="207" height="105" class="box blue"/>
+  <text x="945" y="568" text-anchor="middle" class="small" fill="#8fc9ff">ТОЛЬКО ОДИН ШАГ</text>
+  <text x="945" y="595" text-anchor="middle" class="small">implementation_strong</text>
+  <text x="945" y="621" text-anchor="middle" class="tiny muted">Sol · high</text>
+  <path d="M945 502 V535" class="line"/>
+
+  <rect x="842" y="674" width="207" height="74" class="box blue"/>
+  <text x="945" y="705" text-anchor="middle" class="small">Точная квитанция</text>
+  <text x="945" y="732" text-anchor="middle" class="tiny muted">lease · модель · effort</text>
+  <path d="M805 324 H1022 V674" class="line"/>
+  <path d="M805 702 H842" class="line"/>
+  <path d="M945 640 V674" class="line"/>
+
+  <rect x="550" y="800" width="499" height="64" class="box blue"/>
+  <text x="799" y="828" text-anchor="middle" class="small">После первой правки writer уже не меняется</text>
+  <text x="799" y="852" text-anchor="middle" class="tiny muted">Ready · TDD · минимальность · аренда · валидация</text>
+  <path d="M945 748 V800" class="line"/>
+
+  <text x="1138" y="260" class="small muted">СТАРТОВЫЙ МАРШРУТ</text>
+  <rect x="1140" y="278" width="400" height="125" class="box purple"/>
+  <text x="1170" y="311" class="tiny" fill="#dda2ff">LOW</text>
+  <text x="1510" y="311" text-anchor="end" class="tiny">review_fast · Luna low</text>
+  <text x="1170" y="347" class="tiny" fill="#dda2ff">MEDIUM / HIGH</text>
+  <text x="1510" y="347" text-anchor="end" class="tiny">review_balanced · Terra medium</text>
+  <text x="1170" y="383" class="tiny" fill="#dda2ff">CRITICAL</text>
+  <text x="1510" y="383" text-anchor="end" class="tiny">review_strongest · Sol xhigh</text>
+  <path d="M1340 403 V446" class="line"/>
+
+  <rect x="1140" y="446" width="400" height="92" class="box purple"/>
+  <text x="1340" y="480" text-anchor="middle" class="body">Точная read-only квитанция</text>
+  <text x="1340" y="512" text-anchor="middle" class="small muted">ACCEPT без конкретного триггера?</text>
+  <path d="M1340 538 V585" class="line"/>
+
+  <rect x="1140" y="585" width="400" height="105" class="box purple"/>
+  <text x="1340" y="619" text-anchor="middle" class="body">Замечание → исправление root</text>
+  <text x="1340" y="650" text-anchor="middle" class="body">→ зелёная валидация</text>
+  <text x="1340" y="677" text-anchor="middle" class="tiny muted">reviewer никогда не пишет</text>
+  <path d="M1340 690 V727" class="line"/>
+
+  <rect x="1140" y="727" width="400" height="105" class="box purple"/>
+  <text x="1340" y="761" text-anchor="middle" class="small">Только следующий доказанный уровень</text>
+  <text x="1340" y="790" text-anchor="middle" class="small" fill="#dda2ff">strong · Sol high</text>
+  <text x="1340" y="817" text-anchor="middle" class="tiny muted">strongest — только финальный спор</text>
+  <text x="1340" y="868" text-anchor="middle" class="small" fill="#dda2ff">Чистый balanced-review закрывает high</text>
+
+  <rect x="570" y="925" width="460" height="55" class="box green" fill="#071808" filter="url(#glow)"/>
+  <text x="800" y="960" text-anchor="middle" class="label" fill="#62ff72">✓  ПОДТВЕРЖДЁННОЕ ЗАВЕРШЕНИЕ</text>
+</svg>

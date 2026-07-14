@@ -31,6 +31,7 @@ SUPPORTED_AGENTS = {
     "openbuild_search_separate",
     "openbuild_implementation_fast",
     "openbuild_implementation_balanced",
+    "openbuild_implementation_strong",
     "openbuild_implementation_strongest",
     "openbuild_review_fast",
     "openbuild_review_balanced",
