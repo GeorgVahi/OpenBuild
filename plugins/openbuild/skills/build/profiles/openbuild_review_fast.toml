@@ -1,9 +1,11 @@
 name = "openbuild_review_fast"
 description = "Read-only review for low-risk OpenBuild changes."
 model = "gpt-5.6-luna"
-model_reasoning_effort = "low"
+model_reasoning_effort = "medium"
+routing_rung = "luna-medium"
+routing_tuple_confirmed = true
 sandbox_mode = "read-only"
 developer_instructions = """
 Review only the supplied specification, diff, validation, and acceptance evidence.
-Return evidence-backed findings and a verdict. Do not edit, commit, push, publish, decide product behavior, or spawn another agent.
+Return evidence-backed findings and a verdict. Escalate only on configured concrete evidence; score alone and timeout, auth, quota, sandbox, or transport failures never escalate. Do not edit, commit, push, publish, decide product behavior, or spawn another agent.
 """

@@ -20,7 +20,7 @@ Use this as a flexible structure. Remove irrelevant sections and keep the docume
 - Discovery mode: delegated | mixed | root-recovery — <exact runner evidence or root recovery reason>
 - Search usage route: separate-pool | root-recovery — <exact result or terminal failure and circuit breaker>
 - Search routing receipt: <model-map source/hash/step, exact agent, dispatch method, configured/observed model, pool, result, and fallback reason>
-- Implementation model route: fast-profile | balanced-profile | strong-profile | strongest-profile | blocked — <exact profile/model/effort, semantic outcome, pre-edit escalation, and blocker>
+- Implementation model route: <ordered exact canonical profile/model/effort steps, up to five> | blocked — <semantic outcome, pre-edit escalation, and blocker>
 - Implementation routing receipt: <model-map source/hash/step, risk, exact requested agent/tier, dispatch method, configured/observed model, workspace-write sandbox, lease, result, and fallback reason>
 - Review routing receipt: <model-map source/hash/step, diff revision, risk floor, exact requested agent/tier, dispatch method, configured/observed model, read-only sandbox, result, and fallback reason>
 

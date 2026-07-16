@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from validate_package import (
     IMPLEMENTATION_DELEGATION,
     PACKAGED_SEARCH_INSTRUCTIONS,
     PACKAGED_SEARCH_MODEL,
+    REVIEW_MAX_TIER_BY_RISK,
     REVIEW_PROTOCOL,
     ROOT,
     SKILL,
@@ -30,8 +32,10 @@ from validate_package import (
     validate_decision_authority_trace,
     validate_implementation_delegation_contract,
     validate_implementation_dispatch_trace,
+    validate_packaged_agent_profile,
     validate_packaged_search_profile,
     validate_profile_migration_trace,
+    validate_recovery_control_plane,
     validate_release_docs_contract,
     validate_review_escalation_trace,
     validate_search_dispatch_trace,
@@ -39,9 +43,203 @@ from validate_package import (
 )
 
 
+class RecoveryControlPlanePackageTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.runner = (SKILL / "scripts" / "agent_runner.py").read_text(encoding="utf-8")
+        self.recovery = (SKILL / "scripts" / "recovery_state.py").read_text(encoding="utf-8")
+
+    def test_packaged_recovery_owner_is_complete_and_private(self) -> None:
+        self.assertEqual(validate_recovery_control_plane(self.runner, self.recovery), [])
+
+        mutations = [
+            ("recovery", 'READER_FLOOR = "2.2.0"', 'READER_FLOOR = "1"', "reader floor"),
+            ("recovery", 'b"openbuild-workspace-v2\\0"', 'b"openbuild-workspace-v1\\0"', "workspace key"),
+            ("recovery", '"--porcelain=v2"', '"--porcelain=v1"', "Git provenance"),
+            ("recovery", '"ls-files", "--stage", "-v", "-z"', '"ls-files", "--stage", "-z"', "Git index flags"),
+            ("recovery", "_reject_snapshot_reparse_point(metadata)", "trust_snapshot_reparse_point(metadata)", "Windows reparse points"),
+            ("recovery", "_lstat_snapshot_path(relative)", "_trust_snapshot_path(relative)", "Windows reparse ancestors"),
+            ("recovery", "_windows_open_snapshot_chain", "_windows_open_following_chain", "snapshot TOCTOU boundary"),
+            ("recovery", 'getattr(os, "O_NOFOLLOW", 0)', "0", "snapshot TOCTOU boundary"),
+            ("recovery", 'b"openbuild-content-v1\\0"', 'b"content\\0"', "keyed privacy"),
+            ("recovery", "DEFAULT_MAX_RECORDS = 100_000", "DEFAULT_MAX_RECORDS = 0", "inventory limits"),
+            (
+                "recovery",
+                "_validate_public_checkpoint",
+                "trust_public_checkpoint",
+                "public checkpoint schema",
+            ),
+            (
+                "recovery",
+                "self._validate_registry(state)",
+                "self._trust_registry(state)",
+                "pre-publication registry schema gate",
+            ),
+            (
+                "recovery",
+                'self._validate_source(state, state["source_state_id"])',
+                'self._trust_source(state, state["source_state_id"])',
+                "pre-publication source schema gate",
+            ),
+            (
+                "recovery",
+                "_validate_contained_process_binding(lease)",
+                "_validate_provider_receipt(lease)",
+                "contained receipt binding",
+            ),
+            (
+                "recovery",
+                "_validate_terminal_identity_binding(lease)",
+                "_validate_zero_proof(lease.get(\"zero_proof\"))",
+                "terminal identity binding",
+            ),
+            (
+                "recovery",
+                "self._validate_semantic_registry_binding(state)",
+                "self._validate_registry_history(state)",
+                "semantic registry binding",
+            ),
+            (
+                "recovery",
+                "self._require_zero_write_source_locked(str(lease.get(\"source_state_id\")))",
+                "self._trust_zero_write_source(str(lease.get(\"source_state_id\")))",
+                "semantic zero-write proof",
+            ),
+            ("runner", 'if not agent_name.startswith("openbuild_implementation_"):', 'if not agent_name:', "implementation-only"),
+            ("runner", "create_windows_kill_job(bind_current=False)", "create_windows_kill_job()", "outside-Job Windows guardian"),
+            ("runner", "_WINDOWS_CREATE_SUSPENDED", "_WINDOWS_CREATE_IMMEDIATE", "creation-suspended Windows worker"),
+            ("runner", "_CLONE_INTO_CGROUP", "_CLONE_AFTER_CGROUP", "creation-bound Linux worker"),
+            ("runner", "spawn_linux_worker_creation_bound", "spawn_linux_worker_then_attach", "creation-bound Linux worker"),
+            (
+                "runner",
+                "def query_linux_cgroup_members(cgroup: Path) -> set[int]:",
+                "def attach_linux_process_to_cgroup(cgroup: Path, pid: int) -> None:\n"
+                "    (cgroup / \"cgroup.procs\").write_text(str(pid))\n\n"
+                "def query_linux_cgroup_members(cgroup: Path) -> set[int]:",
+                "creation-bound Linux worker",
+            ),
+            ("runner", "verify_windows_process_in_job", "trust_windows_process_in_job", "verified Windows Job attachment"),
+            ("runner", "establish_linux_anti_migration_boundary", "establish_linux_boundary", "native Linux anti-migration boundary"),
+            ("runner", "await_guardian_precommit", "await_guardian_ready", "fresh guardian precommit attestation"),
+            ("runner", "bound_state = registry.bind_process_unactivated", "bound_state = registry.state", "guardian-owned registry commit"),
+            ("recovery", "reject_semantic_handoff", "accept_semantic_handoff", "semantic handoff rejection"),
+            ("recovery", "complete_source_checkpoint_invalidation", "trust_source_checkpoint_invalidation", "semantic checkpoint invalidation completion"),
+            ("recovery", "resolve_visible_commit=True", "resolve_visible_commit=False", "decidable guardian registry commit"),
+            ("recovery", "bind_reserved_source_snapshot", "trust_prepared_source_snapshot", "reserved source provenance boundary"),
+            ("recovery", '"activation-provenance-drift"', '"activation-provenance-trusted"', "activation provenance boundary"),
+            ("recovery", 'b"openbuild-terminal-archive-v1\\0"', 'b"openbuild-terminal-v0\\0"', "contained terminal archive"),
+            ("runner", "registry.bind_reserved_source_snapshot", "registry.trust_prepared_source_snapshot", "reserved source provenance boundary"),
+            ("runner", 'private_plan.get("provider_plan_id") != provider_plan_id', 'private_plan.get("provider_plan_id") == provider_plan_id', "guardian provider-plan binding"),
+            ("runner", 'private_plan.get("ipc_plan_id") != ipc_plan_id', 'private_plan.get("ipc_plan_id") == ipc_plan_id', "guardian IPC-plan binding"),
+            ("runner", "reject_semantic_handoff_run", "accept_semantic_handoff_run", "root semantic rejection gate"),
+            ("runner", "registry.complete_source_checkpoint_invalidation", "registry.trust_source_checkpoint_invalidation", "root semantic invalidation completion"),
+            ("recovery", "quarantine_fallback_launch", "release_fallback_launch", "ambiguous fallback quarantine"),
+            (
+                "recovery",
+                'lease["state"] = "ordinary-process-bound-unactivated"\n            return self._commit_registry_locked(state, resolve_visible_commit=True)',
+                'lease["state"] = "ordinary-process-bound-unactivated"\n            return self._commit_registry_locked(state)',
+                "fallback process bind",
+            ),
+            (
+                "runner",
+                "ordinary fallback process bind did not return its exact durable receipt",
+                "ordinary fallback process bind is trusted",
+                "fallback process receipt verification",
+            ),
+            ("runner", "reconcile_implementation_registry", "reconcile_registry", "runner terminal lifecycle"),
+            ("runner", '"--soft-timeout-exit-zero"', '"--strict-timeout-only"', "soft observation timeout"),
+            ("runner", "return 0 if args.soft_timeout_exit_zero else 3", "return 3", "soft observation timeout"),
+        ]
+        for field, token, replacement, expected in mutations:
+            with self.subTest(expected=expected):
+                runner = self.runner if field != "runner" else self.runner.replace(token, replacement)
+                recovery = self.recovery if field != "recovery" else self.recovery.replace(token, replacement)
+                self.assertTrue(
+                    any(expected in error for error in validate_recovery_control_plane(runner, recovery))
+                )
+
+
 class RunnerOnlyRoutingContractTests(unittest.TestCase):
     def test_only_explicit_cli_dispatch_is_accepted(self) -> None:
         self.assertEqual(EXACT_DISPATCH_METHODS, {"codex-exec-explicit-model"})
+
+    def test_packaged_writer_profiles_lock_one_pre_edit_next_rung_or_terminal_stop(self) -> None:
+        profile_path = SKILL / "profiles" / "openbuild_implementation_strong.toml"
+        profile = tomllib.loads(profile_path.read_text(encoding="utf-8"))
+        edge = (
+            "Before the first edit, a capability escalation may name only "
+            "`openbuild_implementation_sol_high` as the next rung."
+        )
+        for instructions, expected in [
+            (profile["developer_instructions"].replace(edge, ""), "exactly one named pre-edit"),
+            (profile["developer_instructions"] + edge, "exactly one named pre-edit"),
+            (
+                profile["developer_instructions"].replace(edge, "") + "\n" + edge,
+                "must precede post-edit",
+            ),
+        ]:
+            with self.subTest(expected=expected):
+                altered = dict(profile, developer_instructions=instructions)
+                self.assertTrue(
+                    any(expected in error for error in validate_packaged_agent_profile(
+                        "openbuild_implementation_strong", altered
+                    ))
+                )
+
+    def test_packaged_strongest_reviewer_is_critical_only(self) -> None:
+        profile_path = SKILL / "profiles" / "openbuild_review_strongest.toml"
+        profile = tomllib.loads(profile_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            validate_packaged_agent_profile("openbuild_review_strongest", profile), []
+        )
+
+        altered = dict(
+            profile,
+            developer_instructions=profile["developer_instructions"].replace(
+                "This Sol/xhigh profile is critical-only and is never the next rung for a non-critical review.",
+                "This profile may adjudicate an escalated non-critical review.",
+            ),
+        )
+        self.assertTrue(
+            any(
+                "critical-only" in error
+                for error in validate_packaged_agent_profile(
+                    "openbuild_review_strongest", altered
+                )
+            )
+        )
+
+        terminal_path = SKILL / "profiles" / "openbuild_implementation_sol_high.toml"
+        terminal = tomllib.loads(terminal_path.read_text(encoding="utf-8"))
+        terminal["developer_instructions"] = terminal["developer_instructions"].replace(
+            "Capability escalation is forbidden;", "Capability escalation may continue;"
+        )
+        self.assertTrue(
+            any(
+                "terminal writer" in error
+                for error in validate_packaged_agent_profile("openbuild_implementation_sol_high", terminal)
+            )
+        )
+
+    def test_packaged_profiles_lock_their_effective_routing_rung(self) -> None:
+        profile_path = SKILL / "profiles" / "openbuild_review_fast.toml"
+        profile = tomllib.loads(profile_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            validate_packaged_agent_profile("openbuild_review_fast", profile), []
+        )
+        for field, value in (
+            ("routing_rung", "sol-high"),
+            ("routing_tuple_confirmed", False),
+        ):
+            with self.subTest(field=field):
+                altered = dict(profile, **{field: value})
+                self.assertTrue(
+                    any(
+                        field in error
+                        for error in validate_packaged_agent_profile(
+                            "openbuild_review_fast", altered
+                        )
+                    )
+                )
 
     def test_deprecated_unknown_agent_routes_are_absent_from_runtime_contract(self) -> None:
         self.assertNotIn("openbuild_search_fallback", CANONICAL_AGENT_IDS)
@@ -140,6 +338,8 @@ class ConfigurableModelMapContractTests(unittest.TestCase):
             "openbuild_search_strongest",
             "model_map.py validate",
             "one launcher smoke per distinct model/effort/sandbox tuple",
+            "routing_rung",
+            "routing_tuple_confirmed = true",
         ]:
             with self.subTest(token=token):
                 self.assertIn(token, self.interview)
@@ -417,19 +617,19 @@ class ImplementationDelegationContractTests(unittest.TestCase):
 class ChangelogContractTests(unittest.TestCase):
     def test_release_manifest_version_and_latest_release_are_documented(self) -> None:
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-        self.assertEqual(validate_changelog_contract(changelog, "2.1.5"), [])
+        self.assertEqual(validate_changelog_contract(changelog, "2.2.0"), [])
         self.assertNotIn("## [2.1.1]", changelog)
 
-        mutated = changelog.replace("## [2.1.5] - 2026-07-14", "## [next] - 2026-07-14")
-        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "2.1.5")))
+        mutated = changelog.replace("## [2.2.0]", "## [next]", 1)
+        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "2.2.0")))
 
     def test_released_version_is_pinned_in_both_install_channels(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         readme_ru = (ROOT / "README.ru.md").read_text(encoding="utf-8")
-        self.assertEqual(validate_release_docs_contract(readme, readme_ru, "2.1.5"), [])
+        self.assertEqual(validate_release_docs_contract(readme, readme_ru, "2.2.0"), [])
 
-        mutated = readme.replace("--ref v2.1.5", "--ref main")
-        self.assertTrue(any("README.md" in error for error in validate_release_docs_contract(mutated, readme_ru, "2.1.5")))
+        mutated = readme.replace("--ref v2.2.0", "--ref main")
+        self.assertTrue(any("README.md" in error for error in validate_release_docs_contract(mutated, readme_ru, "2.2.0")))
 
 
 class DecisionAuthorityTraceTests(unittest.TestCase):
@@ -1416,6 +1616,7 @@ class UsageRoutingContractTests(unittest.TestCase):
         self.readme = (ROOT / "README.md").read_text(encoding="utf-8")
         self.readme_ru = (ROOT / "README.ru.md").read_text(encoding="utf-8")
         self.template_text = (SKILL / "references" / "spec-template.md").read_text(encoding="utf-8")
+        self.model_map_interview = (SKILL / "references" / "model-map-interview.md").read_text(encoding="utf-8")
 
     def validate(self, **overrides: str) -> list[str]:
         return validate_usage_routing_contract(
@@ -1426,7 +1627,39 @@ class UsageRoutingContractTests(unittest.TestCase):
             overrides.get("review_protocol", self.review_protocol),
             overrides.get("readme", self.readme),
             overrides.get("readme_ru", self.readme_ru),
+            overrides.get("model_map_interview", self.model_map_interview),
+            overrides.get("template_text", self.template_text),
         )
+
+    def test_reasoning_first_owner_docs_cannot_regress_to_the_old_route_ceiling(self) -> None:
+        self.assertEqual(self.validate(), [])
+        mutations = [
+            ("model_map_interview", "one, two, three, four, or five steps"),
+            ("implementation", "openbuild_implementation_luna_xhigh"),
+            ("review_protocol", "exact configured profile/model-effort step"),
+            ("model_routing", "exact canonical openbuild_implementation_* ID from the displayed route"),
+            ("template_text", "ordered exact canonical profile/model/effort steps, up to five"),
+        ]
+        for field, token in mutations:
+            with self.subTest(field=field):
+                altered = getattr(self, field).replace(token, "stale-route-contract")
+                self.assertTrue(
+                    any(
+                        "reasoning-first owner docs" in error
+                        for error in self.validate(**{field: altered})
+                    )
+                )
+
+    def test_review_result_contract_names_each_reasoning_first_tier(self) -> None:
+        for tier in ("luna_xhigh", "sol_high"):
+            with self.subTest(tier=tier):
+                altered = self.review_protocol.replace(tier, f"missing_{tier}")
+                self.assertTrue(
+                    any(
+                        "review-protocol.md exact reviewer routing" in error
+                        for error in self.validate(review_protocol=altered)
+                    )
+                )
 
     def validate_agent_usage(self, **overrides: str) -> list[str]:
         return validate_agent_usage_report_contract(
@@ -1539,6 +1772,26 @@ class UsageRoutingContractTests(unittest.TestCase):
         errors = self.validate_agent_usage(readme=readme)
         self.assertTrue(any("removed verbose section" in error for error in errors))
         self.assertTrue(any("exceeds 140 lines" in error for error in errors))
+
+    def test_russian_routing_diagram_keeps_long_labels_inside_panels(self) -> None:
+        svg = (ROOT / "plugins" / "openbuild" / "lib" / "usage-v3-ru.svg").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('<rect x="822" y="397" width="227" height="105"', svg)
+        self.assertIn(
+            '<text x="935" y="429" text-anchor="middle" class="small"',
+            svg,
+        )
+        self.assertIn(
+            '<text x="258" y="838" text-anchor="middle" class="tiny"',
+            svg,
+        )
+        png = (ROOT / "plugins" / "openbuild" / "lib" / "usage-v3-ru.png").read_bytes()
+        self.assertEqual(png[:8], b"\x89PNG\r\n\x1a\n")
+        self.assertEqual(
+            (int.from_bytes(png[16:20], "big"), int.from_bytes(png[20:24], "big")),
+            (1600, 1000),
+        )
 
     def test_final_agent_heading_is_localized_to_the_response_language(self) -> None:
         self.assertEqual(self.validate_agent_usage(), [])
@@ -1741,6 +1994,17 @@ class UsageRoutingContractTests(unittest.TestCase):
         )
         self.assertTrue(any("review-protocol.md" in error for error in self.validate(review_protocol=review_protocol)))
 
+        review_protocol = self.review_protocol.replace(
+            "The non-critical route ends at Sol/high; Sol/xhigh is critical-only",
+            "A non-critical route may continue from Sol/high to Sol/xhigh",
+        )
+        self.assertTrue(
+            any(
+                "review-protocol.md" in error
+                for error in self.validate(review_protocol=review_protocol)
+            )
+        )
+
     def test_writer_escalation_preserves_tdd_and_single_writer_controls(self) -> None:
         model_routing = self.model_routing.replace(
             "Escalate only on evidence",
@@ -1754,15 +2018,49 @@ class UsageRoutingContractTests(unittest.TestCase):
         )
         self.assertTrue(any("implementation-delegation.md" in error for error in self.validate(implementation=implementation)))
 
+        model_routing = self.model_routing.replace(
+            "checkpoint_invalidation=pending",
+            "checkpoint invalidation may be attempted later",
+        )
+        self.assertTrue(
+            any(
+                "implementation routing" in error
+                for error in self.validate(model_routing=model_routing)
+            )
+        )
+
+    def test_recovery_provenance_docs_lock_index_flags_and_reparse_points(self) -> None:
+        for token in (
+            "`git ls-files --stage -v -z`",
+            "`assume-unchanged`",
+            "`skip-worktree`",
+            "`FILE_ATTRIBUTE_REPARSE_POINT`",
+            "every path component with non-following metadata",
+            "holds the same object identity through hashing and enumeration",
+            "Immediately before activation",
+            "`clone3(CLONE_INTO_CGROUP)`",
+            "privacy-safe terminal archive",
+            "fallback bind uses the same visible-generation resolution",
+            "Before any registry or private-source durable replace",
+        ):
+            with self.subTest(token=token):
+                implementation = self.implementation.replace(token, "omitted safety guard")
+                self.assertTrue(
+                    any(
+                        "implementation-delegation.md" in error
+                        for error in self.validate(implementation=implementation)
+                    )
+                )
+
     def test_high_start_and_critical_writer_floor_cannot_be_relaxed(self) -> None:
         implementation = self.implementation.replace(
-            "`high` | exact `openbuild_implementation_balanced` starting profile",
+            "`high` | the same Terra/medium → Terra/xhigh → Sol/high ladder",
             "`high` | any configured profile",
         )
         self.assertTrue(any("implementation-delegation.md" in error for error in self.validate(implementation=implementation)))
 
         implementation = self.implementation.replace(
-            "`critical` | exact `openbuild_implementation_strongest` profile",
+            "`critical` | Sol/xhigh `openbuild_implementation_strongest`",
             "`critical` | any configured profile",
         )
         self.assertTrue(any("implementation-delegation.md" in error for error in self.validate(implementation=implementation)))
@@ -2518,6 +2816,34 @@ class ImplementationDispatchTraceTests(unittest.TestCase):
                 "lease": "M0",
                 "run_dir": "C:/runs/M0",
             },
+            {
+                "event": "semantic-handoff-rejected",
+                "actor": "root",
+                "disposition": "needs-escalation",
+                "lease": "M0",
+                "run_dir": "C:/runs/M0",
+                "evidence_digest": "a" * 64,
+                "handoff_created": False,
+                "success": False,
+                "replayed": False,
+            },
+            {
+                "event": "source-checkpoint-invalidated",
+                "actor": "root",
+                "lease": "M0",
+                "run_dir": "C:/runs/M0",
+                "source_state_id": "b" * 64,
+                "disposition": "recovery-ineligible",
+                "reason": "semantic-needs-escalation",
+                "evidence_digest": "a" * 64,
+            },
+            {
+                "event": "guardian-close-acknowledged",
+                "lease": "M0",
+                "run_dir": "C:/runs/M0",
+                "closed": True,
+                "process_tree_stopped": True,
+            },
             {"event": "writer-lease-released", "lease": "M0"},
             {
                 "event": "implementation-escalation-approved",
@@ -2540,6 +2866,41 @@ class ImplementationDispatchTraceTests(unittest.TestCase):
                 lease="M1",
             ),
         ]
+
+    @classmethod
+    def blocked_trace(cls) -> list[dict[str, object]]:
+        trace: list[dict[str, object]] = list(cls.valid_trace())
+        trace[6:7] = [
+            {
+                "event": "implementation-result",
+                "outcome": "blocked",
+                "reason": "route-blocker",
+                "risk": "high",
+                "tier": "balanced",
+                "agent_name": "openbuild_implementation_balanced",
+                "lease": "M1",
+                "run_dir": "C:/runs/M1",
+            },
+            {
+                "event": "semantic-handoff-rejected",
+                "actor": "root",
+                "disposition": "blocked",
+                "lease": "M1",
+                "run_dir": "C:/runs/M1",
+                "evidence_digest": "c" * 64,
+                "handoff_created": False,
+                "success": False,
+                "replayed": False,
+            },
+            {
+                "event": "guardian-close-acknowledged",
+                "lease": "M1",
+                "run_dir": "C:/runs/M1",
+                "closed": True,
+                "process_tree_stopped": True,
+            },
+        ]
+        return trace
 
     def test_canonical_writer_agent_name_is_separate_from_task_name(self) -> None:
         self.assertEqual(
@@ -2602,6 +2963,76 @@ class ImplementationDispatchTraceTests(unittest.TestCase):
         self.assertEqual(
             validate_implementation_dispatch_trace(self.escalated_trace()),
             [],
+        )
+
+    def test_edited_blocked_result_requires_durable_semantic_rejection(self) -> None:
+        trace = self.blocked_trace()
+        self.assertEqual(validate_implementation_dispatch_trace(trace), [])
+
+        missing = [
+            event for event in trace if event.get("event") != "semantic-handoff-rejected"
+        ]
+        self.assertTrue(
+            any(
+                "semantic rejection" in error
+                for error in validate_implementation_dispatch_trace(missing)
+            )
+        )
+
+        replayed = list(trace)
+        rejection = next(
+            event for event in trace if event.get("event") == "semantic-handoff-rejected"
+        )
+        replayed.insert(8, dict(rejection))
+        self.assertTrue(
+            any(
+                "exactly one semantic rejection" in error
+                for error in validate_implementation_dispatch_trace(replayed)
+            )
+        )
+
+    def test_edited_blocked_result_rejects_a_replayed_terminal_receipt(self) -> None:
+        trace = self.blocked_trace()
+        trace.insert(6, dict(trace[5]))
+
+        self.assertTrue(
+            any(
+                "exactly one terminal routing receipt" in error
+                for error in validate_implementation_dispatch_trace(trace)
+            )
+        )
+
+    def test_edited_blocked_result_rejects_a_replayed_lease_release(self) -> None:
+        trace = self.blocked_trace()
+        trace.append(dict(trace[-1]))
+
+        self.assertTrue(
+            any(
+                "exactly one writer lease release" in error
+                for error in validate_implementation_dispatch_trace(trace)
+            )
+        )
+
+    def test_escalation_requires_rejection_and_checkpoint_invalidation(self) -> None:
+        trace = self.escalated_trace()
+        without_rejection = [
+            event for event in trace if event.get("event") != "semantic-handoff-rejected"
+        ]
+        self.assertTrue(
+            any(
+                "semantic-handoff-rejected" in error
+                for error in validate_implementation_dispatch_trace(without_rejection)
+            )
+        )
+
+        without_invalidation = [
+            event for event in trace if event.get("event") != "source-checkpoint-invalidated"
+        ]
+        self.assertTrue(
+            any(
+                "source-checkpoint-invalidated" in error
+                for error in validate_implementation_dispatch_trace(without_invalidation)
+            )
         )
 
     def test_infrastructure_failure_never_authorizes_writer_escalation(self) -> None:
@@ -2878,6 +3309,17 @@ class ImplementationDispatchTraceTests(unittest.TestCase):
 
 
 class ReviewEscalationTraceTests(unittest.TestCase):
+    def test_risk_specific_review_ceiling_is_explicit(self) -> None:
+        self.assertEqual(
+            REVIEW_MAX_TIER_BY_RISK,
+            {
+                "low": "sol_high",
+                "medium": "sol_high",
+                "high": "sol_high",
+                "critical": "strongest",
+            },
+        )
+
     @staticmethod
     def review_cycle(
         tier: str,
@@ -2960,6 +3402,7 @@ class ReviewEscalationTraceTests(unittest.TestCase):
                 "coverage": "complete",
                 "actionable_findings": findings,
                 "escalation_reason": escalation_reason,
+                "concrete_evidence": "E-1" if escalation_reason != "none" else "none",
             },
         ]
 
@@ -2980,8 +3423,8 @@ class ReviewEscalationTraceTests(unittest.TestCase):
         )
         trace.extend(
             self.review_cycle(
-                "balanced",
-                "openbuild_review_balanced",
+                "luna_xhigh",
+                "openbuild_review_luna_xhigh",
                 "D2",
                 verdict="ACCEPT",
                 findings="none",
@@ -3057,6 +3500,30 @@ class ReviewEscalationTraceTests(unittest.TestCase):
 
         self.assertTrue(any("concrete escalation trigger" in error for error in validate_review_escalation_trace(trace)))
 
+    def test_score_alone_cannot_escalate_a_reviewer(self) -> None:
+        trace = self.review_cycle(
+            "fast",
+            "openbuild_review_fast",
+            "D1",
+            verdict="ESCALATE",
+            findings="none",
+            escalation_reason="low-confidence",
+        )
+        trace[4]["concrete_evidence"] = "none"
+        trace.extend(
+            self.review_cycle(
+                "luna_xhigh",
+                "openbuild_review_luna_xhigh",
+                "D1",
+                verdict="ACCEPT",
+                findings="none",
+                escalation_reason="none",
+            )
+        )
+
+        errors = validate_review_escalation_trace(trace)
+        self.assertTrue(any("not score alone" in error for error in errors))
+
     def test_non_accepting_final_result_cannot_close_the_ladder(self) -> None:
         trace = self.review_cycle(
             "fast",
@@ -3128,6 +3595,76 @@ class ReviewEscalationTraceTests(unittest.TestCase):
         )
 
         self.assertEqual(validate_review_escalation_trace(trace), [])
+
+    def test_high_risk_review_cannot_advance_from_sol_high_to_critical_strongest(self) -> None:
+        tiers = [
+            ("balanced", "openbuild_review_balanced"),
+            ("strong", "openbuild_review_strong"),
+            ("sol_high", "openbuild_review_sol_high"),
+            ("strongest", "openbuild_review_strongest"),
+        ]
+        trace: list[dict[str, object]] = []
+        for index, (tier, agent) in enumerate(tiers):
+            trace.extend(
+                self.review_cycle(
+                    tier,
+                    agent,
+                    f"D{index + 1}",
+                    verdict="ACCEPT" if tier == "strongest" else "REVISE",
+                    findings="none" if tier == "strongest" else f"F-{index + 1}",
+                    escalation_reason=(
+                        "none" if tier == "strongest" else "unresolved-high-impact-finding"
+                    ),
+                    risk="high",
+                    risk_floor="balanced",
+                )
+            )
+            if tier != "strongest":
+                trace.extend(
+                    [
+                        {"event": "root-remediation"},
+                        {"event": "validation", "result": "green"},
+                    ]
+                )
+
+        self.assertTrue(
+            any(
+                "critical-only" in error
+                for error in validate_review_escalation_trace(trace)
+            )
+        )
+
+    def test_unresolved_terminal_sol_high_is_route_exhausted_not_escalatable(self) -> None:
+        tiers = [
+            ("balanced", "openbuild_review_balanced"),
+            ("strong", "openbuild_review_strong"),
+            ("sol_high", "openbuild_review_sol_high"),
+        ]
+        trace: list[dict[str, object]] = []
+        for index, (tier, agent) in enumerate(tiers):
+            trace.extend(
+                self.review_cycle(
+                    tier,
+                    agent,
+                    f"D{index + 1}",
+                    verdict="REVISE",
+                    findings=f"F-{index + 1}",
+                    escalation_reason="unresolved-high-impact-finding",
+                    risk="high",
+                    risk_floor="balanced",
+                )
+            )
+            if tier != "sol_high":
+                trace.extend(
+                    [
+                        {"event": "root-remediation"},
+                        {"event": "validation", "result": "green"},
+                    ]
+                )
+
+        errors = validate_review_escalation_trace(trace)
+        self.assertTrue(any("non-critical review route is exhausted" in error for error in errors))
+        self.assertFalse(any("requires the next reviewer tier" in error for error in errors))
 
     def test_review_escalation_cannot_change_the_diff_risk(self) -> None:
         trace = self.review_cycle(

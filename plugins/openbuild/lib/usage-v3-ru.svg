@@ -31,7 +31,7 @@
   </defs>
 
   <rect width="1600" height="1000" fill="url(#bg)"/>
-  <text x="800" y="55" text-anchor="middle" class="title">OpenBuild 2.1.5 · настраиваемая точная маршрутизация</text>
+  <text x="800" y="55" text-anchor="middle" class="title">OpenBuild 2.2.0 · reasoning-first маршрутизация</text>
   <rect x="570" y="78" width="460" height="62" class="box yellow" fill="#1a1502"/>
   <text x="800" y="117" text-anchor="middle" class="label" fill="#ffe34d">РИСК ЗАДАЧИ + КАРТА МОДЕЛЕЙ</text>
 
@@ -70,13 +70,14 @@
   <text x="363" y="747" text-anchor="middle" class="body">корневым агентом</text>
   <text x="363" y="775" text-anchor="middle" class="tiny muted">только минимум</text>
   <path d="M253 736 H269" class="line"/>
-  <text x="258" y="846" text-anchor="middle" class="small" fill="#6ff8ff">Модель настраивается · read-only контракт фиксирован</text>
+  <text x="258" y="838" text-anchor="middle" class="tiny" fill="#6ff8ff">Модель настраивается · read-only контракт</text>
+  <text x="258" y="860" text-anchor="middle" class="tiny" fill="#6ff8ff">остаётся фиксированным</text>
 
   <text x="551" y="260" class="small muted">СТАРТОВЫЙ МАРШРУТ</text>
   <rect x="550" y="278" width="255" height="92" class="box blue"/>
   <text x="575" y="310" class="small" fill="#8fc9ff">НИЗКИЙ</text>
   <text x="575" y="338" class="body">implementation_fast</text>
-  <text x="575" y="360" class="tiny muted">Terra · low</text>
+  <text x="575" y="360" class="tiny muted">Luna · medium</text>
 
   <rect x="550" y="397" width="255" height="105" class="box blue"/>
   <text x="575" y="430" class="small" fill="#8fc9ff">СРЕДНИЙ / ВЫСОКИЙ</text>
@@ -88,24 +89,24 @@
   <text x="575" y="711" class="small">implementation_strongest</text>
   <text x="575" y="737" class="tiny muted">Sol · xhigh</text>
 
-  <rect x="842" y="397" width="207" height="105" class="box yellow"/>
-  <text x="945" y="429" text-anchor="middle" class="small" fill="#ffe34d">NEEDS_ESCALATION</text>
-  <text x="945" y="456" text-anchor="middle" class="small" fill="#ffe34d">до правок</text>
-  <text x="945" y="482" text-anchor="middle" class="tiny muted">успех + ноль записей</text>
-  <path d="M805 449 H842" class="line"/>
+  <rect x="822" y="397" width="227" height="105" class="box yellow"/>
+  <text x="935" y="429" text-anchor="middle" class="small" fill="#ffe34d">NEEDS_ESCALATION</text>
+  <text x="935" y="456" text-anchor="middle" class="small" fill="#ffe34d">до правок</text>
+  <text x="935" y="482" text-anchor="middle" class="tiny muted">успех + ноль записей</text>
+  <path d="M805 449 H822" class="line"/>
 
-  <rect x="842" y="535" width="207" height="105" class="box blue"/>
-  <text x="945" y="568" text-anchor="middle" class="small" fill="#8fc9ff">СЛЕДУЮЩИЙ ШАГ КАРТЫ</text>
-  <text x="945" y="595" text-anchor="middle" class="small">implementation_strong</text>
-  <text x="945" y="621" text-anchor="middle" class="tiny muted">Sol · high</text>
-  <path d="M945 502 V535" class="line"/>
+  <rect x="822" y="535" width="227" height="105" class="box blue"/>
+  <text x="935" y="566" text-anchor="middle" class="tiny" fill="#8fc9ff">СНАЧАЛА REASONING</text>
+  <text x="935" y="593" text-anchor="middle" class="tiny">LOW: Luna xhigh → Terra</text>
+  <text x="935" y="618" text-anchor="middle" class="tiny muted">Terra xhigh → Sol high</text>
+  <path d="M935 502 V535" class="line"/>
 
   <rect x="842" y="674" width="207" height="74" class="box blue"/>
   <text x="945" y="705" text-anchor="middle" class="small">Точная квитанция</text>
   <text x="945" y="732" text-anchor="middle" class="tiny muted">lease · модель · effort</text>
   <path d="M805 324 H1022 V674" class="line"/>
   <path d="M805 702 H842" class="line"/>
-  <path d="M945 640 V674" class="line"/>
+  <path d="M935 640 V674" class="line"/>
 
   <rect x="550" y="800" width="499" height="64" class="box blue"/>
   <text x="799" y="828" text-anchor="middle" class="small">После первой правки writer уже не меняется</text>
@@ -115,7 +116,7 @@
   <text x="1138" y="260" class="small muted">СТАРТОВЫЙ МАРШРУТ</text>
   <rect x="1140" y="278" width="400" height="125" class="box purple"/>
   <text x="1170" y="311" class="tiny" fill="#dda2ff">LOW</text>
-  <text x="1510" y="311" text-anchor="end" class="tiny">review_fast · Luna low</text>
+  <text x="1510" y="311" text-anchor="end" class="tiny">review_fast · Luna medium</text>
   <text x="1170" y="347" class="tiny" fill="#dda2ff">MEDIUM / HIGH</text>
   <text x="1510" y="347" text-anchor="end" class="tiny">review_balanced · Terra medium</text>
   <text x="1170" y="383" class="tiny" fill="#dda2ff">CRITICAL</text>
@@ -135,8 +136,8 @@
 
   <rect x="1140" y="727" width="400" height="105" class="box purple"/>
   <text x="1340" y="761" text-anchor="middle" class="small">Только следующий шаг из карты</text>
-  <text x="1340" y="790" text-anchor="middle" class="small" fill="#dda2ff">strong · Sol high</text>
-  <text x="1340" y="817" text-anchor="middle" class="tiny muted">strongest — только финальный спор</text>
+  <text x="1340" y="790" text-anchor="middle" class="tiny" fill="#dda2ff">xhigh той же модели до смены модели</text>
+  <text x="1340" y="817" text-anchor="middle" class="tiny muted">Sol high только по оставшимся замечаниям</text>
   <text x="1340" y="868" text-anchor="middle" class="small" fill="#dda2ff">Чистый balanced-review закрывает high</text>
 
   <rect x="570" y="925" width="460" height="55" class="box green" fill="#071808" filter="url(#glow)"/>

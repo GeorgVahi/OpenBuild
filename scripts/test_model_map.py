@@ -25,6 +25,35 @@ class ModelMapContractTests(unittest.TestCase):
         target.write_text(text, encoding="utf-8", newline="\n")
         return target
 
+    def write_profile_override(
+        self,
+        target: Path,
+        *,
+        name: str,
+        model: str,
+        effort: str,
+        rung: str,
+        sandbox: str = "read-only",
+    ) -> None:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            "\n".join(
+                [
+                    f'name = "{name}"',
+                    'description = "Explicit test override."',
+                    f'model = "{model}"',
+                    f'model_reasoning_effort = "{effort}"',
+                    f'sandbox_mode = "{sandbox}"',
+                    f'routing_rung = "{rung}"',
+                    "routing_tuple_confirmed = true",
+                    'developer_instructions = "Perform only the bounded role."',
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+
     def test_packaged_map_covers_every_use_case_and_risk(self) -> None:
         configured = model_map.load_model_map_file(model_map.PACKAGED_MODEL_MAP)
 
@@ -43,11 +72,39 @@ class ModelMapContractTests(unittest.TestCase):
         )
         self.assertEqual(
             configured.routes[("implementation", "high")].agents,
-            ("openbuild_implementation_balanced", "openbuild_implementation_strong"),
+            (
+                "openbuild_implementation_balanced",
+                "openbuild_implementation_strong",
+                "openbuild_implementation_sol_high",
+            ),
         )
         self.assertEqual(
             configured.routes[("review", "high")].agents,
-            ("openbuild_review_balanced", "openbuild_review_strong"),
+            (
+                "openbuild_review_balanced",
+                "openbuild_review_strong",
+                "openbuild_review_sol_high",
+            ),
+        )
+        self.assertEqual(
+            configured.routes[("implementation", "low")].agents,
+            (
+                "openbuild_implementation_fast",
+                "openbuild_implementation_luna_xhigh",
+                "openbuild_implementation_balanced",
+                "openbuild_implementation_strong",
+                "openbuild_implementation_sol_high",
+            ),
+        )
+        self.assertEqual(
+            configured.routes[("critic", "low")].agents,
+            (
+                "openbuild_review_fast",
+                "openbuild_review_luna_xhigh",
+                "openbuild_review_balanced",
+                "openbuild_review_strong",
+                "openbuild_review_sol_high",
+            ),
         )
         for use_case in ("critic", "implementation", "review"):
             with self.subTest(use_case=use_case):
@@ -117,8 +174,8 @@ class ModelMapContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             path = self.copy_map(Path(temp) / "model-map.toml", name="Broken steps")
             text = path.read_text(encoding="utf-8").replace(
-                "[implementation.high]\nagents = [\"openbuild_implementation_balanced\", \"openbuild_implementation_strong\"]\nmax_steps = 2",
-                "[implementation.high]\nagents = [\"openbuild_implementation_balanced\", \"openbuild_implementation_strong\"]\nmax_steps = 1",
+                "[implementation.high]\nagents = [\"openbuild_implementation_balanced\", \"openbuild_implementation_strong\", \"openbuild_implementation_sol_high\"]\nmax_steps = 3",
+                "[implementation.high]\nagents = [\"openbuild_implementation_balanced\", \"openbuild_implementation_strong\", \"openbuild_implementation_sol_high\"]\nmax_steps = 1",
             )
             path.write_text(text, encoding="utf-8", newline="\n")
             with self.assertRaisesRegex(model_map.ModelMapError, "max_steps"):
@@ -128,8 +185,8 @@ class ModelMapContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             path = self.copy_map(Path(temp) / "model-map.toml", name="Wrong family")
             text = path.read_text(encoding="utf-8").replace(
-                'agents = ["openbuild_implementation_fast", "openbuild_implementation_balanced"]',
-                'agents = ["openbuild_review_fast", "openbuild_implementation_balanced"]',
+                'agents = ["openbuild_implementation_fast", "openbuild_implementation_luna_xhigh", "openbuild_implementation_balanced", "openbuild_implementation_strong", "openbuild_implementation_sol_high"]',
+                'agents = ["openbuild_review_fast", "openbuild_implementation_luna_xhigh", "openbuild_implementation_balanced", "openbuild_implementation_strong", "openbuild_implementation_sol_high"]',
                 1,
             )
             path.write_text(text, encoding="utf-8", newline="\n")
@@ -162,8 +219,8 @@ class ModelMapContractTests(unittest.TestCase):
 
             path = self.copy_map(Path(temp) / "writer-map.toml", name="Unsafe writer")
             text = path.read_text(encoding="utf-8").replace(
-                '[implementation.medium]\nagents = ["openbuild_implementation_balanced", "openbuild_implementation_strong"]\nmax_steps = 2\nescalation_mode = "semantic-before-edit"',
-                '[implementation.medium]\nagents = ["openbuild_implementation_balanced", "openbuild_implementation_strong"]\nmax_steps = 2\nescalation_mode = "after-evidence"',
+                '[implementation.medium]\nagents = ["openbuild_implementation_balanced", "openbuild_implementation_strong", "openbuild_implementation_sol_high"]\nmax_steps = 3\nescalation_mode = "semantic-before-edit"',
+                '[implementation.medium]\nagents = ["openbuild_implementation_balanced", "openbuild_implementation_strong", "openbuild_implementation_sol_high"]\nmax_steps = 3\nescalation_mode = "after-evidence"',
             )
             path.write_text(text, encoding="utf-8", newline="\n")
             with self.assertRaisesRegex(model_map.ModelMapError, "semantic-before-edit"):
@@ -181,6 +238,122 @@ class ModelMapContractTests(unittest.TestCase):
             with self.assertRaisesRegex(model_map.ModelMapError, "critical_confirmed"):
                 model_map.load_model_map_file(path)
 
+    def test_noncritical_override_cannot_use_a_critical_only_profile(self) -> None:
+        cases = (
+            (
+                "implementation.low",
+                '[implementation.low]\nagents = ["openbuild_implementation_fast", "openbuild_implementation_luna_xhigh", "openbuild_implementation_balanced", "openbuild_implementation_strong", "openbuild_implementation_sol_high"]\nmax_steps = 5',
+                '[implementation.low]\nagents = ["openbuild_implementation_strongest"]\nmax_steps = 1',
+            ),
+            (
+                "review.high",
+                '[review.high]\nagents = ["openbuild_review_balanced", "openbuild_review_strong", "openbuild_review_sol_high"]\nmax_steps = 3',
+                '[review.high]\nagents = ["openbuild_review_strongest"]\nmax_steps = 1',
+            ),
+        )
+        for route_name, source, replacement in cases:
+            with self.subTest(route=route_name), tempfile.TemporaryDirectory() as temp:
+                path = self.copy_map(Path(temp) / "model-map.toml", name="Unsafe override")
+                text = path.read_text(encoding="utf-8").replace(source, replacement)
+                path.write_text(text, encoding="utf-8", newline="\n")
+
+                with self.assertRaisesRegex(model_map.ModelMapError, "critical-only"):
+                    model_map.load_model_map_file(path, source_scope="project")
+
+    def test_noncritical_override_cannot_start_on_sol(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = self.copy_map(Path(temp) / "model-map.toml", name="Sol-first override")
+            text = path.read_text(encoding="utf-8").replace(
+                '[review.high]\nagents = ["openbuild_review_balanced", "openbuild_review_strong", "openbuild_review_sol_high"]\nmax_steps = 3',
+                '[review.high]\nagents = ["openbuild_review_sol_high"]\nmax_steps = 1',
+            )
+            path.write_text(text, encoding="utf-8", newline="\n")
+
+            with self.assertRaisesRegex(model_map.ModelMapError, "cannot start on Sol"):
+                model_map.load_model_map_file(path, source_scope="user")
+
+    def test_critical_override_requires_the_direct_strongest_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = self.copy_map(Path(temp) / "model-map.toml", name="Weak critical override")
+            text = path.read_text(encoding="utf-8").replace(
+                '[implementation.critical]\nagents = ["openbuild_implementation_strongest"]\nmax_steps = 1',
+                '[implementation.critical]\nagents = ["openbuild_implementation_strong"]\nmax_steps = 1',
+            )
+            path.write_text(text, encoding="utf-8", newline="\n")
+
+            with self.assertRaisesRegex(model_map.ModelMapError, "direct strongest"):
+                model_map.load_model_map_file(path, source_scope="project")
+
+    def test_override_route_cannot_skip_a_reasoning_rung(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = self.copy_map(Path(temp) / "model-map.toml", name="Skipped rung override")
+            text = path.read_text(encoding="utf-8").replace(
+                '[implementation.low]\nagents = ["openbuild_implementation_fast", "openbuild_implementation_luna_xhigh", "openbuild_implementation_balanced", "openbuild_implementation_strong", "openbuild_implementation_sol_high"]\nmax_steps = 5',
+                '[implementation.low]\nagents = ["openbuild_implementation_fast", "openbuild_implementation_balanced"]\nmax_steps = 2',
+            )
+            path.write_text(text, encoding="utf-8", newline="\n")
+
+            with self.assertRaisesRegex(model_map.ModelMapError, "contiguous reasoning-first"):
+                model_map.load_model_map_file(path, source_scope="user")
+
+    def test_effective_profile_override_cannot_bypass_its_routing_rung(self) -> None:
+        cases = (
+            (
+                "project-sol-first",
+                "review",
+                "low",
+                "openbuild_review_fast",
+                "gpt-5.6-sol",
+                "high",
+                "luna-medium",
+                "known model/effort tuple",
+            ),
+            (
+                "user-weakened-critical",
+                "review",
+                "critical",
+                "openbuild_review_strongest",
+                "gpt-5.6-luna",
+                "medium",
+                "sol-xhigh",
+                "known model/effort tuple",
+            ),
+            (
+                "project-skipped-xhigh",
+                "review",
+                "low",
+                "openbuild_review_luna_xhigh",
+                "gpt-5.6-luna",
+                "medium",
+                "luna-xhigh",
+                "known model/effort tuple",
+            ),
+        )
+        for label, use_case, risk, agent, model, effort, rung, error in cases:
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                repo = root / "repo"
+                repo.mkdir()
+                codex_home = root / "codex-home"
+                target_root = repo if label.startswith("project") else codex_home
+                self.write_profile_override(
+                    target_root / ".codex" / "agents" / "override.toml"
+                    if target_root == repo
+                    else target_root / "agents" / "override.toml",
+                    name=agent,
+                    model=model,
+                    effort=effort,
+                    rung=rung,
+                )
+
+                with self.assertRaisesRegex(model_map.ModelMapError, error):
+                    model_map.resolve_model_route(
+                        repo=repo,
+                        codex_home=codex_home,
+                        use_case=use_case,
+                        risk=risk,
+                    )
+
     def test_resolver_returns_exact_profile_evidence_and_map_hash(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -197,15 +370,20 @@ class ModelMapContractTests(unittest.TestCase):
 
             self.assertEqual(result["map_scope"], "packaged")
             self.assertEqual(len(result["map_sha256"]), 64)
-            self.assertEqual(result["max_steps"], 2)
+            self.assertEqual(result["max_steps"], 3)
             self.assertEqual(
                 [agent["name"] for agent in result["agents"]],
-                ["openbuild_implementation_balanced", "openbuild_implementation_strong"],
+                [
+                    "openbuild_implementation_balanced",
+                    "openbuild_implementation_strong",
+                    "openbuild_implementation_sol_high",
+                ],
             )
             self.assertEqual(
                 [(agent["model"], agent["reasoning_effort"], agent["sandbox"]) for agent in result["agents"]],
                 [
                     ("gpt-5.6-terra", "medium", "workspace-write"),
+                    ("gpt-5.6-terra", "xhigh", "workspace-write"),
                     ("gpt-5.6-sol", "high", "workspace-write"),
                 ],
             )
