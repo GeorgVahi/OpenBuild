@@ -65,6 +65,62 @@ ALLOWED_TRIGGERS = {
     },
     "review": {"actionable-finding", "coverage-gap", "low-confidence", "material-dispute"},
 }
+ROUTE_LADDERS = {
+    ("critic", "low"): (
+        "openbuild_review_fast",
+        "openbuild_review_luna_xhigh",
+        "openbuild_review_balanced",
+        "openbuild_review_strong",
+        "openbuild_review_sol_high",
+    ),
+    ("critic", "medium"): (
+        "openbuild_review_balanced",
+        "openbuild_review_strong",
+        "openbuild_review_sol_high",
+    ),
+    ("critic", "high"): (
+        "openbuild_review_balanced",
+        "openbuild_review_strong",
+        "openbuild_review_sol_high",
+    ),
+    ("critic", "critical"): ("openbuild_review_strongest",),
+    ("implementation", "low"): (
+        "openbuild_implementation_fast",
+        "openbuild_implementation_luna_xhigh",
+        "openbuild_implementation_balanced",
+        "openbuild_implementation_strong",
+        "openbuild_implementation_sol_high",
+    ),
+    ("implementation", "medium"): (
+        "openbuild_implementation_balanced",
+        "openbuild_implementation_strong",
+        "openbuild_implementation_sol_high",
+    ),
+    ("implementation", "high"): (
+        "openbuild_implementation_balanced",
+        "openbuild_implementation_strong",
+        "openbuild_implementation_sol_high",
+    ),
+    ("implementation", "critical"): ("openbuild_implementation_strongest",),
+    ("review", "low"): (
+        "openbuild_review_fast",
+        "openbuild_review_luna_xhigh",
+        "openbuild_review_balanced",
+        "openbuild_review_strong",
+        "openbuild_review_sol_high",
+    ),
+    ("review", "medium"): (
+        "openbuild_review_balanced",
+        "openbuild_review_strong",
+        "openbuild_review_sol_high",
+    ),
+    ("review", "high"): (
+        "openbuild_review_balanced",
+        "openbuild_review_strong",
+        "openbuild_review_sol_high",
+    ),
+    ("review", "critical"): ("openbuild_review_strongest",),
+}
 
 
 class ModelMapError(RuntimeError):
@@ -107,6 +163,43 @@ def _string_list(value: Any, *, field: str, path: Path, allow_empty: bool = Fals
     return tuple(item.strip() for item in value)
 
 
+def _validate_route_ladder(
+    agents: tuple[str, ...],
+    *,
+    use_case: str,
+    risk: str,
+    route_name: str,
+    path: Path,
+) -> None:
+    ladder = ROUTE_LADDERS.get((use_case, risk))
+    if ladder is None:
+        return
+    if risk == "critical":
+        if agents != ladder:
+            raise ModelMapError(
+                f"{path}: route {route_name} must use the direct strongest critical profile {ladder[0]!r}"
+            )
+        return
+
+    strongest = ladder[0].rsplit("_", 1)[0] + "_strongest"
+    if strongest in agents:
+        raise ModelMapError(
+            f"{path}: route {route_name} cannot use critical-only profile {strongest!r}"
+        )
+    sol_high = ladder[-1]
+    if agents[0] == sol_high:
+        raise ModelMapError(
+            f"{path}: route {route_name} cannot start on Sol; Sol/high requires prior evidence"
+        )
+    if not any(
+        agents == ladder[start : start + len(agents)]
+        for start in range(len(ladder))
+    ):
+        raise ModelMapError(
+            f"{path}: route {route_name} must be a contiguous reasoning-first segment of its risk ladder"
+        )
+
+
 def _route_from_data(
     data: Mapping[str, Any],
     *,
@@ -129,14 +222,21 @@ def _route_from_data(
         if agent not in SUPPORTED_AGENTS or not agent.startswith(AGENT_PREFIX[use_case]):
             article = "an" if use_case == "implementation" else "a"
             raise ModelMapError(f"{path}: route {route_name} requires {article} {use_case} agent, got {agent!r}")
+    _validate_route_ladder(
+        agents,
+        use_case=use_case,
+        risk=risk,
+        route_name=route_name,
+        path=path,
+    )
 
     max_steps = data.get("max_steps")
     if not isinstance(max_steps, int) or isinstance(max_steps, bool) or max_steps != len(agents):
         raise ModelMapError(
             f"{path}: route {route_name} max_steps must equal its explicit agent sequence length {len(agents)}"
         )
-    if not 1 <= max_steps <= 4:
-        raise ModelMapError(f"{path}: route {route_name} max_steps must be between 1 and 4")
+    if not 1 <= max_steps <= 5:
+        raise ModelMapError(f"{path}: route {route_name} max_steps must be between 1 and 5")
 
     escalation_mode = _required_string(data, "escalation_mode", path)
     required_mode = ESCALATION_MODE[use_case]

@@ -19,6 +19,7 @@ BLINDSPOT_PROTOCOL = SKILL / "references" / "blindspot-protocol.md"
 IMPLEMENTATION_DELEGATION = SKILL / "references" / "implementation-delegation.md"
 REVIEW_PROTOCOL = SKILL / "references" / "review-protocol.md"
 AGENT_RUNNER = SKILL / "scripts" / "agent_runner.py"
+RECOVERY_STATE = SKILL / "scripts" / "recovery_state.py"
 MODEL_MAP_RESOLVER = SKILL / "scripts" / "model_map.py"
 PACKAGED_MODEL_MAP = SKILL / "profiles" / "openbuild_model_map.toml"
 MODEL_MAP_INTERVIEW = SKILL / "references" / "model-map-interview.md"
@@ -28,14 +29,26 @@ PACKAGED_AGENT_DEFAULTS = {
     "openbuild_search_balanced": ("gpt-5.6-terra", "medium", "read-only"),
     "openbuild_search_strong": ("gpt-5.6-sol", "high", "read-only"),
     "openbuild_search_strongest": ("gpt-5.6-sol", "xhigh", "read-only"),
-    "openbuild_implementation_fast": ("gpt-5.6-terra", "low", "workspace-write"),
+    "openbuild_implementation_fast": ("gpt-5.6-luna", "medium", "workspace-write"),
+    "openbuild_implementation_luna_xhigh": ("gpt-5.6-luna", "xhigh", "workspace-write"),
     "openbuild_implementation_balanced": ("gpt-5.6-terra", "medium", "workspace-write"),
-    "openbuild_implementation_strong": ("gpt-5.6-sol", "high", "workspace-write"),
+    "openbuild_implementation_strong": ("gpt-5.6-terra", "xhigh", "workspace-write"),
+    "openbuild_implementation_sol_high": ("gpt-5.6-sol", "high", "workspace-write"),
     "openbuild_implementation_strongest": ("gpt-5.6-sol", "xhigh", "workspace-write"),
-    "openbuild_review_fast": ("gpt-5.6-luna", "low", "read-only"),
+    "openbuild_review_fast": ("gpt-5.6-luna", "medium", "read-only"),
+    "openbuild_review_luna_xhigh": ("gpt-5.6-luna", "xhigh", "read-only"),
     "openbuild_review_balanced": ("gpt-5.6-terra", "medium", "read-only"),
-    "openbuild_review_strong": ("gpt-5.6-sol", "high", "read-only"),
+    "openbuild_review_strong": ("gpt-5.6-terra", "xhigh", "read-only"),
+    "openbuild_review_sol_high": ("gpt-5.6-sol", "high", "read-only"),
     "openbuild_review_strongest": ("gpt-5.6-sol", "xhigh", "read-only"),
+}
+PACKAGED_ROUTING_RUNG = {
+    **{f"openbuild_{role}_fast": "luna-medium" for role in ("implementation", "review")},
+    **{f"openbuild_{role}_luna_xhigh": "luna-xhigh" for role in ("implementation", "review")},
+    **{f"openbuild_{role}_balanced": "terra-medium" for role in ("implementation", "review")},
+    **{f"openbuild_{role}_strong": "terra-xhigh" for role in ("implementation", "review")},
+    **{f"openbuild_{role}_sol_high": "sol-high" for role in ("implementation", "review")},
+    **{f"openbuild_{role}_strongest": "sol-xhigh" for role in ("implementation", "review")},
 }
 PACKAGED_AGENT_PROFILES = {
     name: SKILL / "profiles" / f"{name}.toml" for name in PACKAGED_AGENT_DEFAULTS
@@ -73,6 +86,7 @@ REQUIRED = [
     MODEL_MAP_INTERVIEW,
     REVIEW_PROTOCOL,
     AGENT_RUNNER,
+    RECOVERY_STATE,
     MODEL_MAP_RESOLVER,
     PACKAGED_MODEL_MAP,
     *PACKAGED_AGENT_PROFILES.values(),
@@ -80,6 +94,7 @@ REQUIRED = [
     SKILL / "references" / "versioning.md",
     ROOT / "scripts" / "test_validate_package.py",
     ROOT / "scripts" / "test_agent_runner.py",
+    ROOT / "scripts" / "test_recovery_state.py",
     ROOT / "scripts" / "test_model_map.py",
 ]
 
@@ -114,8 +129,10 @@ SEARCH_DISPATCH_FAILURES = {
 EXACT_DISPATCH_METHODS = {"codex-exec-explicit-model"}
 IMPLEMENTATION_AGENT_BY_TIER = {
     "fast": "openbuild_implementation_fast",
+    "luna_xhigh": "openbuild_implementation_luna_xhigh",
     "balanced": "openbuild_implementation_balanced",
     "strong": "openbuild_implementation_strong",
+    "sol_high": "openbuild_implementation_sol_high",
     "strongest": "openbuild_implementation_strongest",
 }
 IMPLEMENTATION_START_BY_RISK = {
@@ -125,12 +142,18 @@ IMPLEMENTATION_START_BY_RISK = {
     "critical": ("strongest", "openbuild_implementation_strongest"),
 }
 IMPLEMENTATION_MAX_TIER_BY_RISK = {
-    "low": "balanced",
-    "medium": "strong",
-    "high": "strong",
+    "low": "sol_high",
+    "medium": "sol_high",
+    "high": "sol_high",
     "critical": "strongest",
 }
 IMPLEMENTATION_TIERS = tuple(IMPLEMENTATION_AGENT_BY_TIER)
+IMPLEMENTATION_NEXT_RUNG = {
+    "openbuild_implementation_fast": "openbuild_implementation_luna_xhigh",
+    "openbuild_implementation_luna_xhigh": "openbuild_implementation_balanced",
+    "openbuild_implementation_balanced": "openbuild_implementation_strong",
+    "openbuild_implementation_strong": "openbuild_implementation_sol_high",
+}
 IMPLEMENTATION_ESCALATION_REASONS = {
     "task-complexity-above-tier",
     "unresolved-cross-layer-reasoning",
@@ -139,14 +162,22 @@ IMPLEMENTATION_ESCALATION_REASONS = {
 }
 REVIEW_AGENT_BY_TIER = {
     "fast": "openbuild_review_fast",
+    "luna_xhigh": "openbuild_review_luna_xhigh",
     "balanced": "openbuild_review_balanced",
     "strong": "openbuild_review_strong",
+    "sol_high": "openbuild_review_sol_high",
     "strongest": "openbuild_review_strongest",
 }
 REVIEW_START_BY_RISK = {
     "low": "fast",
     "medium": "balanced",
     "high": "balanced",
+    "critical": "strongest",
+}
+REVIEW_MAX_TIER_BY_RISK = {
+    "low": "sol_high",
+    "medium": "sol_high",
+    "high": "sol_high",
     "critical": "strongest",
 }
 REVIEW_TIERS = tuple(REVIEW_AGENT_BY_TIER)
@@ -161,12 +192,16 @@ REVIEW_ESCALATION_REASONS = {
 }
 CANONICAL_AGENT_IDS = {
     "openbuild_implementation_fast": "openbuild-implementation-fast",
+    "openbuild_implementation_luna_xhigh": "openbuild-implementation-luna-xhigh",
     "openbuild_implementation_balanced": "openbuild-implementation-balanced",
     "openbuild_implementation_strong": "openbuild-implementation-strong",
+    "openbuild_implementation_sol_high": "openbuild-implementation-sol-high",
     "openbuild_implementation_strongest": "openbuild-implementation-strongest",
     "openbuild_review_fast": "openbuild-review-fast",
+    "openbuild_review_luna_xhigh": "openbuild-review-luna-xhigh",
     "openbuild_review_balanced": "openbuild-review-balanced",
     "openbuild_review_strong": "openbuild-review-strong",
+    "openbuild_review_sol_high": "openbuild-review-sol-high",
     "openbuild_review_strongest": "openbuild-review-strongest",
 }
 AGENT_NAME = re.compile(r"^[a-z0-9_]+$")
@@ -343,6 +378,13 @@ def validate_packaged_agent_profile(
         "model_reasoning_effort": effort,
         "sandbox_mode": sandbox,
     }
+    if agent_name in PACKAGED_ROUTING_RUNG:
+        expected.update(
+            {
+                "routing_rung": PACKAGED_ROUTING_RUNG[agent_name],
+                "routing_tuple_confirmed": True,
+            }
+        )
     for field, value in expected.items():
         if profile.get(field) != value:
             errors.append(f"{agent_name}.toml: {field} must be {value!r}")
@@ -356,6 +398,35 @@ def validate_packaged_agent_profile(
         errors.append(
             f"{agent_name}.toml: developer_instructions must match the exact canonical Explorer contract"
         )
+    elif agent_name.startswith("openbuild_implementation_"):
+        instructions = str(profile.get("developer_instructions", ""))
+        next_rung = IMPLEMENTATION_NEXT_RUNG.get(agent_name)
+        if next_rung is None:
+            if "Capability escalation is forbidden;" not in instructions:
+                errors.append(f"{agent_name}.toml: terminal writer must forbid capability escalation")
+        else:
+            edge = (
+                "Before the first edit, a capability escalation may name only "
+                f"`{next_rung}` as the next rung."
+            )
+            if instructions.count(edge) != 1:
+                errors.append(f"{agent_name}.toml: needs exactly one named pre-edit next-rung permission")
+            elif instructions.find("After any edit") < instructions.find(edge):
+                errors.append(f"{agent_name}.toml: next-rung permission must precede post-edit prohibition")
+            named_rungs = re.findall(r"openbuild_implementation_[a-z0-9_]+", instructions)
+            if named_rungs != [next_rung]:
+                errors.append(f"{agent_name}.toml: may name only its configured next implementation rung")
+    elif agent_name.startswith("openbuild_review_"):
+        instructions = str(profile.get("developer_instructions", ""))
+        if "Escalate only on configured concrete evidence; score alone and timeout, auth, quota, sandbox, or transport failures never escalate." not in instructions:
+            errors.append(f"{agent_name}.toml: reviewer escalation must require concrete evidence and block transport failures")
+        if agent_name == "openbuild_review_strongest" and (
+            "This Sol/xhigh profile is critical-only and is never the next rung for a non-critical review."
+            not in instructions
+        ):
+            errors.append(
+                "openbuild_review_strongest.toml: strongest reviewer must remain critical-only"
+            )
     return errors
 
 
@@ -1844,6 +1915,10 @@ def _validate_single_implementation_dispatch_trace(
     if not terminal_receipts:
         errors.append("implementation dispatch trace: terminal routing receipt must follow writer edits")
         return errors
+    if len(terminal_receipts) != 1:
+        errors.append(
+            "implementation dispatch trace: exactly one terminal routing receipt must follow writer edits"
+        )
     terminal_index, terminal = terminal_receipts[0]
     for field in (
         "risk",
@@ -1926,13 +2001,113 @@ def _validate_single_implementation_dispatch_trace(
     else:
         errors.append("implementation dispatch trace: terminal receipt must report completed or failed")
 
+    semantic_results = [
+        (index, event)
+        for index, event in enumerate(events)
+        if index > terminal_index
+        and event.get("event") == "implementation-result"
+        and event.get("outcome") in {"blocked", "needs-escalation"}
+    ]
+    semantic_disposition: str | None = None
+    semantic_close_index: int | None = None
+    if semantic_results:
+        if len(semantic_results) != 1:
+            errors.append(
+                "implementation dispatch trace: semantic completion requires exactly one implementation result"
+            )
+        result_index, semantic_result = semantic_results[0]
+        semantic_disposition = str(semantic_result.get("outcome"))
+        if semantic_disposition == "needs-escalation":
+            errors.append(
+                "implementation dispatch trace: NEEDS_ESCALATION is allowed only before any edit"
+            )
+        for field, expected_value in {
+            "risk": risk,
+            "tier": expected_tier,
+            "agent_name": expected_agent,
+            "lease": lease_id,
+            "run_dir": terminal.get("run_dir"),
+        }.items():
+            if semantic_result.get(field) != expected_value:
+                errors.append(
+                    f"implementation dispatch trace: semantic result changed {field}"
+                )
+
+        rejections = [
+            (index, event)
+            for index, event in enumerate(events)
+            if event.get("event") == "semantic-handoff-rejected"
+        ]
+        if len(rejections) != 1:
+            errors.append(
+                "implementation dispatch trace: semantic completion requires exactly one semantic rejection"
+            )
+        else:
+            rejection_index, rejection = rejections[0]
+            if rejection_index <= result_index:
+                errors.append(
+                    "implementation dispatch trace: semantic rejection must follow the semantic result"
+                )
+            rejection_bindings = {
+                "actor": "root",
+                "disposition": semantic_disposition,
+                "lease": lease_id,
+                "run_dir": terminal.get("run_dir"),
+                "handoff_created": False,
+                "success": False,
+                "replayed": False,
+            }
+            for field, expected_value in rejection_bindings.items():
+                if rejection.get(field) != expected_value:
+                    errors.append(
+                        f"implementation dispatch trace: semantic rejection changed {field}"
+                    )
+            if not re.fullmatch(r"[0-9a-f]{64}", str(rejection.get("evidence_digest") or "")):
+                errors.append(
+                    "implementation dispatch trace: semantic rejection requires a SHA-256 evidence digest"
+                )
+
+        invalidations = [
+            (index, event)
+            for index, event in enumerate(events)
+            if event.get("event") == "source-checkpoint-invalidated"
+        ]
+        if semantic_disposition == "blocked" and invalidations:
+            errors.append(
+                "implementation dispatch trace: BLOCKED may retain its checkpoint and must not invalidate it"
+            )
+        closes = [
+            (index, event)
+            for index, event in enumerate(events)
+            if event.get("event") == "guardian-close-acknowledged"
+        ]
+        if len(closes) != 1:
+            errors.append(
+                "implementation dispatch trace: semantic rejection requires one guardian close acknowledgement"
+            )
+        else:
+            semantic_close_index, close = closes[0]
+            if rejections and semantic_close_index <= rejections[0][0]:
+                errors.append(
+                    "implementation dispatch trace: guardian close must follow semantic rejection"
+                )
+            if (
+                close.get("lease") != lease_id
+                or close.get("run_dir") != terminal.get("run_dir")
+                or close.get("closed") is not True
+                or close.get("process_tree_stopped") is not True
+            ):
+                errors.append(
+                    "implementation dispatch trace: guardian close changed the rejected run binding"
+                )
+
     handoff_events = [
         (index, event)
         for index, event in enumerate(events)
         if event.get("event") == "implementation-handoff-accepted"
     ]
     accepted_handoff_index: int | None = None
-    if run_status == "completed":
+    if run_status == "completed" and semantic_disposition is None:
         valid_handoffs = [
             (index, event) for index, event in handoff_events if index > terminal_index
         ]
@@ -1974,10 +2149,16 @@ def _validate_single_implementation_dispatch_trace(
     ]
     if not release_events:
         errors.append("implementation dispatch trace: writer lease release must follow terminal receipt")
+    elif len(release_events) != 1:
+        errors.append(
+            "implementation dispatch trace: exactly one writer lease release must follow terminal receipt"
+        )
     elif release_events[0][1].get("lease") != lease_id:
         errors.append("implementation dispatch trace: released lease must match the acquired lease")
     elif accepted_handoff_index is not None and release_events[0][0] <= accepted_handoff_index:
         errors.append("implementation dispatch trace: lease release must follow accepted handoff")
+    elif semantic_close_index is not None and release_events[0][0] <= semantic_close_index:
+        errors.append("implementation dispatch trace: rejected lease release must follow guardian close")
 
     return errors
 
@@ -2019,6 +2200,9 @@ def _validate_prewrite_implementation_escalation_cycle(
     dispatch_record = exactly_one("implementation-dispatch")
     activation_record = exactly_one("implementation-agent-activated")
     result_record = exactly_one("implementation-result")
+    rejection_record = exactly_one("semantic-handoff-rejected")
+    invalidation_record = exactly_one("source-checkpoint-invalidated")
+    close_record = exactly_one("guardian-close-acknowledged")
     release_record = exactly_one("writer-lease-released")
     approval_record = exactly_one("implementation-escalation-approved")
     receipts = [
@@ -2043,6 +2227,9 @@ def _validate_prewrite_implementation_escalation_cycle(
         or dispatch_record is None
         or activation_record is None
         or result_record is None
+        or rejection_record is None
+        or invalidation_record is None
+        or close_record is None
         or release_record is None
         or approval_record is None
         or len(running_receipts) != 1
@@ -2056,6 +2243,9 @@ def _validate_prewrite_implementation_escalation_cycle(
     activation_index, activation = activation_record
     terminal_index, terminal = terminal_receipts[0]
     result_index, result = result_record
+    rejection_index, rejection = rejection_record
+    invalidation_index, invalidation = invalidation_record
+    close_index, close = close_record
     release_index, release = release_record
     approval_index, approval = approval_record
     if not (
@@ -2065,12 +2255,16 @@ def _validate_prewrite_implementation_escalation_cycle(
         < activation_index
         < terminal_index
         < result_index
+        < rejection_index
+        < invalidation_index
+        < close_index
         < release_index
         < approval_index
     ):
         errors.append(
             "implementation dispatch trace: escalation lifecycle must be lease, dispatch, running receipt, "
-            "activation, terminal receipt, result, release, then root approval"
+            "activation, terminal receipt, result, semantic rejection, checkpoint invalidation, "
+            "guardian close, release, then root approval"
         )
 
     lease_id = lease_event.get("lease")
@@ -2187,6 +2381,51 @@ def _validate_prewrite_implementation_escalation_cycle(
     for field, expected_value in result_bindings.items():
         if result.get(field) != expected_value:
             errors.append(f"implementation dispatch trace: escalation result changed {field}")
+    rejection_bindings = {
+        "actor": "root",
+        "disposition": "needs-escalation",
+        "lease": lease_id,
+        "run_dir": terminal.get("run_dir"),
+        "handoff_created": False,
+        "success": False,
+        "replayed": False,
+    }
+    for field, expected_value in rejection_bindings.items():
+        if rejection.get(field) != expected_value:
+            errors.append(
+                f"implementation dispatch trace: escalation semantic rejection changed {field}"
+            )
+    evidence_digest = rejection.get("evidence_digest")
+    if not re.fullmatch(r"[0-9a-f]{64}", str(evidence_digest or "")):
+        errors.append(
+            "implementation dispatch trace: escalation semantic rejection requires a SHA-256 evidence digest"
+        )
+    invalidation_bindings = {
+        "actor": "root",
+        "lease": lease_id,
+        "run_dir": terminal.get("run_dir"),
+        "disposition": "recovery-ineligible",
+        "reason": "semantic-needs-escalation",
+        "evidence_digest": evidence_digest,
+    }
+    for field, expected_value in invalidation_bindings.items():
+        if invalidation.get(field) != expected_value:
+            errors.append(
+                f"implementation dispatch trace: checkpoint invalidation changed {field}"
+            )
+    if not re.fullmatch(r"[0-9a-f]{64}", str(invalidation.get("source_state_id") or "")):
+        errors.append(
+            "implementation dispatch trace: checkpoint invalidation requires a source state ID"
+        )
+    if (
+        close.get("lease") != lease_id
+        or close.get("run_dir") != terminal.get("run_dir")
+        or close.get("closed") is not True
+        or close.get("process_tree_stopped") is not True
+    ):
+        errors.append(
+            "implementation dispatch trace: escalation guardian close changed the rejected run binding"
+        )
     if release.get("lease") != lease_id:
         errors.append("implementation dispatch trace: escalation must release the completed probe lease")
 
@@ -2315,7 +2554,7 @@ def validate_implementation_dispatch_trace(
     return errors
 
 
-def validate_review_escalation_trace(events: list[dict[str, str]]) -> list[str]:
+def validate_review_escalation_trace(events: list[dict[str, object]]) -> list[str]:
     """Validate exact read-only reviewer dispatch and evidence-gated tier escalation."""
 
     errors: list[str] = []
@@ -2331,6 +2570,8 @@ def validate_review_escalation_trace(events: list[dict[str, str]]) -> list[str]:
     prior_result: dict[str, str] | None = None
     initial_risk = events[dispatch_indexes[0]].get("risk", "")
     initial_start = REVIEW_START_BY_RISK.get(initial_risk)
+    initial_max_tier = REVIEW_MAX_TIER_BY_RISK.get(initial_risk)
+    max_rank = REVIEW_TIERS.index(initial_max_tier) if initial_max_tier in REVIEW_TIERS else -1
 
     for position, dispatch_index in enumerate(dispatch_indexes):
         dispatch = events[dispatch_index]
@@ -2355,6 +2596,10 @@ def validate_review_escalation_trace(events: list[dict[str, str]]) -> list[str]:
             )
         if expected_agent is None or agent_name != expected_agent:
             errors.append("review escalation trace: dispatch must select the exact agent for its tier")
+        if tier in REVIEW_TIERS and REVIEW_TIERS.index(tier) > max_rank:
+            errors.append(
+                "review escalation trace: stronger reviewer exceeded the risk ceiling; strongest is critical-only"
+            )
         if not AGENT_NAME.fullmatch(agent_name):
             errors.append("review escalation trace: agent_name must use underscore grammar")
         if not task_name or task_name == agent_name:
@@ -2369,16 +2614,19 @@ def validate_review_escalation_trace(events: list[dict[str, str]]) -> list[str]:
         if prior_tier is not None and prior_result is not None and prior_result_index is not None:
             if prior_tier in REVIEW_TIERS:
                 prior_rank = REVIEW_TIERS.index(prior_tier)
-                expected_next = (
-                    REVIEW_TIERS[prior_rank + 1]
-                    if prior_rank + 1 < len(REVIEW_TIERS)
-                    else None
-                )
-                if tier != expected_next:
+                expected_next = REVIEW_TIERS[prior_rank + 1] if prior_rank < max_rank else None
+                if prior_rank >= max_rank:
+                    errors.append(
+                        "review escalation trace: non-critical review route is exhausted; strongest is critical-only"
+                    )
+                elif tier != expected_next:
                     errors.append("review escalation trace: sequential review ladder cannot skip a proven tier")
             reason = prior_result.get("escalation_reason", "none")
             if reason not in REVIEW_ESCALATION_REASONS:
                 errors.append("review escalation trace: stronger reviewer requires a concrete escalation trigger")
+            evidence = prior_result.get("concrete_evidence")
+            if not isinstance(evidence, str) or not evidence.strip() or evidence.strip() == "none":
+                errors.append("review escalation trace: stronger reviewer requires configured concrete evidence, not score alone")
             actionable = prior_result.get("actionable_findings", "none") not in {
                 "",
                 "0",
@@ -2589,6 +2837,7 @@ def validate_review_escalation_trace(events: list[dict[str, str]]) -> list[str]:
             "coverage",
             "actionable_findings",
             "escalation_reason",
+            "concrete_evidence",
         }
         missing_result = sorted(field for field in required_result if field not in result)
         if missing_result:
@@ -2616,7 +2865,11 @@ def validate_review_escalation_trace(events: list[dict[str, str]]) -> list[str]:
             or prior_result.get("coverage") != "complete"
         )
         if final_reason in REVIEW_ESCALATION_REASONS or actionable or incomplete:
-            if prior_tier == "strongest":
+            if initial_risk != "critical" and prior_tier == initial_max_tier:
+                errors.append(
+                    "review escalation trace: non-critical review route is exhausted with unresolved findings"
+                )
+            elif prior_tier == "strongest":
                 errors.append("review escalation trace: strongest reviewer left the task blocked")
             else:
                 errors.append("review escalation trace: unresolved trigger requires the next reviewer tier")
@@ -2993,6 +3246,8 @@ def validate_usage_routing_contract(
     review_protocol: str,
     readme: str,
     readme_ru: str,
+    model_map_interview: str,
+    template_text: str,
 ) -> list[str]:
     errors: list[str] = []
 
@@ -3114,8 +3369,10 @@ def validate_usage_routing_contract(
         "first returned exact profile",
         "packaged map uses",
         "openbuild_implementation_fast",
+        "openbuild_implementation_luna_xhigh",
         "openbuild_implementation_balanced",
         "openbuild_implementation_strong",
+        "openbuild_implementation_sol_high",
         "openbuild_implementation_strongest",
         "Escalate only on evidence",
         "`NEEDS_ESCALATION`",
@@ -3135,6 +3392,12 @@ def validate_usage_routing_contract(
         "`task_name`",
         "Implementation routing receipt",
         "implementation-handoff-accepted",
+        "semantic-handoff-rejected",
+        "invalidates the source checkpoint and published recovery artifact",
+        "before close, release, and next-route approval",
+        "checkpoint_invalidation=pending",
+        "failure retains the lease",
+        "bind `completed`",
         "agent_runner.py",
         "codex-exec-explicit-model",
         "turn.completed",
@@ -3281,9 +3544,24 @@ def validate_usage_routing_contract(
         "openbuild_implementation_strongest",
         "Read-only search/discovery",
         "Every created implementation run requires concrete model, effort, and sandbox evidence",
-        "`high` | exact `openbuild_implementation_balanced` starting profile",
-        "`critical` | exact `openbuild_implementation_strongest` profile",
+        "`low` | Luna/medium `openbuild_implementation_fast`",
+        "`high` | the same Terra/medium → Terra/xhigh → Sol/high ladder",
+        "`critical` | Sol/xhigh `openbuild_implementation_strongest`",
         "configured `NEEDS_ESCALATION` trigger before any edit",
+        "checkpoint_invalidation=pending",
+        "Failure or crash retains the lease",
+        "registry-bound `completed`",
+        "`git ls-files --stage -v -z`",
+        "`assume-unchanged`",
+        "`skip-worktree`",
+        "`FILE_ATTRIBUTE_REPARSE_POINT`",
+        "every path component with non-following metadata",
+        "holds the same object identity through hashing and enumeration",
+        "Immediately before activation",
+        "`clone3(CLONE_INTO_CGROUP)`",
+        "privacy-safe terminal archive",
+        "fallback bind uses the same visible-generation resolution",
+        "Before any registry or private-source durable replace",
         "stop before further test and production code edits",
         "Dispatch the first exact profile returned by `<build-skill-root>/scripts/model_map.py resolve --use-case implementation --risk <risk>` before every test or production code edit",
         "Implementation routing receipt",
@@ -3310,7 +3588,7 @@ def validate_usage_routing_contract(
         "map source/hash and route step",
         "resolved route strictly sequentially",
         "max_steps",
-        "packaged defaults start fast for low, balanced for medium/high, and strongest for critical",
+        "packaged defaults start Luna/medium for low, Terra/medium for medium/high, and Sol/xhigh for critical",
         "Review routing receipt",
         "routing_map_source:",
         "routing_map_sha256:",
@@ -3326,9 +3604,100 @@ def validate_usage_routing_contract(
         "concrete model/effort plus valid exit/result evidence",
         "creates no replacement reviewer",
         "exact non-terminal evidence tuple",
+        "non-critical route ends at Sol/high",
+        "Sol/xhigh is critical-only",
+        "risk-specific ceiling",
     ]:
         if token not in review_dispatch:
             errors.append(f"review-protocol.md exact reviewer routing: missing {token}")
+    review_tier_vocabulary = (
+        "Requested tier: fast | luna_xhigh | balanced | strong | sol_high | strongest | unknown"
+    )
+    if review_tier_vocabulary not in review_protocol:
+        errors.append(
+            f"review-protocol.md exact reviewer routing: missing {review_tier_vocabulary}"
+        )
+
+    reasoning_first_docs = [
+        (
+            "model-map-interview.md",
+            model_map_interview,
+            [
+                "one, two, three, four, or five steps",
+                "openbuild_implementation_luna_xhigh",
+                "openbuild_implementation_sol_high",
+                "Luna/medium → Luna/xhigh → Terra/medium → Terra/xhigh → Sol/high",
+                "`routing_rung`",
+                "`routing_tuple_confirmed = true`",
+            ],
+        ),
+        (
+            "implementation-delegation.md",
+            implementation,
+            [
+                "openbuild_implementation_luna_xhigh",
+                "openbuild_implementation_sol_high",
+                "exact configured canonical profile/model-effort step",
+            ],
+        ),
+        (
+            "review-protocol.md",
+            review_protocol,
+            [
+                "Luna/medium for low, Terra/medium for medium/high, and Sol/xhigh for critical",
+                "exact configured profile/model-effort step",
+            ],
+        ),
+        (
+            "model-routing.md",
+            model_routing,
+            ["exact canonical openbuild_implementation_* ID from the displayed route"],
+        ),
+        (
+            "spec-template.md",
+            template_text,
+            ["ordered exact canonical profile/model/effort steps, up to five"],
+        ),
+    ]
+    for label, text, tokens in reasoning_first_docs:
+        for token in tokens:
+            if token not in text:
+                errors.append(f"{label} reasoning-first owner docs: missing {token}")
+    for label, text, stale in [
+        ("model-map-interview.md", model_map_interview, ["fast → balanced", "from one to four"]),
+        ("implementation-delegation.md", implementation, ["<fast|balanced|strong|strongest>"]),
+        ("review-protocol.md", review_protocol, ["<fast|balanced|strong|strongest>"]),
+        ("model-routing.md", model_routing, ['openbuild_implementation_<fast|balanced|strong|strongest>']),
+        ("spec-template.md", template_text, ["fast-profile | balanced-profile"]),
+    ]:
+        for token in stale:
+            if token in text:
+                errors.append(f"{label} reasoning-first owner docs: stale {token}")
+
+    for label, text, token in [
+        (
+            "SKILL.md",
+            skill_text,
+            "exact top-level and nested allowlist schemas before durable replacement",
+        ),
+        (
+            "implementation-delegation.md",
+            implementation,
+            "Before any registry or private-source durable replace",
+        ),
+        (
+            "README.md",
+            readme,
+            "Every registry and private-source generation is checked against exact top-level and nested allowlists",
+        ),
+        (
+            "README.ru.md",
+            readme_ru,
+            "Каждое поколение registry и private source проверяется по точным allowlist-схемам",
+        ),
+    ]:
+        if token not in text:
+            errors.append(f"{label} authoritative schema owner docs: missing {token}")
 
     return errors
 
@@ -3718,6 +4087,354 @@ def public_text_files() -> list[Path]:
     return result
 
 
+def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> list[str]:
+    errors: list[str] = []
+    recovery_contract = [
+        ('READER_FLOOR = "2.2.0"', "reader floor"),
+        ('b"openbuild-workspace-v2\\0"', "workspace key"),
+        ("_default_state_root", "owner-private state root"),
+        ("state_root / \"workspaces\"", "owner-private state root"),
+        ("_windows_directory_is_private", "owner-private Windows DACL"),
+        ("D:P(A;OICI;FA;;;SY)", "owner-private Windows DACL"),
+        ("_lock", "OS-backed workspace lock"),
+        ("_is_vacant", "exact vacancy"),
+        ("prepare_source_checkpoint", "pre-snapshot lifecycle"),
+        ("bind_reserved_source_snapshot", "reserved source provenance boundary"),
+        ('"normal-snapshot-bound"', "reserved source provenance boundary"),
+        ('"activation-provenance-drift"', "activation provenance boundary"),
+        ('"activation_abort"', "activation provenance boundary"),
+        ("finalize_prepared_checkpoint", "terminal source binding"),
+        ("revalidate_checkpoint", "checkpoint revalidation"),
+        ("grant_authorization", "durable authorization"),
+        ("consume_grant_and_reserve", "atomic authorization consumption"),
+        ("claim_launch", "target lifecycle"),
+        ("fail_recovery_target_before_boundary", "target pre-boundary disposition"),
+        ("public_checkpoint_for_source", "target source binding"),
+        ("assert_checkpoint_allowed_paths", "target allowed-path binding"),
+        ("bind_process_unactivated", "target lifecycle"),
+        ("_validate_contained_process_binding", "contained receipt binding"),
+        ('provider[field] != plan[field] or precommit[field] != plan[field]', "contained receipt binding"),
+        ('precommit["worker_pid"] != process["pid"]', "contained receipt binding"),
+        ("_validate_terminal_identity_binding", "terminal identity binding"),
+        ("_validate_semantic_registry_binding", "semantic registry binding"),
+        ("_require_zero_write_source_locked", "semantic zero-write proof"),
+        (
+            "blocked semantic disposition must retain its checkpoint",
+            "semantic disposition matrix",
+        ),
+        (
+            "semantic checkpoint invalidation is not source-authoritative",
+            "semantic source authority",
+        ),
+        ("resolve_visible_commit=True", "decidable guardian registry commit"),
+        ("claim_contained_launch", "contained normal lifecycle"),
+        ("containment_failed_before_boundary", "containment boundary disposition"),
+        ("prove_fallback_teardown", "ordinary fallback teardown proof"),
+        ("claim_normal_fallback", "one-shot ordinary fallback"),
+        ("quarantine_fallback_launch", "ambiguous fallback quarantine"),
+        ("bind_fallback_process_unactivated", "ordinary fallback process boundary"),
+        ("release_legacy_terminal", "legacy terminal release"),
+        ("record_terminal_evidence", "contained terminalization"),
+        ("prove_contained_tree_empty", "contained zero proof"),
+        ("reject_semantic_handoff", "semantic handoff rejection"),
+        ("invalidate_source_checkpoint", "semantic checkpoint invalidation"),
+        (
+            "complete_source_checkpoint_invalidation",
+            "semantic checkpoint invalidation completion",
+        ),
+        ("commit_handoff", "canonical handoff outbox"),
+        ("materialize_handoff", "canonical handoff materialization"),
+        ("acknowledge_guardian_close", "guardian close acknowledgement"),
+        ("release_contained_terminal", "contained terminal release"),
+        ('b"openbuild-terminal-archive-v1\\0"', "contained terminal archive"),
+        ("_validate_terminal_archive", "contained terminal archive"),
+        ('"terminal_receipt_digest"', "contained terminal archive"),
+        ("quarantine_containment_loss", "post-boundary containment quarantine"),
+        ("retire_for_downgrade", "reader floor retirement"),
+        ('"--porcelain=v2"', "Git provenance"),
+        ('"ls-files", "--stage", "-v", "-z"', "Git index flags"),
+        ("_lstat_snapshot_path(relative)", "Windows reparse ancestors"),
+        ("_reject_snapshot_reparse_point(metadata)", "Windows reparse points"),
+        ("_hold_snapshot_object", "snapshot TOCTOU boundary"),
+        ("_windows_open_snapshot_chain", "snapshot TOCTOU boundary"),
+        ("share_read_write = 0x00000001 | 0x00000002", "snapshot TOCTOU boundary"),
+        ("open_reparse_point = 0x00200000", "snapshot TOCTOU boundary"),
+        ('getattr(os, "O_NOFOLLOW", 0)', "snapshot TOCTOU boundary"),
+        ("dir_fd=final_parent_fd", "snapshot TOCTOU boundary"),
+        ("_snapshot_metadata_matches", "snapshot TOCTOU boundary"),
+        ("_windows_read_handle_chunks", "snapshot TOCTOU boundary"),
+        ("_require_exact_object", "authoritative exact-schema validation"),
+        ("_validate_lease", "authoritative lease schema"),
+        ("_validate_history_event", "authoritative history schema"),
+        ("_validate_outbox", "authoritative outbox schema"),
+        ("_validate_public_checkpoint", "privacy-safe public checkpoint schema"),
+        ("_validate_private_authorization", "private authorization schema"),
+        ("self._validate_registry(state)", "pre-publication registry schema gate"),
+        (
+            'self._validate_source(state, state["source_state_id"])',
+            "pre-publication source schema gate",
+        ),
+        ('"--ignored", "--exclude-standard", "-z"', "Git provenance"),
+        ('b"openbuild-content-v1\\0"', "keyed privacy"),
+        ('b"openbuild-path-v1\\0"', "keyed privacy"),
+        ("DEFAULT_MAX_RECORDS = 100_000", "inventory limits"),
+        ("DEFAULT_MAX_BYTES = 2 * 1024 * 1024 * 1024", "inventory limits"),
+        ("MOVEFILE_WRITE_THROUGH", "durable Windows replace"),
+        ("os.fsync", "durability barrier"),
+        ("previous_generation_digest", "generation chain"),
+        ('"git-common-dir-drift"', "Git common-directory quarantine"),
+    ]
+    for token, category in recovery_contract:
+        if token not in recovery_text:
+            errors.append(f"recovery_state.py {category}: missing {token}")
+    if recovery_text.count("_validate_contained_process_binding") != 2:
+        errors.append(
+            "recovery_state.py contained receipt binding: the validator must be defined and applied exactly once"
+        )
+    if recovery_text.count("_validate_terminal_identity_binding") != 2:
+        errors.append(
+            "recovery_state.py terminal identity binding: the validator must be defined and applied exactly once"
+        )
+    if recovery_text.count("_validate_semantic_registry_binding") != 2:
+        errors.append(
+            "recovery_state.py semantic registry binding: the validator must be defined and applied exactly once"
+        )
+    if recovery_text.count("_require_zero_write_source_locked") != 2:
+        errors.append(
+            "recovery_state.py semantic zero-write proof: the validator must be defined and applied exactly once"
+        )
+    if 'self.workspace / ".openbuild"' in recovery_text:
+        errors.append("recovery_state.py owner-private state root: registry must not live in the checkout")
+    record_path = recovery_text.find("def _record_path")
+    component_walk = recovery_text.find("self._lstat_snapshot_path(relative)", record_path)
+    kind_classification = recovery_text.find("if stat.S_ISREG(mode):", record_path)
+    walk_owner = recovery_text.find("def _lstat_snapshot_path", kind_classification)
+    reparse_guard = recovery_text.find(
+        "_reject_snapshot_reparse_point(metadata)", walk_owner
+    )
+    if (
+        record_path < 0
+        or component_walk < 0
+        or walk_owner < 0
+        or reparse_guard < 0
+        or kind_classification < 0
+        or not record_path < component_walk < kind_classification < walk_owner < reparse_guard
+    ):
+        errors.append(
+            "recovery_state.py Windows reparse points: non-following component walk must precede snapshot kind classification"
+        )
+    hash_owner = recovery_text.find("def _hash_file")
+    file_hold = recovery_text.find("with self._hold_snapshot_object(", hash_owner)
+    file_read = recovery_text.find("_windows_read_handle_chunks", file_hold)
+    directory_owner = recovery_text.find('if kind == "directory" and recurse:')
+    directory_hold = recovery_text.find(
+        "with self._hold_snapshot_object(", directory_owner
+    )
+    directory_scan = recovery_text.find("os.scandir(scan_target)", directory_hold)
+    if (
+        hash_owner < 0
+        or file_hold < 0
+        or file_read < 0
+        or directory_owner < 0
+        or directory_hold < 0
+        or directory_scan < 0
+        or not hash_owner < file_hold < file_read
+        or not directory_owner < directory_hold < directory_scan
+    ):
+        errors.append(
+            "recovery_state.py snapshot TOCTOU boundary: held no-follow object identity must precede file read and directory enumeration"
+        )
+    fallback_bind_owner = recovery_text.find("def bind_fallback_process_unactivated")
+    fallback_bind_end = recovery_text.find("def bind_legacy_process_unactivated", fallback_bind_owner)
+    fallback_bind_resolve = recovery_text.find(
+        "resolve_visible_commit=True", fallback_bind_owner, fallback_bind_end
+    )
+    if (
+        fallback_bind_owner < 0
+        or fallback_bind_end < 0
+        or fallback_bind_resolve < 0
+        or not fallback_bind_owner < fallback_bind_resolve < fallback_bind_end
+    ):
+        errors.append(
+            "recovery_state.py ordinary fallback process bind: durable commit must resolve the exact visible generation"
+        )
+    registry_commit = recovery_text.find("def _commit_registry_locked")
+    registry_schema_gate = recovery_text.find(
+        "self._validate_registry(state)", registry_commit
+    )
+    registry_replace = recovery_text.find("_durable_replace(self.path", registry_commit)
+    source_commit = recovery_text.find("def _commit_source_locked")
+    source_schema_gate = recovery_text.find(
+        'self._validate_source(state, state["source_state_id"])', source_commit
+    )
+    source_replace = recovery_text.find("_durable_replace(path", source_commit)
+    if (
+        registry_commit < 0
+        or registry_schema_gate < 0
+        or registry_replace < 0
+        or not registry_commit < registry_schema_gate < registry_replace
+        or source_commit < 0
+        or source_schema_gate < 0
+        or source_replace < 0
+        or not source_commit < source_schema_gate < source_replace
+    ):
+        errors.append(
+            "recovery_state.py authoritative schema: registry and source generations must validate before durable replace"
+        )
+
+    runner_contract = [
+        ("recovery_registry_for_agent", "implementation-only registry owner"),
+        ('if not agent_name.startswith("openbuild_implementation_"):', "implementation-only"),
+        ("validate_recovery_start_options", "structured recovery preflight"),
+        ('--allowed-file', "structured recovery preflight"),
+        ('--specification-revision', "structured recovery preflight"),
+        ('--recovery-target-milestone', "structured recovery preflight"),
+        ("registry.prepare_source_checkpoint", "pre-snapshot dispatch"),
+        ("registry.reserve_normal", "normal lease arbitration"),
+        ("registry.bind_reserved_source_snapshot", "reserved source provenance boundary"),
+        ("guardian_run", "outside-worker containment guardian"),
+        ("create_windows_kill_job(bind_current=False)", "outside-Job Windows guardian"),
+        ("_WINDOWS_CREATE_SUSPENDED", "creation-suspended Windows worker"),
+        ("assign_windows_process_to_job", "creation-bound Windows Job attachment"),
+        ("verify_windows_process_in_job", "verified Windows Job attachment"),
+        ("resume_windows_suspended_process", "post-attachment Windows worker resume"),
+        ("QueryInformationJobObject", "Windows full-tree zero proof"),
+        ("create_linux_cgroup", "Linux cgroup v2 provider"),
+        ("_CLONE_INTO_CGROUP", "creation-bound Linux worker"),
+        ("_clone3_process_into_cgroup", "creation-bound Linux worker"),
+        ("spawn_linux_worker_creation_bound", "creation-bound Linux worker"),
+        ('"cgroup.events"', "Linux cgroup v2 zero proof"),
+        ("OPENBUILD_CGROUP_V2_DELEGATION", "Linux fail-closed delegation intent gate"),
+        ("establish_linux_anti_migration_boundary", "native Linux anti-migration boundary"),
+        ("_LINUX_CLONE_NEWCGROUP", "private Linux cgroup namespace"),
+        ("_LINUX_CLONE_NEWNS", "private Linux mount namespace"),
+        ("_LINUX_MS_RDONLY", "read-only Linux cgroup view"),
+        ('"linux-anti-migration-ready"', "authenticated Linux anti-migration proof"),
+        ('"cgroup_mounts_read_only"', "Linux read-only mount proof"),
+        ('"cgroup_write_denied"', "Linux active write-denial proof"),
+        ('"no_cgroup_control_fds"', "Linux cgroup descriptor proof"),
+        ('"capabilities_zero"', "Linux capability-drop proof"),
+        ("query_linux_cgroup_members", "Linux membership revalidation"),
+        ("await_guardian_precommit", "fresh guardian precommit attestation"),
+        ('"guardian-precommit-ready"', "authenticated guardian precommit receipt"),
+        ('"precommit_nonce"', "guardian precommit binding"),
+        ('private_plan.get("provider_plan_id") != provider_plan_id', "guardian provider-plan binding"),
+        ('private_plan.get("ipc_plan_id") != ipc_plan_id', "guardian IPC-plan binding"),
+        ('precommit.get("provider_plan_id") != provider_plan_id', "guardian provider-plan attestation"),
+        ('precommit.get("ipc_plan_id") != ipc_plan_id', "guardian IPC-plan attestation"),
+        ("bound_state = registry.bind_process_unactivated", "guardian-owned registry commit"),
+        ('"registry_digest": bound_state["digest"]', "guardian-owned registry receipt"),
+        ("await_worker_containment_gate", "pre-user-code containment gate"),
+        ("registry.bind_process_unactivated", "durable containment boundary"),
+        ("registry.commit_activation", "activation provenance revalidation"),
+        ("registry.claim_launch", "runner recovery-target launch"),
+        ("registry.fail_recovery_target_before_boundary", "runner target failed-start"),
+        ('"recovery_parent_checkpoint"', "runner target parent verification"),
+        ("audit_guardian_health", "post-boundary guardian loss quarantine"),
+        ("reconcile_implementation_registry", "runner terminal lifecycle"),
+        ("registry.record_terminal_evidence", "runner terminal receipt binding"),
+        ("registry.materialize_handoff", "runner handoff materialization"),
+        ("registry.release_contained_terminal", "runner contained release"),
+        ("success_verification_digest", "root-verified success gate"),
+        ('"_finalize-success"', "root-verified success gate"),
+        ('"_reject-handoff"', "root semantic rejection gate"),
+        ("reject_semantic_handoff_run", "root semantic rejection gate"),
+        ("registry.reject_semantic_handoff", "root semantic rejection transition"),
+        (
+            "registry.complete_source_checkpoint_invalidation",
+            "root semantic invalidation completion",
+        ),
+        ('"_authorize-recovery"', "explicit recovery authorization gate"),
+        ("authorize_recovery_run", "explicit recovery authorization gate"),
+        ('"root_verification_digest"', "root-verified handoff binding"),
+        ("registry.bind_fallback_process_unactivated", "runner fallback process boundary"),
+        (
+            "ordinary fallback process bind did not return its exact durable receipt",
+            "runner fallback process receipt verification",
+        ),
+        ("registry.quarantine_fallback_launch", "runner fallback ambiguity quarantine"),
+        ("registry.release_legacy_terminal", "runner legacy release"),
+        ('"--soft-timeout-exit-zero"', "soft observation timeout"),
+        ("return 0 if args.soft_timeout_exit_zero else 3", "soft observation timeout"),
+    ]
+    for token, category in runner_contract:
+        if token not in runner_text:
+            errors.append(f"agent_runner.py recovery {category}: missing {token}")
+    pre_snapshot = runner_text.find("registry.prepare_source_checkpoint")
+    request_write = runner_text.find('atomic_write_json(run_dir / "request.json", request)', pre_snapshot)
+    reserve = runner_text.find("registry.reserve_normal", pre_snapshot)
+    snapshot_boundary = runner_text.find("registry.bind_reserved_source_snapshot", reserve)
+    contained_claim = runner_text.find("registry.claim_contained_launch", snapshot_boundary)
+    if (
+        pre_snapshot < 0
+        or request_write < 0
+        or reserve < 0
+        or snapshot_boundary < 0
+        or contained_claim < 0
+        or not pre_snapshot < request_write < reserve < snapshot_boundary < contained_claim
+    ):
+        errors.append(
+            "agent_runner.py recovery pre-snapshot dispatch: preliminary snapshot, private request, "
+            "lease reservation, reserved-source binding and contained claim are out of order"
+        )
+    suspended_spawn = runner_text.find("start_suspended=True")
+    windows_assign = runner_text.find("assign_windows_process_to_job(provider_handle, worker)", suspended_spawn)
+    windows_verify = runner_text.find("verify_windows_process_in_job(provider_handle, worker)", windows_assign)
+    windows_resume = runner_text.find("resume_windows_suspended_process(worker)", windows_verify)
+    if (
+        suspended_spawn < 0
+        or windows_assign < 0
+        or windows_verify < 0
+        or windows_resume < 0
+        or not suspended_spawn < windows_assign < windows_verify < windows_resume
+    ):
+        errors.append(
+            "agent_runner.py recovery creation-suspended Windows worker: spawn, assign, verify and resume are out of order"
+        )
+    guardian_owner = runner_text.find("def guardian_run")
+    linux_spawn = runner_text.find("worker = spawn_linux_worker_creation_bound(", guardian_owner)
+    linux_membership = runner_text.find(
+        "worker.pid not in query_linux_cgroup_members(provider_handle)", linux_spawn
+    )
+    late_linux_attach = "attach_linux_process_to_cgroup" in runner_text
+    post_spawn_membership_write = bool(
+        re.search(r'\(\s*cgroup\s*/\s*["\']cgroup\.procs["\']\s*\)\.write_text', runner_text)
+    )
+    if (
+        guardian_owner < 0
+        or linux_spawn < 0
+        or linux_membership < 0
+        or not guardian_owner < linux_spawn < linux_membership
+        or late_linux_attach
+        or post_spawn_membership_write
+    ):
+        errors.append(
+            "agent_runner.py recovery creation-bound Linux worker: clone3 cgroup birth must precede membership proof without post-spawn attachment"
+        )
+    if runner_text.count("registry.bind_process_unactivated(") != 1:
+        errors.append(
+            "agent_runner.py recovery guardian-owned registry commit: boundary commit must have exactly one guardian owner"
+        )
+    runner_fallback_bind = runner_text.find("registry.bind_fallback_process_unactivated(")
+    runner_fallback_verify = runner_text.find(
+        "ordinary fallback process bind did not return its exact durable receipt",
+        runner_fallback_bind,
+    )
+    runner_fallback_quarantine = runner_text.find(
+        "registry.quarantine_fallback_launch(", runner_fallback_verify
+    )
+    if (
+        runner_fallback_bind < 0
+        or runner_fallback_verify < 0
+        or runner_fallback_quarantine < 0
+        or not runner_fallback_bind < runner_fallback_verify < runner_fallback_quarantine
+    ):
+        errors.append(
+            "agent_runner.py recovery fallback process bind: exact receipt verification must precede ambiguity quarantine"
+        )
+    return errors
+
+
 def main() -> int:
     args = sys.argv[1:]
     if args not in ([], ["--commit-gate"], ["--no-commit-gate"]):
@@ -3774,6 +4491,8 @@ def main() -> int:
         "version impact",
         "separate-usage",
         "model_map.py resolve --use-case implementation",
+        "--soft-timeout-exit-zero",
+        "then `90`, then `120`",
     ]
     for token in required_skill_tokens:
         if token not in skill_text:
@@ -3801,6 +4520,16 @@ def main() -> int:
         fail(errors, "agents/openai.yaml: default prompt must be invocation-neutral and select auto mode")
 
     runner_text = read_text(AGENT_RUNNER, errors)
+    for token in [
+        "ROUTING_RUNG_BY_AGENT",
+        "KNOWN_MODEL_EFFORT_RUNG",
+        'routing_tuple_confirmed") is not True',
+        "known model/effort tuple",
+    ]:
+        if token not in runner_text:
+            fail(errors, f"agent_runner.py: missing effective profile routing envelope {token}")
+    recovery_text = read_text(RECOVERY_STATE, errors)
+    errors.extend(validate_recovery_control_plane(runner_text, recovery_text))
     for token in [
         "codex-exec-explicit-model",
         "model_reasoning_effort",
@@ -3882,6 +4611,10 @@ def main() -> int:
         "transport_failure",
         "load_agent_profile",
         "map_sha256",
+        "ROUTE_LADDERS",
+        "critical-only profile",
+        "cannot start on Sol",
+        "contiguous reasoning-first segment",
     ]:
         if token not in resolver_text:
             fail(errors, f"model_map.py: missing model-map contract {token}")
@@ -3914,6 +4647,8 @@ def main() -> int:
         "exact diff",
         "explicit permission",
         "model_map.py validate",
+        "routing_rung",
+        "routing_tuple_confirmed = true",
     ]:
         if token.lower() not in interview_text.lower():
             fail(errors, f"model-map-interview.md: missing guided interview contract {token}")
@@ -3977,6 +4712,8 @@ def main() -> int:
             review_protocol_text,
             readme,
             readme_ru,
+            interview_text,
+            template_text,
         )
     )
     errors.extend(

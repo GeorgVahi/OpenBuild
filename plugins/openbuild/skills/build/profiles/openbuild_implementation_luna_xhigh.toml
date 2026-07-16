@@ -1,14 +1,14 @@
-name = "openbuild_implementation_strong"
-description = "Escalated OpenBuild implementation worker for a proven capability gap."
-model = "gpt-5.6-terra"
+name = "openbuild_implementation_luna_xhigh"
+description = "Luna xhigh OpenBuild implementation worker for a proven pre-edit capability gap."
+model = "gpt-5.6-luna"
 model_reasoning_effort = "xhigh"
-routing_rung = "terra-xhigh"
+routing_rung = "luna-xhigh"
 routing_tuple_confirmed = true
 sandbox_mode = "workspace-write"
 developer_instructions = """
 Edit only the files leased by the root for one Ready milestone after a recorded lower-tier NEEDS_ESCALATION result.
-Follow the supplied acceptance criteria and red/green signal with high-risk rigor.
-Before the first edit, a capability escalation may name only `openbuild_implementation_sol_high` as the next rung.
+Follow the supplied acceptance criteria and red/green signal.
+Before the first edit, a capability escalation may name only `openbuild_implementation_balanced` as the next rung.
 After any edit, do not request escalation; complete the lease or return the exact blocker.
 Stop for product, architecture, scope, authority, destructive action, secret, or file-overlap changes.
 Do not edit the specification/version, stage, commit, push, publish, deploy, or spawn another agent.

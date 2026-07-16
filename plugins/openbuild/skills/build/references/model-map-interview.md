@@ -26,7 +26,7 @@ Each route records:
 - whether a clean semantic result stops the route;
 - the fixed failure and sandbox policies.
 
-The safety envelope is not customizable: search/critic/review stay read-only, implementation stays under a single-writer lease, transport failure is `block`, implementation escalation is `semantic-before-edit`, and only discovery may fall back to `targeted-root`. A model-map choice never authorizes destructive, external, secret-bearing, or live-infrastructure action.
+The safety envelope is not customizable: search/critic/review stay read-only, implementation stays under a single-writer lease, transport failure is `block`, implementation escalation is `semantic-before-edit`, and only discovery may use the model-map `targeted-root` fallback. Every non-critical map route is a contiguous segment of its risk-specific reasoning-first ladder: it may start higher only before Sol, cannot skip a reasoning rung, and cannot contain the critical-only `strongest` profile. A non-critical route never starts on Sol/high; every critical route is exactly the direct `strongest` profile with `critical_confirmed = true`. Each canonical implementation/review profile override also declares its exact `routing_rung` and `routing_tuple_confirmed = true`. A known Luna/Terra/Sol model-and-effort tuple must equal that rung; an unknown custom tuple is allowed only with an explicitly user-confirmed rung and a successful exact capability smoke, never by inference from the model name. The separate owner-private implementation checkpoint recovery path is not configurable here and still requires terminal full-tree zero proof plus explicit user opt-in. A model-map choice never authorizes destructive, external, secret-bearing, or live-infrastructure action.
 
 ## Block 0 — Current state and scope
 
@@ -93,10 +93,10 @@ Explain: critics challenge specification coverage and contradictions before impl
 For low, medium, high, and critical, ask adaptively:
 
 1. Which exact model/profile tries first?
-2. What is the maximum ordered sequence: one, two, three, or four steps?
+2. What is the maximum ordered sequence: one, two, three, four, or five steps?
 3. Which completed-result triggers may advance one step: `coverage-gap`, `unresolved-contradiction`, `low-confidence`, or `material-uncertainty`?
 
-Recommend fast → balanced for low, balanced → strong for medium/high, and strongest directly for critical unless confirmed model evidence supports a better assignment. Stop immediately on a current-revision `COVERED` result with sufficient confidence.
+Recommend Luna/medium → Luna/xhigh → Terra/medium → Terra/xhigh → Sol/high for low, Terra/medium → Terra/xhigh → Sol/high for medium/high, and Sol/xhigh directly for critical unless confirmed model evidence supports a better assignment. Stop immediately on a current-revision `COVERED` result with sufficient confidence.
 
 ## Block 4 — Implementation
 
@@ -106,11 +106,11 @@ For low, medium, high, and critical, ask:
 
 1. Which exact model/profile gets the first attempt?
 2. If it reports a real capability gap before editing, which exact profile is next?
-3. How many route steps are allowed, from one to four?
+3. How many route steps are allowed, from one to five?
 4. Which pre-edit reasons justify the next step: `task-complexity-above-tier`, `unresolved-cross-layer-reasoning`, `validation-strategy-uncertain`, or `capability-gap`?
 5. What reasoning effort should each selected profile use?
 
-Recommend fast → balanced for low, balanced → strong for medium/high, and strongest directly for critical. Require `max_steps` to match the explicit sequence. A successful implementation stops the route. A transport, authentication, quota, sandbox, spawn, timeout, runner, or evidence failure blocks the milestone and never tries a stronger writer.
+Recommend `openbuild_implementation_fast` → `openbuild_implementation_luna_xhigh` → `openbuild_implementation_balanced` → `openbuild_implementation_strong` → `openbuild_implementation_sol_high` for low, the Terra/medium → Terra/xhigh → Sol/high suffix for medium/high, and `openbuild_implementation_strongest` (Sol/xhigh) directly for critical. Require `max_steps` to match the explicit sequence. A successful implementation stops the route. A transport, authentication, quota, sandbox, spawn, timeout, runner, or evidence failure blocks the milestone and never tries a stronger writer.
 
 ## Block 5 — Review
 
@@ -123,7 +123,7 @@ For low, medium, high, and critical, ask:
 3. Which completed-result triggers may advance one step: `actionable-finding`, `coverage-gap`, `low-confidence`, or `material-dispute`?
 4. Should a clean result stop immediately? This must remain **Yes (Recommended)**.
 
-Recommend fast → balanced for low, balanced → strong for medium/high, and strongest directly for critical. Never repeat the same profile on an unchanged diff or skip a configured intermediate step.
+Recommend the matching five-rung Luna/medium → Luna/xhigh → Terra/medium → Terra/xhigh → Sol/high review ladder for low, its Terra/medium → Terra/xhigh → Sol/high suffix for medium/high, and Sol/xhigh directly for critical. Never repeat the same profile on an unchanged diff or skip a configured intermediate step.
 
 ## Block 6 — Critical work and failure policy
 
@@ -164,7 +164,7 @@ After permission:
 
 1. Recheck that every target still has the previewed content/hash. Drift cancels permission for that file.
 2. Write the complete map to `.codex/openbuild/model-map.toml` or `$CODEX_HOME/openbuild/model-map.toml`. Never write a partial route set.
-3. Write only necessary canonical profiles under `.codex/agents` or `$CODEX_HOME/agents`. Preserve the role's packaged developer instructions and sandbox; change only confirmed model/effort values. Never overwrite a changed file without a new exact diff and permission.
+3. Write only necessary canonical profiles under `.codex/agents` or `$CODEX_HOME/agents`. Preserve the role's packaged developer instructions and sandbox; change only confirmed model/effort values. For implementation/review roles, also write the role's exact `routing_rung` and `routing_tuple_confirmed = true`; known Luna/Terra/Sol tuples must match that rung, while an unknown custom tuple requires the user's explicit rung confirmation. Never overwrite a changed file without a new exact diff and permission.
 4. Run `model_map.py validate --path <selected-model-map>`.
 5. Resolve every route and confirm project → user → packaged precedence and exact profile evidence.
 6. Run one launcher smoke per distinct model/effort/sandbox tuple, not one per duplicate role. Require terminal `turn.completed`, exit zero, valid semantic output, and observed model/effort evidence.

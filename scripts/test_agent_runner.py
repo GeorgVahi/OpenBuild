@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import io
 import json
 import os
@@ -26,6 +27,111 @@ agent_runner = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(agent_runner)
 
 
+def _attempt_linux_cgroup_migration(targets: dict[str, str]) -> dict[str, bool]:
+    denied: dict[str, bool] = {}
+    for name, path in targets.items():
+        try:
+            descriptor = os.open(path, os.O_WRONLY | getattr(os, "O_CLOEXEC", 0))
+            try:
+                os.write(descriptor, f"{os.getpid()}\n".encode("ascii"))
+            finally:
+                os.close(descriptor)
+        except OSError:
+            denied[name] = True
+        else:
+            denied[name] = False
+    return denied
+
+
+def _containment_plan(
+    *,
+    guardian_id: str = "guardian-1",
+    provider_plan_id: str = "provider-plan",
+    ipc_plan_id: str = "ipc-plan",
+) -> dict[str, object]:
+    return {
+        "guardian_id": guardian_id,
+        "provider_plan_id": provider_plan_id,
+        "ipc_plan_id": ipc_plan_id,
+        "contained_launch_token": "contained-token",
+        "fallback_token": "fallback-token",
+        "recovery_target": False,
+    }
+
+
+def _process_receipt(
+    *, pid: int = 123, identity: str = "worker-1"
+) -> dict[str, object]:
+    return {
+        "pid": pid,
+        "identity": identity,
+        "process_group_id": pid,
+        "started_at": "2026-07-15T00:00:00Z",
+    }
+
+
+def _provider_receipt(
+    *,
+    guardian_id: str = "guardian-1",
+    provider_plan_id: str = "provider-plan",
+    ipc_plan_id: str = "ipc-plan",
+    worker: dict[str, object] | None = None,
+    precommit_nonce: str = "precommit-1",
+) -> dict[str, object]:
+    process = worker or _process_receipt()
+    return {
+        "guardian_id": guardian_id,
+        "guardian_pid": 999,
+        "guardian_identity": "guardian-created-1",
+        "provider": "windows-job",
+        "provider_plan_id": provider_plan_id,
+        "ipc_plan_id": ipc_plan_id,
+        "policy": "kill-on-close-no-breakaway",
+        "active_processes": 1,
+        "anti_migration": None,
+        "precommit": {
+            "guardian_id": guardian_id,
+            "guardian_pid": 999,
+            "guardian_identity": "guardian-created-1",
+            "worker_pid": process["pid"],
+            "worker_identity": process["identity"],
+            "provider": "windows-job",
+            "provider_plan_id": provider_plan_id,
+            "ipc_plan_id": ipc_plan_id,
+            "provider_populated": True,
+            "membership_verified": True,
+            "precommit_nonce": precommit_nonce,
+            "attested_at": "2026-07-15T00:00:01Z",
+        },
+    }
+
+
+def _zero_proof(
+    *,
+    guardian_id: str = "guardian-1",
+    provider: str = "windows-job",
+    worker_pid: int = 123,
+    worker_identity: str = "worker-1",
+) -> dict[str, object]:
+    return {
+        "guardian_id": guardian_id,
+        "provider": provider,
+        "populated": False,
+        "identity_verified": True,
+        "worker_pid": worker_pid,
+        "worker_identity": worker_identity,
+        "proved_at": "2026-07-15T00:00:02Z",
+    }
+
+
+def _guardian_close(*, guardian_id: str = "guardian-1") -> dict[str, object]:
+    return {
+        "guardian_id": guardian_id,
+        "closed": True,
+        "closed_at": "2026-07-15T00:00:03Z",
+    }
+
+
 class AgentProfileResolutionTests(unittest.TestCase):
     def write_profile(self, root: Path, filename: str, **overrides: str) -> Path:
         agents = root / "agents"
@@ -39,6 +145,10 @@ class AgentProfileResolutionTests(unittest.TestCase):
             "developer_instructions": "Review only. Do not edit or delegate further.",
         }
         values.update(overrides)
+        rung_by_name = agent_runner.ROUTING_RUNG_BY_AGENT
+        if values["name"] in rung_by_name:
+            values["routing_rung"] = rung_by_name[values["name"]]
+            values["routing_tuple_confirmed"] = True
         lines = [f'{key} = {json.dumps(value)}' for key, value in values.items()]
         path = agents / filename
         path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
@@ -188,13 +298,17 @@ class AgentProfileResolutionTests(unittest.TestCase):
                 "openbuild_search_balanced": ("gpt-5.6-terra", "medium", "read-only"),
                 "openbuild_search_strong": ("gpt-5.6-sol", "high", "read-only"),
                 "openbuild_search_strongest": ("gpt-5.6-sol", "xhigh", "read-only"),
-                "openbuild_implementation_fast": ("gpt-5.6-terra", "low", "workspace-write"),
+                "openbuild_implementation_fast": ("gpt-5.6-luna", "medium", "workspace-write"),
                 "openbuild_implementation_balanced": ("gpt-5.6-terra", "medium", "workspace-write"),
-                "openbuild_implementation_strong": ("gpt-5.6-sol", "high", "workspace-write"),
+                "openbuild_implementation_luna_xhigh": ("gpt-5.6-luna", "xhigh", "workspace-write"),
+                "openbuild_implementation_strong": ("gpt-5.6-terra", "xhigh", "workspace-write"),
+                "openbuild_implementation_sol_high": ("gpt-5.6-sol", "high", "workspace-write"),
                 "openbuild_implementation_strongest": ("gpt-5.6-sol", "xhigh", "workspace-write"),
-                "openbuild_review_fast": ("gpt-5.6-luna", "low", "read-only"),
+                "openbuild_review_fast": ("gpt-5.6-luna", "medium", "read-only"),
                 "openbuild_review_balanced": ("gpt-5.6-terra", "medium", "read-only"),
-                "openbuild_review_strong": ("gpt-5.6-sol", "high", "read-only"),
+                "openbuild_review_luna_xhigh": ("gpt-5.6-luna", "xhigh", "read-only"),
+                "openbuild_review_strong": ("gpt-5.6-terra", "xhigh", "read-only"),
+                "openbuild_review_sol_high": ("gpt-5.6-sol", "high", "read-only"),
                 "openbuild_review_strongest": ("gpt-5.6-sol", "xhigh", "read-only"),
             }
 
@@ -311,6 +425,53 @@ class CodexInvocationTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(agent_runner.RunnerError, "only for implementation"):
             agent_runner.validate_lease_id("openbuild_review_fast", "M-001"),
+
+    def test_recovery_registry_is_owned_only_by_implementation_agents(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            repo.mkdir()
+            state_root = root / "private-state"
+            self.assertIsNone(
+                agent_runner.recovery_registry_for_agent(
+                    "openbuild_review_fast",
+                    repo,
+                    state_root=state_root,
+                )
+            )
+            owner = agent_runner.recovery_registry_for_agent(
+                "openbuild_implementation_fast",
+                repo,
+                state_root=state_root,
+            )
+            self.assertIsNotNone(owner)
+            self.assertTrue(owner.directory.is_relative_to(state_root))
+            self.assertFalse((repo / ".openbuild").exists())
+
+    def test_recovery_preflight_options_are_structured_and_implementation_only(self) -> None:
+        self.assertEqual(
+            agent_runner.validate_recovery_start_options(
+                "openbuild_implementation_fast",
+                ["plugins/openbuild", "scripts/test_agent_runner.py"],
+                "R-029",
+                "M2b-recovery",
+            ),
+            (["plugins/openbuild", "scripts/test_agent_runner.py"], "R-029", "M2b-recovery"),
+        )
+        with self.assertRaisesRegex(agent_runner.RunnerError, "implementation"):
+            agent_runner.validate_recovery_start_options(
+                "openbuild_review_fast",
+                ["scripts"],
+                "R-029",
+                "M2b-recovery",
+            )
+        with self.assertRaisesRegex(agent_runner.RunnerError, "together"):
+            agent_runner.validate_recovery_start_options(
+                "openbuild_implementation_fast",
+                ["scripts"],
+                None,
+                "M2b-recovery",
+            )
 
     def test_start_rejects_a_preexisting_activation_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -767,6 +928,1764 @@ class CodexInvocationTests(unittest.TestCase):
 
             self.assertEqual(order, ["job", "auth"])
             spawn.assert_not_called()
+
+    def test_guardian_ipc_is_authenticated_and_kind_bound(self) -> None:
+        secret = bytes.fromhex("11" * 32)
+        message = agent_runner.sign_guardian_message(
+            secret,
+            "guardian-ready",
+            {"guardian_id": "guardian-1", "active_processes": 1},
+        )
+
+        self.assertEqual(
+            agent_runner.verify_guardian_message(message, secret, "guardian-ready")["guardian_id"],
+            "guardian-1",
+        )
+        tampered = json.loads(json.dumps(message))
+        tampered["payload"]["active_processes"] = 0
+        with self.assertRaisesRegex(agent_runner.RunnerError, "authentication"):
+            agent_runner.verify_guardian_message(tampered, secret, "guardian-ready")
+        with self.assertRaisesRegex(agent_runner.RunnerError, "kind"):
+            agent_runner.verify_guardian_message(message, secret, "guardian-zero")
+
+    def test_guardian_ipc_retries_a_transient_atomic_publish_lock(self) -> None:
+        secret = bytes.fromhex("77" * 32)
+        message = agent_runner.sign_guardian_message(
+            secret,
+            "guardian-ready",
+            {"guardian_id": "guardian-1"},
+        )
+        with mock.patch.object(
+            agent_runner,
+            "read_json",
+            side_effect=[PermissionError("sharing violation"), message],
+        ) as reader:
+            payload = agent_runner.read_guardian_message(
+                Path("guardian-ready.json"),
+                secret,
+                "guardian-ready",
+            )
+
+        self.assertEqual(payload, {"guardian_id": "guardian-1"})
+        self.assertEqual(reader.call_count, 2)
+
+    def test_guardian_failure_wins_over_an_already_published_ready_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            secret = bytes.fromhex("78" * 32)
+            agent_runner.write_guardian_message(
+                run_dir / "guardian-ready.json",
+                secret,
+                "guardian-ready",
+                {"guardian_id": "guardian-1"},
+            )
+            agent_runner.write_guardian_message(
+                run_dir / "guardian-failure.json",
+                secret,
+                "guardian-failure",
+                {
+                    "guardian_id": "guardian-1",
+                    "boundary_committed": False,
+                    "tree_empty": True,
+                    "no_user_code": True,
+                    "failure": "ready-then-provider-loss",
+                },
+            )
+            guardian = mock.Mock()
+            guardian.poll.return_value = 1
+
+            disposition, receipt = agent_runner.await_guardian_launch(
+                run_dir,
+                secret,
+                guardian,
+                timeout=0.1,
+            )
+
+        self.assertEqual(disposition, "failed")
+        self.assertFalse(receipt["boundary_committed"])
+
+    def test_guardian_precommit_rejects_each_plan_id_drift(self) -> None:
+        for field in ("provider_plan_id", "ipc_plan_id"):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temp:
+                run_dir = Path(temp)
+                secret = bytes.fromhex("79" * 32)
+                worker = {"pid": 123, "identity": "worker-created-1"}
+                ready = {
+                    "guardian_id": "guardian-1",
+                    "guardian_pid": 999,
+                    "guardian_identity": "guardian-created-1",
+                    "provider": "windows-job",
+                    "provider_plan_id": "provider-plan-1",
+                    "ipc_plan_id": "ipc-plan-1",
+                    "worker": worker,
+                }
+                response = {
+                    **{key: value for key, value in ready.items() if key != "worker"},
+                    "worker_pid": worker["pid"],
+                    "worker_identity": worker["identity"],
+                    "provider_populated": True,
+                    "membership_verified": True,
+                    "precommit_nonce": "ab" * 32,
+                    "registry_digest": "cd" * 32,
+                }
+                response[field] = f"drifted-{field}"
+                agent_runner.write_guardian_message(
+                    run_dir / "guardian-precommit-ready.json",
+                    secret,
+                    "guardian-precommit-ready",
+                    response,
+                )
+                guardian = mock.Mock()
+                guardian.poll.return_value = None
+
+                with mock.patch.object(
+                    agent_runner.secrets,
+                    "token_hex",
+                    return_value="ab" * 32,
+                ), self.assertRaisesRegex(agent_runner.RunnerError, "launch binding"):
+                    agent_runner.await_guardian_precommit(
+                        run_dir,
+                        secret,
+                        guardian,
+                        ready,
+                        timeout=0.1,
+                    )
+
+    def test_guardian_rejects_each_private_plan_id_drift_before_process_creation(self) -> None:
+        for field in ("provider_plan_id", "ipc_plan_id"):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temp:
+                run_dir = Path(temp)
+                secret = bytes.fromhex("7a" * 32)
+                agent_runner.atomic_write_bytes(run_dir / "guardian.key", secret)
+                agent_runner.atomic_write_json(
+                    run_dir / "request.json",
+                    {
+                        "profile": {"name": "openbuild_implementation_fast"},
+                        "repo": str(run_dir),
+                        "lease_id": "lease-1",
+                        "lifecycle_allowed_set_digest": "ab" * 32,
+                        "containment_plan": {
+                            "provider_plan_id": "provider-plan-1",
+                            "ipc_plan_id": "ipc-plan-1",
+                        },
+                    },
+                )
+                guardian_request = {
+                    "guardian_id": "guardian-1",
+                    "agent_name": "openbuild_implementation_fast",
+                    "repo": str(run_dir),
+                    "lease_id": "lease-1",
+                    "allowed_set_digest": "ab" * 32,
+                    "provider_plan_id": "provider-plan-1",
+                    "ipc_plan_id": "ipc-plan-1",
+                }
+                guardian_request[field] = f"drifted-{field}"
+                agent_runner.write_guardian_message(
+                    run_dir / "guardian-request.json",
+                    secret,
+                    "guardian-request",
+                    guardian_request,
+                )
+
+                with self.assertRaisesRegex(agent_runner.RunnerError, "registry boundary binding"):
+                    agent_runner.guardian_run(run_dir)
+
+    def test_ready_then_preboundary_failure_terminates_recovery_target_without_binding(self) -> None:
+        registry = mock.Mock()
+        with self.assertRaisesRegex(agent_runner.RunnerError, "before process binding"):
+            agent_runner.apply_preboundary_guardian_failure(
+                registry,
+                "target-lease",
+                {"recovery_target": True, "fallback_token": None},
+                {
+                    "boundary_committed": False,
+                    "tree_empty": True,
+                    "no_user_code": True,
+                    "failure": "ready-then-provider-loss",
+                    "cleanup_error": None,
+                },
+                run_dir=Path("target-run"),
+                runner_log=mock.Mock(),
+            )
+
+        registry.fail_recovery_target_before_boundary.assert_called_once_with(
+            "target-lease",
+            "ready-then-provider-loss",
+            {"tree_empty": True, "no_user_code": True},
+        )
+        registry.bind_process_unactivated.assert_not_called()
+
+    def test_stopped_guardian_after_boundary_quarantines_writer_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            agent_runner.atomic_write_json(
+                run_dir / "request.json",
+                {
+                    "profile": {"name": "openbuild_implementation_fast"},
+                    "repo": str(run_dir),
+                    "lease_id": "lease-1",
+                },
+            )
+            secret = bytes.fromhex("55" * 32)
+            agent_runner.atomic_write_bytes(run_dir / "guardian.key", secret)
+            agent_runner.write_guardian_message(
+                run_dir / "guardian-ready.json",
+                secret,
+                "guardian-ready",
+                {
+                    "guardian_id": "guardian-1",
+                    "guardian_pid": 999,
+                    "guardian_identity": "guardian-created-1",
+                },
+            )
+            registry = mock.Mock()
+            registry.state.return_value = {"quarantine": None}
+            with mock.patch.object(
+                agent_runner,
+                "recovery_registry_for_agent",
+                return_value=registry,
+            ), mock.patch.object(
+                agent_runner,
+                "process_record_state",
+                return_value="stopped",
+            ):
+                with self.assertRaisesRegex(agent_runner.RunnerError, "quarantined"):
+                    agent_runner.audit_guardian_health(run_dir)
+
+            registry.quarantine_containment_loss.assert_called_once_with(
+                "lease-1",
+                "guardian-process-stopped",
+            )
+
+    def test_containment_gate_rejects_tamper_before_worker_auth(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            secret = bytes.fromhex("22" * 32)
+            agent_runner.atomic_write_bytes(run_dir / "guardian.key", secret)
+            message = agent_runner.sign_guardian_message(
+                secret,
+                "containment-bound",
+                {"worker_pid": 123, "worker_identity": "worker-1"},
+            )
+            message["payload"]["worker_identity"] = "tampered"
+            agent_runner.atomic_write_json(run_dir / "containment-bound.json", message)
+
+            with self.assertRaisesRegex(agent_runner.RunnerError, "authentication"):
+                agent_runner.await_worker_containment_gate(
+                    run_dir,
+                    expected_pid=123,
+                    expected_identity="worker-1",
+                    timeout=0.1,
+                )
+
+    def test_linux_cgroup_events_require_exact_populated_zero(self) -> None:
+        self.assertEqual(
+            agent_runner.parse_linux_cgroup_events("populated 0\nfrozen 0\n"),
+            {"populated": 0, "frozen": 0},
+        )
+        with self.assertRaisesRegex(agent_runner.RunnerError, "populated"):
+            agent_runner.parse_linux_cgroup_events("frozen 0\n")
+        with self.assertRaisesRegex(agent_runner.RunnerError, "malformed"):
+            agent_runner.parse_linux_cgroup_events("populated maybe\n")
+
+    def test_linux_cgroup_provider_is_fail_closed_without_verified_delegation(self) -> None:
+        with mock.patch.object(agent_runner.sys, "platform", "linux"), mock.patch.dict(
+            agent_runner.os.environ,
+            {},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(agent_runner.RunnerError, "explicitly verified"):
+                agent_runner.create_linux_cgroup("guardian-1")
+
+    def test_linux_cgroup_membership_and_zero_proof_use_control_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            cgroup = Path(temp)
+            (cgroup / "cgroup.procs").write_text("", encoding="ascii")
+            (cgroup / "cgroup.events").write_text("populated 1\nfrozen 0\n", encoding="ascii")
+
+            (cgroup / "cgroup.procs").write_text("123\n", encoding="ascii", newline="\n")
+            self.assertEqual(agent_runner.query_linux_cgroup_members(cgroup), {123})
+            self.assertTrue(agent_runner.query_linux_cgroup_populated(cgroup))
+            (cgroup / "cgroup.events").write_text("populated 0\nfrozen 0\n", encoding="ascii")
+            self.assertFalse(agent_runner.query_linux_cgroup_populated(cgroup))
+
+    def test_linux_worker_is_creation_bound_to_cgroup_before_exec(self) -> None:
+        guardian_source = inspect.getsource(agent_runner.guardian_run)
+        spawn_source = inspect.getsource(agent_runner.spawn_linux_worker_creation_bound)
+        clone_source = inspect.getsource(agent_runner._clone3_process_into_cgroup)
+
+        self.assertIn("spawn_linux_worker_creation_bound(", guardian_source)
+        self.assertNotIn("attach_linux_process_to_cgroup", inspect.getsource(agent_runner))
+        self.assertNotIn('(cgroup / "cgroup.procs").write_text', inspect.getsource(agent_runner))
+        self.assertIn("_clone3_process_into_cgroup", spawn_source)
+        self.assertIn("_CLONE_INTO_CGROUP", clone_source)
+
+    def test_linux_anti_migration_receipt_requires_kernel_observed_boundary(self) -> None:
+        receipt = {
+            "guardian_id": "guardian-1",
+            "worker_pid": 123,
+            "worker_identity": "worker-1",
+            "cgroup_namespace": "cgroup:[2]",
+            "mount_namespace": "mnt:[2]",
+            "self_cgroup": "/",
+            "cgroup_mount_count": 1,
+            "cgroup_mounts_read_only": True,
+            "cgroup_write_denied": True,
+            "no_cgroup_control_fds": True,
+            "unprivileged_user_namespaces_disabled": True,
+            "capabilities_zero": True,
+            "no_new_privs": True,
+        }
+        expected = {
+            "guardian_id": "guardian-1",
+            "worker_pid": 123,
+            "worker_identity": "worker-1",
+            "guardian_cgroup_namespace": "cgroup:[1]",
+            "guardian_mount_namespace": "mnt:[1]",
+        }
+
+        agent_runner.validate_linux_anti_migration_receipt(receipt, **expected)
+
+        for field in [
+            "cgroup_mounts_read_only",
+            "cgroup_write_denied",
+            "no_cgroup_control_fds",
+            "unprivileged_user_namespaces_disabled",
+            "capabilities_zero",
+            "no_new_privs",
+        ]:
+            with self.subTest(field=field):
+                altered = dict(receipt, **{field: False})
+                with self.assertRaisesRegex(agent_runner.RunnerError, field):
+                    agent_runner.validate_linux_anti_migration_receipt(altered, **expected)
+
+        with self.assertRaisesRegex(agent_runner.RunnerError, "private cgroup and mount"):
+            agent_runner.validate_linux_anti_migration_receipt(
+                dict(receipt, cgroup_namespace="cgroup:[1]"),
+                **expected,
+            )
+        with self.assertRaisesRegex(agent_runner.RunnerError, "guardian or worker binding"):
+            agent_runner.validate_linux_anti_migration_receipt(
+                dict(receipt, worker_pid=456),
+                **expected,
+            )
+
+    def test_linux_anti_migration_rejects_delegation_marker_as_proof(self) -> None:
+        with self.assertRaisesRegex(agent_runner.RunnerError, "kernel proof"):
+            agent_runner.validate_linux_anti_migration_receipt(
+                {
+                    "guardian_id": "guardian-1",
+                    "worker_pid": 123,
+                    "worker_identity": "worker-1",
+                    "delegation": "verified-no-migration",
+                },
+                guardian_id="guardian-1",
+                worker_pid=123,
+                worker_identity="worker-1",
+                guardian_cgroup_namespace="cgroup:[1]",
+                guardian_mount_namespace="mnt:[1]",
+            )
+
+    def test_linux_mount_path_decoder_handles_mountinfo_octal_escapes(self) -> None:
+        self.assertEqual(
+            agent_runner._decode_linux_mount_path("/sys/fs/cgroup/team\\040one"),
+            "/sys/fs/cgroup/team one",
+        )
+
+    @unittest.skipUnless(
+        sys.platform == "linux" and os.environ.get("OPENBUILD_LINUX_ANTI_MIGRATION_TEST") == "1",
+        "requires the publication-gate Linux cgroup v2 delegation fixture",
+    )
+    def test_linux_descendant_cannot_migrate_to_parent_or_sibling_cgroup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "tests@example.invalid"], cwd=repo, check=True
+            )
+            subprocess.run(["git", "config", "user.name", "Tests"], cwd=repo, check=True)
+            (repo / "allowed.txt").write_text("seed\n", encoding="utf-8", newline="\n")
+            subprocess.run(["git", "add", "allowed.txt"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "--quiet", "-m", "baseline"], cwd=repo, check=True)
+            state_base = root / "localappdata"
+            guardian_id = f"escape-fixture-{os.getpid()}"
+            with mock.patch.dict(os.environ, {"LOCALAPPDATA": str(state_base)}):
+                owner = agent_runner.RecoveryRegistry(repo)
+                preflight = owner.prepare_source_checkpoint(
+                    source_id="guardian-fixture-source",
+                    source_lease_id="guardian-fixture-lease",
+                    source_milestone="fixture",
+                    target_milestone="fixture-recovery",
+                    allowed_paths=["allowed.txt"],
+                    specification_revision="R-029",
+                )
+                owner.reserve_normal(
+                    "guardian-fixture-lease",
+                    allowed_set_digest=preflight["allowed_set_digest"],
+                    recovery_capable=True,
+                    source_state_id=preflight["source_state_id"],
+                    run_id="run",
+                    prompt_sha256="a" * 64,
+                    containment_plan=_containment_plan(guardian_id=guardian_id),
+                )
+                owner.bind_reserved_source_snapshot("guardian-fixture-lease", preflight)
+                owner.claim_contained_launch("guardian-fixture-lease", "contained-token")
+            run_dir = root / "run"
+            agent_runner.ensure_private_run_dir(run_dir)
+            secret = bytes.fromhex("66" * 32)
+            agent_runner.atomic_write_bytes(run_dir / "guardian.key", secret)
+            cgroup = agent_runner.create_linux_cgroup(guardian_id)
+            sibling = cgroup.parent / f"openbuild-sibling-{guardian_id}"
+            sibling.mkdir(mode=0o700)
+            output = run_dir / "escape-result.json"
+            creation_output = run_dir / "creation-bound-result.json"
+            targets = {
+                "parent": str(cgroup.parent / "cgroup.procs"),
+                "sibling": str(sibling / "cgroup.procs"),
+            }
+            worker_script = "\n".join(
+                [
+                    "import importlib.util, json, os, subprocess, sys",
+                    "from pathlib import Path",
+                    "self_cgroup = Path('/proc/self/cgroup').read_text(encoding='ascii')",
+                    "descendant = subprocess.run([sys.executable, '-c', \"from pathlib import Path; print(Path('/proc/self/cgroup').read_text(encoding='ascii'))\"], check=True, capture_output=True, text=True)",
+                    "Path(os.environ['CREATION_OUTPUT']).write_text(json.dumps({'worker': self_cgroup, 'descendant': descendant.stdout}, sort_keys=True), encoding='utf-8')",
+                    f"spec = importlib.util.spec_from_file_location('fixture_runner', {str(RUNNER_PATH)!r})",
+                    "runner = importlib.util.module_from_spec(spec)",
+                    "spec.loader.exec_module(runner)",
+                    "identity = runner.process_identity(os.getpid())",
+                    "runner.establish_linux_anti_migration_boundary(Path(os.environ['RUN_DIR']), identity)",
+                    f"attempt = \"import json,os,sys; sys.path.insert(0, {str(ROOT)!r}); \" + "
+                    "          \"from scripts.test_agent_runner import _attempt_linux_cgroup_migration; \" + "
+                    "          \"print(json.dumps(_attempt_linux_cgroup_migration(json.loads(os.environ['TARGETS'])), sort_keys=True))\"",
+                    "completed = subprocess.run([sys.executable, '-c', attempt], check=True, capture_output=True, text=True)",
+                    "Path(os.environ['OUTPUT']).write_text(completed.stdout, encoding='utf-8')",
+                ]
+            )
+            environment = dict(os.environ)
+            environment.update(
+                {
+                    "RUN_DIR": str(run_dir),
+                    "OUTPUT": str(output),
+                    "CREATION_OUTPUT": str(creation_output),
+                    "TARGETS": json.dumps(targets),
+                }
+            )
+            fixture_log = run_dir / "creation-bound-fixture.log"
+            with fixture_log.open("ab", buffering=0) as output_handle:
+                cgroup_fd = os.open(
+                    cgroup,
+                    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+                )
+                stdin_fd = os.open(
+                    os.devnull,
+                    os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
+                )
+                try:
+                    worker = agent_runner._clone3_process_into_cgroup(
+                        cgroup_fd,
+                        argv=[sys.executable, "-c", worker_script],
+                        environment=environment,
+                        stdin_fd=stdin_fd,
+                        output_fd=output_handle.fileno(),
+                    )
+                finally:
+                    os.close(stdin_fd)
+                    os.close(cgroup_fd)
+            try:
+                worker_identity = agent_runner.process_identity_from_popen(worker)
+                self.assertIsNotNone(worker_identity)
+                agent_runner.write_guardian_message(
+                    run_dir / "linux-anti-migration-request.json",
+                    secret,
+                    "linux-anti-migration-request",
+                    {
+                        "guardian_id": guardian_id,
+                        "worker_pid": worker.pid,
+                        "worker_identity": worker_identity,
+                        "cgroup_path": str(cgroup),
+                    },
+                )
+                returncode = worker.wait(timeout=30.0)
+                fixture_log_text = fixture_log.read_text(encoding="utf-8", errors="replace")
+                self.assertEqual(returncode, 0, fixture_log_text)
+                creation = json.loads(creation_output.read_text(encoding="utf-8"))
+                self.assertEqual(creation["worker"], creation["descendant"])
+                self.assertIn(f"/{cgroup.name}", creation["worker"])
+                receipt = agent_runner.read_guardian_message(
+                    run_dir / "linux-anti-migration-ready.json",
+                    secret,
+                    "linux-anti-migration-ready",
+                )
+                agent_runner.validate_linux_anti_migration_receipt(
+                    receipt,
+                    guardian_id=guardian_id,
+                    worker_pid=worker.pid,
+                    worker_identity=worker_identity,
+                    guardian_cgroup_namespace=os.readlink("/proc/self/ns/cgroup"),
+                    guardian_mount_namespace=os.readlink("/proc/self/ns/mnt"),
+                )
+                self.assertEqual(json.loads(output.read_text(encoding="utf-8")), {
+                    "parent": True,
+                    "sibling": True,
+                })
+                self.assertFalse(agent_runner.query_linux_cgroup_populated(cgroup))
+            finally:
+                if worker.poll() is None:
+                    agent_runner.terminate_guardian_provider("linux-cgroup-v2", cgroup)
+                    worker.wait(timeout=5.0)
+                if cgroup.is_dir() and not agent_runner.query_linux_cgroup_populated(cgroup):
+                    agent_runner.close_linux_cgroup(cgroup)
+                sibling.rmdir()
+
+    @unittest.skipUnless(os.name == "nt", "native Windows Job Object containment")
+    def test_windows_guardian_job_contains_and_kills_descendants_on_close(self) -> None:
+        job = agent_runner.create_windows_kill_job(bind_current=False)
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import subprocess,sys,time; "
+                    "subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); "
+                    "time.sleep(30)"
+                ),
+            ],
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        try:
+            agent_runner.assign_windows_process_to_job(job, process)
+            deadline = agent_runner.time.monotonic() + 5.0
+            active = 0
+            while agent_runner.time.monotonic() < deadline:
+                active = agent_runner.query_windows_job_active_processes(job)
+                if active >= 2:
+                    break
+                agent_runner.time.sleep(0.05)
+            self.assertGreaterEqual(active, 2)
+        finally:
+            agent_runner.close_windows_job(job)
+        process.wait(timeout=5.0)
+        self.assertIsNotNone(process.returncode)
+
+    @unittest.skipUnless(os.name == "nt", "native Windows guardian lifecycle")
+    def test_windows_suspended_worker_cannot_run_before_job_assignment(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            marker = Path(temp) / "worker-ran.txt"
+            job = agent_runner.create_windows_kill_job(bind_current=False)
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; import sys; Path(sys.argv[1]).write_text('ran')",
+                    str(marker),
+                ],
+                creationflags=(
+                    subprocess.CREATE_NEW_PROCESS_GROUP
+                    | subprocess.CREATE_NO_WINDOW
+                    | agent_runner._WINDOWS_CREATE_SUSPENDED
+                ),
+            )
+            try:
+                agent_runner.time.sleep(0.2)
+                self.assertFalse(marker.exists())
+                agent_runner.assign_windows_process_to_job(job, process)
+                agent_runner.verify_windows_process_in_job(job, process)
+                agent_runner.resume_windows_suspended_process(process)
+                process.wait(timeout=5.0)
+                self.assertEqual(process.returncode, 0)
+                self.assertEqual(marker.read_text(encoding="utf-8"), "ran")
+            finally:
+                agent_runner.close_windows_job(job)
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=5.0)
+
+    @unittest.skipUnless(os.name == "nt", "native Windows guardian lifecycle")
+    def test_windows_guardian_stays_outside_job_until_authenticated_close(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "tests@example.invalid"], cwd=repo, check=True
+            )
+            subprocess.run(["git", "config", "user.name", "Tests"], cwd=repo, check=True)
+            allowed = repo / "allowed.txt"
+            allowed.write_text("seed\n", encoding="utf-8", newline="\n")
+            subprocess.run(["git", "add", "allowed.txt"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "--quiet", "-m", "baseline"], cwd=repo, check=True)
+            state_base = root / "local-app-data"
+            owner = agent_runner.RecoveryRegistry(
+                repo,
+                state_root=state_base / "openbuild" / "recovery",
+            )
+            owner.initialize()
+            preflight = owner.prepare_source_checkpoint(
+                source_id="guardian-fixture",
+                source_lease_id="guardian-fixture-lease",
+                source_milestone="M2c-source",
+                target_milestone="M2c-recovery",
+                allowed_paths=["allowed.txt"],
+                specification_revision="R-029",
+            )
+            owner.reserve_normal(
+                "guardian-fixture-lease",
+                allowed_set_digest=preflight["allowed_set_digest"],
+                recovery_capable=True,
+                source_state_id=preflight["source_state_id"],
+                run_id="run",
+                prompt_sha256="a" * 64,
+                containment_plan=_containment_plan(guardian_id="guardian-fixture"),
+            )
+            owner.bind_reserved_source_snapshot("guardian-fixture-lease", preflight)
+            owner.claim_contained_launch("guardian-fixture-lease", "contained-token")
+            run_dir = Path(temp) / "run"
+            agent_runner.ensure_private_run_dir(run_dir)
+            prompt = run_dir / "prompt.md"
+            prompt_bytes = b"bounded task\n"
+            prompt.write_bytes(prompt_bytes)
+            agent_runner.atomic_write_json(
+                run_dir / "request.json",
+                {
+                    "profile": {
+                        "name": "openbuild_implementation_fast",
+                        "description": "fixture",
+                        "model": "fixture-model",
+                        "reasoning_effort": "medium",
+                        "sandbox": "workspace-write",
+                        "developer_instructions": "bounded",
+                    },
+                    "profile_source": "profile.toml",
+                    "agent_name": "openbuild_implementation_fast",
+                    "lease_id": "guardian-fixture-lease",
+                    "prompt_file": str(prompt),
+                    "prompt_sha256": agent_runner.sha256_bytes(prompt_bytes),
+                    "task_name": "guardian_lifecycle",
+                    "codex_home": str(run_dir / "codex-home"),
+                    "repo": str(repo),
+                    "lifecycle_allowed_set_digest": preflight["allowed_set_digest"],
+                    "recovery_preflight": preflight,
+                    "containment_plan": {
+                        "provider_plan_id": "provider-plan",
+                        "ipc_plan_id": "ipc-plan",
+                    },
+                    "command": [str(run_dir / "missing-codex.exe")],
+                    "activation_timeout": 10.0,
+                },
+            )
+            secret = bytes.fromhex("33" * 32)
+            guardian_id = "guardian-fixture"
+            agent_runner.atomic_write_bytes(run_dir / "guardian.key", secret)
+            agent_runner.write_guardian_message(
+                run_dir / "guardian-request.json",
+                secret,
+                "guardian-request",
+                {
+                    "guardian_id": guardian_id,
+                    "provider_plan_id": "provider-plan",
+                    "ipc_plan_id": "ipc-plan",
+                    "agent_name": "openbuild_implementation_fast",
+                    "repo": str(repo),
+                    "lease_id": "guardian-fixture-lease",
+                    "allowed_set_digest": preflight["allowed_set_digest"],
+                    "boundary_timeout": 10.0,
+                },
+            )
+            with mock.patch.dict(os.environ, {"LOCALAPPDATA": str(state_base)}):
+                with agent_runner.open_private_binary(run_dir / "runner.log", append=True) as log:
+                    guardian = agent_runner.spawn_containment_guardian(run_dir, log)
+            try:
+                disposition, ready = agent_runner.await_guardian_launch(
+                    run_dir,
+                    secret,
+                    guardian,
+                    timeout=10.0,
+                )
+                self.assertEqual(disposition, "ready")
+                self.assertEqual(ready["provider"], "windows-job")
+                self.assertEqual(ready["guardian_id"], guardian_id)
+                self.assertEqual(ready["provider_plan_id"], "provider-plan")
+                self.assertEqual(ready["ipc_plan_id"], "ipc-plan")
+                self.assertIsNone(guardian.poll())
+                worker = ready["worker"]
+                precommit_disposition, precommit = agent_runner.await_guardian_precommit(
+                    run_dir,
+                    secret,
+                    guardian,
+                    ready,
+                    timeout=10.0,
+                )
+                self.assertEqual(precommit_disposition, "ready")
+                agent_runner.write_guardian_message(
+                    run_dir / "containment-bound.json",
+                    secret,
+                    "containment-bound",
+                    {
+                        "guardian_id": guardian_id,
+                        "worker_pid": worker["pid"],
+                        "worker_identity": worker["identity"],
+                        "allowed_set_digest": preflight["allowed_set_digest"],
+                        "provider_plan_id": "provider-plan",
+                        "ipc_plan_id": "ipc-plan",
+                        "precommit_nonce": precommit["precommit_nonce"],
+                    },
+                )
+                zero = agent_runner.await_guardian_record(
+                    run_dir,
+                    secret,
+                    "guardian-zero.json",
+                    "guardian-zero",
+                    timeout=10.0,
+                )
+                self.assertFalse(zero["populated"])
+                self.assertIsNone(guardian.poll())
+                agent_runner.write_guardian_message(
+                    run_dir / "guardian-close.json",
+                    secret,
+                    "guardian-close",
+                    {"guardian_id": guardian_id},
+                )
+                closed = agent_runner.await_guardian_record(
+                    run_dir,
+                    secret,
+                    "guardian-closed.json",
+                    "guardian-closed",
+                    timeout=10.0,
+                )
+                self.assertTrue(closed["closed"])
+                guardian.wait(timeout=5.0)
+                self.assertEqual(guardian.returncode, 0)
+            finally:
+                if guardian.poll() is None:
+                    guardian.terminate()
+                    guardian.wait(timeout=5.0)
+
+    def test_terminal_receipt_drives_contained_outbox_close_and_release(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "tests@example.invalid"], cwd=repo, check=True
+            )
+            subprocess.run(["git", "config", "user.name", "Tests"], cwd=repo, check=True)
+            allowed = repo / "allowed.txt"
+            allowed.write_text("seed\n", encoding="utf-8", newline="\n")
+            subprocess.run(["git", "add", "allowed.txt"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "--quiet", "-m", "baseline"], cwd=repo, check=True)
+
+            owner = agent_runner.RecoveryRegistry(repo, state_root=root / "state")
+            owner.initialize()
+            preflight = owner.prepare_source_checkpoint(
+                source_id="source-1",
+                source_lease_id="lease-1",
+                source_milestone="M2c-source",
+                target_milestone="M2c-recovery",
+                allowed_paths=["allowed.txt"],
+                specification_revision="R-029",
+            )
+            owner.reserve_normal(
+                "lease-1",
+                allowed_set_digest=preflight["allowed_set_digest"],
+                recovery_capable=True,
+                source_state_id=preflight["source_state_id"],
+                run_id="run",
+                prompt_sha256="a" * 64,
+                containment_plan=_containment_plan(),
+            )
+            owner.bind_reserved_source_snapshot("lease-1", preflight)
+            owner.claim_contained_launch("lease-1", "contained-token")
+            owner.bind_process_unactivated(
+                "lease-1",
+                allowed_set_digest=preflight["allowed_set_digest"],
+                provider_receipt=_provider_receipt(),
+                process_receipt=_process_receipt(),
+            )
+            owner.commit_activation("lease-1", preflight["allowed_set_digest"])
+
+            run_dir = root / "run"
+            agent_runner.ensure_private_run_dir(run_dir)
+            agent_runner.atomic_write_json(
+                run_dir / "request.json",
+                {
+                    "profile": {"name": "openbuild_implementation_fast"},
+                    "repo": str(repo),
+                    "lease_id": "lease-1",
+                    "recovery_preflight": preflight,
+                },
+            )
+            secret = bytes.fromhex("44" * 32)
+            agent_runner.atomic_write_bytes(run_dir / "guardian.key", secret)
+            agent_runner.write_guardian_message(
+                run_dir / "guardian-zero.json",
+                secret,
+                "guardian-zero",
+                _zero_proof(),
+            )
+            agent_runner.write_guardian_message(
+                run_dir / "guardian-closed.json",
+                secret,
+                "guardian-closed",
+                _guardian_close(),
+            )
+            receipt = {
+                "run_dir": str(run_dir),
+                "status": "completed",
+                "agent_name": "openbuild_implementation_fast",
+                "task_name": "M2c-source",
+                "lease_id": "lease-1",
+                "activated": True,
+                "configured_model": "fixture",
+                "model_reasoning_effort": "medium",
+                "sandbox": "workspace-write",
+                "worker_pid": 123,
+                "worker_process_identity": "worker-1",
+                "codex_pid": 456,
+                "codex_process_identity": "codex-1",
+                "terminal_event": "turn.completed",
+                "codex_exit_evidence": "valid",
+                "codex_exit_code": 0,
+                "result_evidence": "valid",
+                "process_tree_stopped": True,
+            }
+            with mock.patch.object(
+                agent_runner,
+                "recovery_registry_for_agent",
+                return_value=owner,
+            ):
+                agent_runner.reconcile_implementation_registry(run_dir, receipt)
+                pending = owner.state()
+                self.assertEqual(pending["lease"]["state"], "stopped-terminal")
+                self.assertIsNone(pending["outbox"])
+                self.assertFalse((run_dir / "guardian-close.json").exists())
+                with self.assertRaisesRegex(agent_runner.RunnerError, "verification digest"):
+                    agent_runner.reconcile_implementation_registry(
+                        run_dir,
+                        receipt,
+                        success_verification_digest="not-a-digest",
+                    )
+                agent_runner.reconcile_implementation_registry(
+                    run_dir,
+                    receipt,
+                    success_verification_digest="f" * 64,
+                )
+                agent_runner.reconcile_implementation_registry(run_dir, receipt)
+
+            state = owner.state()
+            self.assertIsNone(state["lease"])
+            self.assertIsNone(state["outbox"])
+            self.assertEqual(state["history"][-1]["event"], "contained-terminal-released")
+            self.assertEqual(
+                len((run_dir / "implementation-handoffs.jsonl").read_text(encoding="utf-8").splitlines()),
+                1,
+            )
+            self.assertTrue((run_dir / "guardian-close.json").is_file())
+
+    def test_semantic_rejection_closes_transport_without_handoff(self) -> None:
+        for disposition in ("blocked", "needs-escalation"):
+            with self.subTest(disposition=disposition), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                repo = root / "repo"
+                repo.mkdir()
+                subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+                subprocess.run(
+                    ["git", "config", "user.email", "tests@example.invalid"],
+                    cwd=repo,
+                    check=True,
+                )
+                subprocess.run(["git", "config", "user.name", "Tests"], cwd=repo, check=True)
+                allowed = repo / "allowed.txt"
+                allowed.write_text("seed\n", encoding="utf-8", newline="\n")
+                subprocess.run(["git", "add", "allowed.txt"], cwd=repo, check=True)
+                subprocess.run(["git", "commit", "--quiet", "-m", "baseline"], cwd=repo, check=True)
+
+                run_dir = root / f"run-{disposition}"
+                owner = agent_runner.RecoveryRegistry(repo, state_root=root / "state")
+                owner.initialize()
+                preflight = owner.prepare_source_checkpoint(
+                    source_id=run_dir.name,
+                    source_lease_id="lease-1",
+                    source_milestone="M2c-source",
+                    target_milestone="M2c-recovery",
+                    allowed_paths=["allowed.txt"],
+                    specification_revision="R-029",
+                )
+                owner.reserve_normal(
+                    "lease-1",
+                    allowed_set_digest=preflight["allowed_set_digest"],
+                    recovery_capable=True,
+                    source_state_id=preflight["source_state_id"],
+                    run_id=run_dir.name,
+                    prompt_sha256="a" * 64,
+                    containment_plan=_containment_plan(),
+                )
+                owner.bind_reserved_source_snapshot("lease-1", preflight)
+                owner.claim_contained_launch("lease-1", "contained-token")
+                owner.bind_process_unactivated(
+                    "lease-1",
+                    allowed_set_digest=preflight["allowed_set_digest"],
+                    provider_receipt=_provider_receipt(),
+                    process_receipt=_process_receipt(),
+                )
+                owner.commit_activation("lease-1", preflight["allowed_set_digest"])
+                if disposition == "blocked":
+                    allowed.write_text("partial edit\n", encoding="utf-8", newline="\n")
+
+                agent_runner.ensure_private_run_dir(run_dir)
+                agent_runner.atomic_write_json(
+                    run_dir / "request.json",
+                    {
+                        "profile": {"name": "openbuild_implementation_fast"},
+                        "repo": str(repo),
+                        "lease_id": "lease-1",
+                        "lifecycle_allowed_set_digest": preflight["allowed_set_digest"],
+                        "recovery_preflight": preflight,
+                    },
+                )
+                secret = bytes.fromhex("55" * 32)
+                agent_runner.atomic_write_bytes(run_dir / "guardian.key", secret)
+                agent_runner.write_guardian_message(
+                    run_dir / "guardian-zero.json",
+                    secret,
+                    "guardian-zero",
+                    _zero_proof(),
+                )
+                agent_runner.write_guardian_message(
+                    run_dir / "guardian-closed.json",
+                    secret,
+                    "guardian-closed",
+                    _guardian_close(),
+                )
+                receipt = {
+                    "run_dir": str(run_dir),
+                    "status": "completed",
+                    "agent_name": "openbuild_implementation_fast",
+                    "task_name": "M2c-source",
+                    "lease_id": "lease-1",
+                    "activated": True,
+                    "configured_model": "fixture",
+                    "model_reasoning_effort": "medium",
+                    "sandbox": "workspace-write",
+                    "worker_pid": 123,
+                    "worker_process_identity": "worker-1",
+                    "codex_pid": 456,
+                    "codex_process_identity": "codex-1",
+                    "terminal_event": "turn.completed",
+                    "codex_exit_evidence": "valid",
+                    "codex_exit_code": 0,
+                    "result_evidence": "valid",
+                    "process_tree_stopped": True,
+                }
+                reject_args = Namespace(
+                    run_dir=str(run_dir),
+                    disposition=disposition,
+                    evidence_digest="e" * 64,
+                )
+                finalize_args = Namespace(
+                    run_dir=str(run_dir),
+                    primary_signal_digest="f" * 64,
+                )
+                with mock.patch.object(
+                    agent_runner, "audit_guardian_health"
+                ), mock.patch.object(
+                    agent_runner, "public_receipt", return_value=receipt
+                ), mock.patch.object(
+                    agent_runner, "recovery_registry_for_agent", return_value=owner
+                ), redirect_stdout(io.StringIO()):
+                    if disposition == "needs-escalation":
+                        with mock.patch.object(
+                            owner,
+                            "invalidate_source_checkpoint",
+                            side_effect=agent_runner.RecoveryStateError(
+                                "injected checkpoint invalidation failure"
+                            ),
+                        ):
+                            with self.assertRaisesRegex(
+                                agent_runner.RunnerError,
+                                "checkpoint invalidation failure",
+                            ):
+                                agent_runner.reject_semantic_handoff_run(reject_args)
+                        pending = owner.state()
+                        self.assertIsNotNone(pending["lease"])
+                        self.assertFalse((run_dir / "guardian-close.json").exists())
+                        semantic = agent_runner.read_json(
+                            run_dir / "semantic-rejection.json"
+                        )
+                        self.assertEqual(
+                            semantic["checkpoint_invalidation"], "pending"
+                        )
+                        original_atomic_write_json = agent_runner.atomic_write_json
+
+                        def fail_checkpoint_artifact(path, value):
+                            if path.name == "recovery-checkpoint.json":
+                                raise OSError("injected checkpoint artifact failure")
+                            return original_atomic_write_json(path, value)
+
+                        with mock.patch.object(
+                            agent_runner,
+                            "atomic_write_json",
+                            side_effect=fail_checkpoint_artifact,
+                        ):
+                            with self.assertRaisesRegex(
+                                agent_runner.RunnerError,
+                                "checkpoint artifact failure",
+                            ):
+                                agent_runner.reject_semantic_handoff_run(reject_args)
+                        artifact_pending = owner.state()
+                        self.assertIsNotNone(artifact_pending["lease"])
+                        self.assertEqual(
+                            artifact_pending["lease"]["semantic_disposition"][
+                                "checkpoint_invalidation"
+                            ],
+                            "completed",
+                        )
+                        self.assertFalse((run_dir / "guardian-close.json").exists())
+                        semantic = agent_runner.read_json(
+                            run_dir / "semantic-rejection.json"
+                        )
+                        self.assertEqual(
+                            semantic["checkpoint_invalidation"], "pending"
+                        )
+                    self.assertEqual(agent_runner.reject_semantic_handoff_run(reject_args), 0)
+                    with self.assertRaisesRegex(agent_runner.RunnerError, "already consumed"):
+                        agent_runner.reject_semantic_handoff_run(reject_args)
+                    with self.assertRaisesRegex(agent_runner.RunnerError, "forbidden"):
+                        agent_runner.finalize_success_run(finalize_args)
+
+                state = owner.state()
+                self.assertIsNone(state["lease"])
+                self.assertIsNone(state["outbox"])
+                self.assertFalse((run_dir / "implementation-handoffs.jsonl").exists())
+                self.assertTrue((run_dir / "guardian-close.json").is_file())
+                semantic = agent_runner.read_json(run_dir / "semantic-rejection.json")
+                self.assertEqual(semantic["disposition"], disposition)
+                checkpoint = agent_runner.read_json(run_dir / "recovery-checkpoint.json")
+                if disposition == "blocked":
+                    self.assertEqual(checkpoint["disposition"], "recovery-eligible")
+                else:
+                    self.assertEqual(checkpoint["disposition"], "recovery-ineligible")
+                    self.assertIn("semantic-needs-escalation", checkpoint["reasons"])
+                    with self.assertRaisesRegex(
+                        agent_runner.RecoveryStateError, "semantic escalation"
+                    ):
+                        owner.revalidate_checkpoint(checkpoint)
+
+    def test_implementation_start_commits_containment_before_worker_release(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "tests@example.invalid"], cwd=repo, check=True
+            )
+            subprocess.run(["git", "config", "user.name", "Tests"], cwd=repo, check=True)
+            allowed = repo / "allowed.txt"
+            allowed.write_text("seed\n", encoding="utf-8", newline="\n")
+            subprocess.run(["git", "add", "allowed.txt"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "--quiet", "-m", "baseline"], cwd=repo, check=True)
+            prompt = root / "prompt.md"
+            prompt.write_text("bounded task\n", encoding="utf-8", newline="\n")
+            run_dir = root / "run"
+            owner = agent_runner.RecoveryRegistry(repo, state_root=root / "state")
+            profile = self.profile()._replace(
+                name="openbuild_implementation_fast",
+                sandbox="workspace-write",
+            )
+            guardian = mock.Mock()
+            guardian.poll.return_value = None
+            worker = {
+                "pid": 123,
+                "identity": "worker-created-1",
+                "process_group_id": 123,
+                "started_at": agent_runner.utc_now(),
+            }
+            ready = {
+                "guardian_id": "guardian-private",
+                "guardian_pid": 999,
+                "guardian_identity": "guardian-created-1",
+                "provider": "windows-job",
+                "policy": "kill-on-close-no-breakaway",
+                "active_processes": 1,
+                "worker": worker,
+            }
+            public = {
+                "status": "running",
+                "activated": False,
+                "codex_process_identity": "codex-created-1",
+            }
+
+            def guardian_launch(*_args: object, **_kwargs: object):
+                agent_runner.atomic_write_json(
+                    run_dir / "codex.json",
+                    {"pid": 456, "identity": "codex-created-1", "process_group_id": 456},
+                )
+                plan = agent_runner.read_json(run_dir / "request.json")["containment_plan"]
+                ready["guardian_id"] = plan["guardian_id"]
+                ready["provider_plan_id"] = plan["provider_plan_id"]
+                ready["ipc_plan_id"] = plan["ipc_plan_id"]
+                return "ready", ready
+
+            def guardian_precommit(*_args: object, **_kwargs: object):
+                provider_receipt = _provider_receipt(
+                    guardian_id=ready["guardian_id"],
+                    provider_plan_id=ready["provider_plan_id"],
+                    ipc_plan_id=ready["ipc_plan_id"],
+                    worker=worker,
+                    precommit_nonce="precommit-1",
+                )
+                precommit = provider_receipt["precommit"]
+                allowed_set_digest = owner.state()["lease"]["allowed_set_digest"]
+                bound = owner.bind_process_unactivated(
+                    "lease-1",
+                    allowed_set_digest=allowed_set_digest,
+                    provider_receipt=provider_receipt,
+                    process_receipt=worker,
+                )
+                return "ready", {**precommit, "registry_digest": bound["digest"]}
+
+            args = Namespace(
+                repo=str(repo),
+                prompt_file=str(prompt),
+                agent="openbuild_implementation_fast",
+                lease_id="lease-1",
+                allowed_file=["allowed.txt"],
+                specification_revision="R-029",
+                recovery_target_milestone="M2c-recovery",
+                run_dir=str(run_dir),
+                task_name="M2c-source",
+                activation_timeout=300.0,
+                codex_bin="codex",
+            )
+            with mock.patch.object(agent_runner, "validate_subscription_configuration"), mock.patch.object(
+                agent_runner, "load_agent_profile", return_value=profile
+            ), mock.patch.object(agent_runner, "resolve_codex_binary", return_value="codex"), mock.patch.object(
+                agent_runner, "require_chatgpt_login", return_value="chatgpt"
+            ), mock.patch.object(agent_runner, "is_git_repository", return_value=True), mock.patch.object(
+                agent_runner, "recovery_registry_for_agent", return_value=owner
+            ), mock.patch.object(
+                agent_runner, "spawn_containment_guardian", return_value=guardian
+            ), mock.patch.object(
+                agent_runner, "await_guardian_launch", side_effect=guardian_launch
+            ), mock.patch.object(
+                agent_runner,
+                "await_guardian_precommit",
+                side_effect=guardian_precommit,
+            ), mock.patch.object(
+                agent_runner, "public_receipt", return_value=public
+            ), redirect_stdout(io.StringIO()):
+                self.assertEqual(agent_runner.start_run(args), 0)
+
+            state = owner.state()
+            self.assertEqual(state["lease"]["state"], "process-bound-unactivated")
+            self.assertTrue(state["lease"]["recovery_capable"])
+            secret = (run_dir / "guardian.key").read_bytes()
+            boundary = agent_runner.read_guardian_message(
+                run_dir / "containment-bound.json",
+                secret,
+                "containment-bound",
+            )
+            self.assertEqual(boundary["worker_identity"], "worker-created-1")
+            self.assertEqual(
+                boundary["allowed_set_digest"],
+                state["lease"]["allowed_set_digest"],
+            )
+            request_plan = agent_runner.read_json(run_dir / "request.json")["containment_plan"]
+            self.assertEqual(boundary["provider_plan_id"], request_plan["provider_plan_id"])
+            self.assertEqual(boundary["ipc_plan_id"], request_plan["ipc_plan_id"])
+            self.assertEqual(
+                state["lease"]["provider_receipt"]["provider_plan_id"],
+                request_plan["provider_plan_id"],
+            )
+            self.assertEqual(
+                state["lease"]["provider_receipt"]["ipc_plan_id"],
+                request_plan["ipc_plan_id"],
+            )
+
+    def test_preboundary_provider_failure_uses_one_nonrecovery_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "tests@example.invalid"], cwd=repo, check=True
+            )
+            subprocess.run(["git", "config", "user.name", "Tests"], cwd=repo, check=True)
+            allowed = repo / "allowed.txt"
+            allowed.write_text("seed\n", encoding="utf-8", newline="\n")
+            subprocess.run(["git", "add", "allowed.txt"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "--quiet", "-m", "baseline"], cwd=repo, check=True)
+            prompt = root / "prompt.md"
+            prompt.write_text("bounded task\n", encoding="utf-8", newline="\n")
+            run_dir = root / "run"
+            owner = agent_runner.RecoveryRegistry(repo, state_root=root / "state")
+            profile = self.profile()._replace(
+                name="openbuild_implementation_fast",
+                sandbox="workspace-write",
+            )
+            guardian = mock.Mock()
+            guardian.poll.return_value = 1
+            ready = {
+                "guardian_id": "guardian-private",
+                "guardian_pid": 999,
+                "guardian_identity": "guardian-created-1",
+                "provider": "windows-job",
+                "worker": {
+                    "pid": 123,
+                    "identity": "worker-created-1",
+                    "process_group_id": 123,
+                },
+            }
+            fallback_process = mock.Mock(pid=321)
+            fallback_process.poll.return_value = None
+            public = {
+                "status": "running",
+                "activated": False,
+                "codex_process_identity": "codex-created-1",
+            }
+
+            def spawn_fallback(*_args: object, **_kwargs: object):
+                agent_runner.atomic_write_json(
+                    run_dir / "codex.json",
+                    {"pid": 456, "identity": "codex-created-1", "process_group_id": 456},
+                )
+                return fallback_process
+
+            args = Namespace(
+                repo=str(repo),
+                prompt_file=str(prompt),
+                agent="openbuild_implementation_fast",
+                lease_id="lease-1",
+                allowed_file=["allowed.txt"],
+                specification_revision="R-029",
+                recovery_target_milestone="M2c-recovery",
+                run_dir=str(run_dir),
+                task_name="M2c-source",
+                activation_timeout=300.0,
+                codex_bin="codex",
+            )
+            with mock.patch.object(agent_runner, "validate_subscription_configuration"), mock.patch.object(
+                agent_runner, "load_agent_profile", return_value=profile
+            ), mock.patch.object(agent_runner, "resolve_codex_binary", return_value="codex"), mock.patch.object(
+                agent_runner, "require_chatgpt_login", return_value="chatgpt"
+            ), mock.patch.object(agent_runner, "is_git_repository", return_value=True), mock.patch.object(
+                agent_runner, "recovery_registry_for_agent", return_value=owner
+            ), mock.patch.object(
+                agent_runner, "spawn_containment_guardian", return_value=guardian
+            ), mock.patch.object(
+                agent_runner,
+                "await_guardian_launch",
+                return_value=("ready", ready),
+            ), mock.patch.object(
+                agent_runner,
+                "await_guardian_precommit",
+                return_value=(
+                    "failed",
+                    {
+                        "guardian_id": "guardian-private",
+                        "boundary_committed": False,
+                        "tree_empty": True,
+                        "no_user_code": True,
+                        "failure": "ready-then-provider-loss",
+                        "cleanup_error": None,
+                    },
+                ),
+            ), mock.patch.object(
+                agent_runner, "_spawn_worker_process", side_effect=spawn_fallback
+            ) as spawn, mock.patch.object(
+                agent_runner, "process_identity_from_popen", return_value="fallback-created-1"
+            ), mock.patch.object(
+                agent_runner, "public_receipt", return_value=public
+            ), redirect_stdout(io.StringIO()):
+                self.assertEqual(agent_runner.start_run(args), 0)
+
+            self.assertEqual(spawn.call_count, 1)
+            state = owner.state()
+            self.assertEqual(state["lease"]["lease_kind"], "normal-fallback")
+            self.assertFalse(state["lease"]["recovery_capable"])
+            self.assertEqual(state["lease"]["state"], "ordinary-process-bound-unactivated")
+
+    def test_ambiguous_fallback_faults_are_quarantined_before_release(self) -> None:
+        for fault_stage in (
+            "before-popen",
+            "after-popen",
+            "before-bind",
+            "after-visible-bind",
+            "mismatched-bind-receipt",
+        ):
+            with self.subTest(fault_stage=fault_stage), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                repo = root / "repo"
+                repo.mkdir()
+                subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+                subprocess.run(
+                    ["git", "config", "user.email", "tests@example.invalid"],
+                    cwd=repo,
+                    check=True,
+                )
+                subprocess.run(["git", "config", "user.name", "Tests"], cwd=repo, check=True)
+                allowed = repo / "allowed.txt"
+                allowed.write_text("seed\n", encoding="utf-8", newline="\n")
+                subprocess.run(["git", "add", "allowed.txt"], cwd=repo, check=True)
+                subprocess.run(["git", "commit", "--quiet", "-m", "baseline"], cwd=repo, check=True)
+                prompt = root / "prompt.md"
+                prompt.write_text("bounded task\n", encoding="utf-8", newline="\n")
+                run_dir = root / "run"
+                owner = agent_runner.RecoveryRegistry(repo, state_root=root / "state")
+                profile = self.profile()._replace(
+                    name="openbuild_implementation_fast",
+                    sandbox="workspace-write",
+                )
+                guardian = mock.Mock()
+                guardian.poll.return_value = 1
+                ready = {
+                    "guardian_id": "guardian-private",
+                    "guardian_pid": 999,
+                    "guardian_identity": "guardian-created-1",
+                    "provider": "windows-job",
+                    "worker": {
+                        "pid": 123,
+                        "identity": "worker-created-1",
+                        "process_group_id": 123,
+                    },
+                }
+                fallback_process = mock.Mock(pid=321)
+                fallback_process.poll.return_value = None
+
+                def spawn_fallback(*_args: object, **_kwargs: object):
+                    if fault_stage == "before-popen":
+                        raise OSError("fallback Popen failed")
+                    return fallback_process
+
+                def bind_fallback(*args: object, **kwargs: object):
+                    if fault_stage == "before-bind":
+                        raise agent_runner.RecoveryStateError("injected failure before fallback bind")
+                    if fault_stage == "mismatched-bind-receipt":
+                        return {
+                            "digest": "d" * 64,
+                            "lease": {
+                                "lease_id": "lease-1",
+                                "lease_kind": "normal-fallback",
+                                "recovery_capable": False,
+                                "state": "ordinary-process-bound-unactivated",
+                                "process_receipt": {"pid": 999, "identity": "wrong"},
+                            },
+                        }
+                    result = agent_runner.RecoveryRegistry.bind_fallback_process_unactivated(
+                        owner, *args, **kwargs
+                    )
+                    if fault_stage == "after-visible-bind":
+                        raise agent_runner.RecoveryStateError(
+                            "injected failure after visible fallback bind"
+                        )
+                    return result
+
+                args = Namespace(
+                    repo=str(repo),
+                    prompt_file=str(prompt),
+                    agent="openbuild_implementation_fast",
+                    lease_id="lease-1",
+                    allowed_file=["allowed.txt"],
+                    specification_revision="R-029",
+                    recovery_target_milestone="M2c-recovery",
+                    run_dir=str(run_dir),
+                    task_name="M2c-source",
+                    activation_timeout=300.0,
+                    codex_bin="codex",
+                )
+                identity = None if fault_stage == "after-popen" else "fallback-created-1"
+                with mock.patch.object(
+                    agent_runner, "validate_subscription_configuration"
+                ), mock.patch.object(
+                    agent_runner, "load_agent_profile", return_value=profile
+                ), mock.patch.object(
+                    agent_runner, "resolve_codex_binary", return_value="codex"
+                ), mock.patch.object(
+                    agent_runner, "require_chatgpt_login", return_value="chatgpt"
+                ), mock.patch.object(
+                    agent_runner, "is_git_repository", return_value=True
+                ), mock.patch.object(
+                    agent_runner, "recovery_registry_for_agent", return_value=owner
+                ), mock.patch.object(
+                    agent_runner, "spawn_containment_guardian", return_value=guardian
+                ), mock.patch.object(
+                    agent_runner, "await_guardian_launch", return_value=("ready", ready)
+                ), mock.patch.object(
+                    agent_runner,
+                    "await_guardian_precommit",
+                    return_value=(
+                        "failed",
+                        {
+                            "guardian_id": "guardian-private",
+                            "boundary_committed": False,
+                            "tree_empty": True,
+                            "no_user_code": True,
+                            "failure": "ready-then-provider-loss",
+                            "cleanup_error": None,
+                        },
+                    ),
+                ), mock.patch.object(
+                    agent_runner, "_spawn_worker_process", side_effect=spawn_fallback
+                ), mock.patch.object(
+                    agent_runner, "process_identity_from_popen", return_value=identity
+                ), mock.patch.object(
+                    owner, "bind_fallback_process_unactivated", side_effect=bind_fallback
+                ), mock.patch.object(
+                    agent_runner, "terminate_spawned_process"
+                ), mock.patch.object(
+                    agent_runner, "process_record_state", return_value="stopped"
+                ), redirect_stdout(io.StringIO()):
+                    with self.assertRaises(agent_runner.RunnerError):
+                        agent_runner.start_run(args)
+
+                state = json.loads(owner.path.read_text(encoding="utf-8"))
+                self.assertEqual(state["quarantine"], "fallback-launch-ambiguous")
+                expected_state = (
+                    "ordinary-process-bound-unactivated"
+                    if fault_stage == "after-visible-bind"
+                    else "ordinary-fallback-claimed"
+                )
+                self.assertEqual(state["lease"]["state"], expected_state)
+                if fault_stage == "after-visible-bind":
+                    self.assertEqual(state["lease"]["process_receipt"]["pid"], 321)
+                else:
+                    self.assertNotIn("process_receipt", state["lease"])
+
+    def test_reserved_recovery_target_uses_its_consumed_plan_without_normal_reserve(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "tests@example.invalid"], cwd=repo, check=True
+            )
+            subprocess.run(["git", "config", "user.name", "Tests"], cwd=repo, check=True)
+            allowed = repo / "allowed.txt"
+            allowed.write_text("seed\n", encoding="utf-8", newline="\n")
+            subprocess.run(["git", "add", "allowed.txt"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "--quiet", "-m", "baseline"], cwd=repo, check=True)
+            prompt = root / "prompt.md"
+            prompt_bytes = b"bounded recovery task\n"
+            prompt.write_bytes(prompt_bytes)
+            run_dir = root / "target-run"
+            owner = agent_runner.RecoveryRegistry(repo, state_root=root / "state")
+            owner.initialize()
+            checkpoint = owner.capture_checkpoint(
+                source_id="source-1",
+                source_lease_id="source-lease",
+                source_receipt_digest="a" * 64,
+                source_milestone="M2c-source",
+                target_milestone="M2c-recovery",
+                allowed_paths=["allowed.txt"],
+                specification_revision="R-029",
+            )
+            checkpoint = owner.revalidate_checkpoint(checkpoint)
+            grant = owner.grant_authorization(
+                checkpoint,
+                user_action_digest="b" * 64,
+                specification_revision="R-029",
+            )
+            owner.consume_grant_and_reserve(
+                grant_id=grant["grant_id"],
+                checkpoint=checkpoint,
+                target_plan={
+                    "lease_id": "target-lease",
+                    "run_id": run_dir.name,
+                    "prompt_sha256": agent_runner.sha256_bytes(prompt_bytes),
+                    "launch_token": "c" * 64,
+                    "provider_plan_id": "provider-plan",
+                    "ipc_plan_id": "ipc-plan",
+                    "allowed_set_digest": checkpoint["allowed_set_digest"],
+                },
+            )
+            profile = self.profile()._replace(
+                name="openbuild_implementation_fast",
+                sandbox="workspace-write",
+            )
+            guardian = mock.Mock()
+            guardian.poll.return_value = None
+            worker = {
+                "pid": 123,
+                "identity": "worker-created-1",
+                "process_group_id": 123,
+                "started_at": agent_runner.utc_now(),
+            }
+            ready = {
+                "guardian_id": "guardian-private",
+                "guardian_pid": 999,
+                "guardian_identity": "guardian-created-1",
+                "provider": "windows-job",
+                "provider_plan_id": "provider-plan",
+                "ipc_plan_id": "ipc-plan",
+                "policy": "kill-on-close-no-breakaway",
+                "active_processes": 1,
+                "worker": worker,
+            }
+
+            def guardian_launch(*_args: object, **_kwargs: object):
+                agent_runner.atomic_write_json(
+                    run_dir / "codex.json",
+                    {"pid": 456, "identity": "codex-created-1", "process_group_id": 456},
+                )
+                return "ready", ready
+
+            def guardian_precommit(*_args: object, **_kwargs: object):
+                provider_receipt = _provider_receipt(
+                    guardian_id="guardian-private",
+                    provider_plan_id="provider-plan",
+                    ipc_plan_id="ipc-plan",
+                    worker=worker,
+                    precommit_nonce="precommit-2",
+                )
+                precommit = provider_receipt["precommit"]
+                bound = owner.bind_process_unactivated(
+                    "target-lease",
+                    allowed_set_digest=checkpoint["allowed_set_digest"],
+                    provider_receipt=provider_receipt,
+                    process_receipt=worker,
+                )
+                return "ready", {**precommit, "registry_digest": bound["digest"]}
+
+            args = Namespace(
+                repo=str(repo),
+                prompt_file=str(prompt),
+                agent="openbuild_implementation_fast",
+                lease_id="target-lease",
+                allowed_file=["allowed.txt"],
+                specification_revision="R-029",
+                recovery_target_milestone="M2c-recovery-next",
+                run_dir=str(run_dir),
+                task_name="M2c-recovery",
+                activation_timeout=300.0,
+                codex_bin="codex",
+            )
+            public = {
+                "status": "running",
+                "activated": False,
+                "codex_process_identity": "codex-created-1",
+            }
+            with mock.patch.object(agent_runner, "validate_subscription_configuration"), mock.patch.object(
+                agent_runner, "load_agent_profile", return_value=profile
+            ), mock.patch.object(agent_runner, "resolve_codex_binary", return_value="codex"), mock.patch.object(
+                agent_runner, "require_chatgpt_login", return_value="chatgpt"
+            ), mock.patch.object(agent_runner, "is_git_repository", return_value=True), mock.patch.object(
+                agent_runner, "recovery_registry_for_agent", return_value=owner
+            ), mock.patch.object(
+                agent_runner, "spawn_containment_guardian", return_value=guardian
+            ), mock.patch.object(
+                agent_runner, "await_guardian_launch", side_effect=guardian_launch
+            ), mock.patch.object(
+                agent_runner,
+                "await_guardian_precommit",
+                side_effect=guardian_precommit,
+            ), mock.patch.object(
+                agent_runner, "public_receipt", return_value=public
+            ), redirect_stdout(io.StringIO()):
+                self.assertEqual(agent_runner.start_run(args), 0)
+
+            state = owner.state()
+            self.assertEqual(state["lease"]["lease_kind"], "recovery-target")
+            self.assertEqual(state["lease"]["state"], "process-bound-unactivated")
+            request = agent_runner.read_json(run_dir / "request.json")
+            self.assertTrue(request["recovery_target"])
+            self.assertEqual(
+                request["lifecycle_allowed_set_digest"],
+                checkpoint["allowed_set_digest"],
+            )
+            self.assertEqual(
+                request["recovery_parent_checkpoint"]["checkpoint_digest"],
+                checkpoint["checkpoint_digest"],
+            )
+
+    def test_explicit_recovery_authorization_reserves_once_without_exposing_nonce(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "tests@example.invalid"], cwd=repo, check=True
+            )
+            subprocess.run(["git", "config", "user.name", "Tests"], cwd=repo, check=True)
+            (repo / "allowed.txt").write_text("seed\n", encoding="utf-8", newline="\n")
+            subprocess.run(["git", "add", "allowed.txt"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "--quiet", "-m", "baseline"], cwd=repo, check=True)
+            owner = agent_runner.RecoveryRegistry(repo, state_root=root / "state")
+            owner.initialize()
+            checkpoint = owner.capture_checkpoint(
+                source_id="source-1",
+                source_lease_id="source-lease",
+                source_receipt_digest="a" * 64,
+                source_milestone="source",
+                target_milestone="target",
+                allowed_paths=["allowed.txt"],
+                specification_revision="R-029",
+            )
+            checkpoint = owner.revalidate_checkpoint(checkpoint)
+            checkpoint_path = root / "checkpoint.json"
+            agent_runner.atomic_write_json(checkpoint_path, checkpoint)
+            prompt = root / "prompt.md"
+            prompt.write_text("bounded recovery\n", encoding="utf-8", newline="\n")
+            args = Namespace(
+                repo=str(repo),
+                checkpoint_file=str(checkpoint_path),
+                prompt_file=str(prompt),
+                run_dir=str(root / "target-run"),
+                lease_id="target-lease",
+                user_action_digest="b" * 64,
+                specification_revision="R-029",
+            )
+            first_output = io.StringIO()
+            with mock.patch.object(
+                agent_runner,
+                "recovery_registry_for_agent",
+                return_value=owner,
+            ), redirect_stdout(first_output):
+                self.assertEqual(agent_runner.authorize_recovery_run(args), 0)
+            first = json.loads(first_output.getvalue())
+
+            self.assertEqual(first["event"], "recovery-target-reserved")
+            self.assertEqual(first["authorization"]["event"], "recovery-authorization-granted")
+            self.assertNotIn("authorization_nonce", first_output.getvalue())
+            self.assertEqual(owner.state()["lease"]["lease_kind"], "recovery-target")
+            second_output = io.StringIO()
+            with mock.patch.object(
+                agent_runner,
+                "recovery_registry_for_agent",
+                return_value=owner,
+            ), redirect_stdout(second_output):
+                self.assertEqual(agent_runner.authorize_recovery_run(args), 0)
+            self.assertTrue(json.loads(second_output.getvalue())["reconstructed"])
+            self.assertEqual(len(owner.state()["consumed_grants"]), 1)
+
+    def test_recovery_target_terminal_success_verifies_parent_and_releases(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "tests@example.invalid"], cwd=repo, check=True
+            )
+            subprocess.run(["git", "config", "user.name", "Tests"], cwd=repo, check=True)
+            (repo / "allowed.txt").write_text("seed\n", encoding="utf-8", newline="\n")
+            subprocess.run(["git", "add", "allowed.txt"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "--quiet", "-m", "baseline"], cwd=repo, check=True)
+            owner = agent_runner.RecoveryRegistry(repo, state_root=root / "state")
+            owner.initialize()
+            parent = owner.capture_checkpoint(
+                source_id="source-1",
+                source_lease_id="source-lease",
+                source_receipt_digest="a" * 64,
+                source_milestone="source",
+                target_milestone="target",
+                allowed_paths=["allowed.txt"],
+                specification_revision="R-029",
+            )
+            parent = owner.revalidate_checkpoint(parent)
+            grant = owner.grant_authorization(
+                parent,
+                user_action_digest="b" * 64,
+                specification_revision="R-029",
+            )
+            owner.consume_grant_and_reserve(
+                grant_id=grant["grant_id"],
+                checkpoint=parent,
+                target_plan={
+                    "lease_id": "target-lease",
+                    "run_id": "run",
+                    "prompt_sha256": "c" * 64,
+                    "launch_token": "d" * 64,
+                    "provider_plan_id": "provider-plan",
+                    "ipc_plan_id": "ipc-plan",
+                    "allowed_set_digest": parent["allowed_set_digest"],
+                },
+            )
+            current = owner.prepare_source_checkpoint(
+                source_id="target-source",
+                source_lease_id="target-lease",
+                source_milestone="target",
+                target_milestone="target-next",
+                allowed_paths=["allowed.txt"],
+                specification_revision="R-029",
+            )
+            owner.claim_launch("target-lease", "d" * 64)
+            owner.bind_process_unactivated(
+                "target-lease",
+                allowed_set_digest=parent["allowed_set_digest"],
+                provider_receipt=_provider_receipt(),
+                process_receipt=_process_receipt(),
+            )
+            owner.commit_activation("target-lease", parent["allowed_set_digest"])
+            run_dir = root / "run"
+            agent_runner.ensure_private_run_dir(run_dir)
+            agent_runner.atomic_write_json(
+                run_dir / "request.json",
+                {
+                    "profile": {"name": "openbuild_implementation_fast"},
+                    "repo": str(repo),
+                    "lease_id": "target-lease",
+                    "recovery_preflight": current,
+                    "recovery_parent_checkpoint": parent,
+                    "lifecycle_allowed_set_digest": parent["allowed_set_digest"],
+                },
+            )
+            secret = bytes.fromhex("66" * 32)
+            agent_runner.atomic_write_bytes(run_dir / "guardian.key", secret)
+            for filename, kind, payload in [
+                (
+                    "guardian-zero.json",
+                    "guardian-zero",
+                    _zero_proof(),
+                ),
+                (
+                    "guardian-closed.json",
+                    "guardian-closed",
+                    _guardian_close(),
+                ),
+            ]:
+                agent_runner.write_guardian_message(run_dir / filename, secret, kind, payload)
+            receipt = {
+                "run_dir": str(run_dir),
+                "status": "completed",
+                "agent_name": "openbuild_implementation_fast",
+                "task_name": "target",
+                "lease_id": "target-lease",
+                "activated": True,
+                "configured_model": "fixture",
+                "model_reasoning_effort": "medium",
+                "sandbox": "workspace-write",
+                "worker_pid": 123,
+                "worker_process_identity": "worker-1",
+                "codex_pid": 456,
+                "codex_process_identity": "codex-1",
+                "terminal_event": "turn.completed",
+                "codex_exit_evidence": "valid",
+                "codex_exit_code": 0,
+                "result_evidence": "valid",
+                "process_tree_stopped": True,
+            }
+            with mock.patch.object(
+                agent_runner,
+                "recovery_registry_for_agent",
+                return_value=owner,
+            ):
+                agent_runner.reconcile_implementation_registry(
+                    run_dir,
+                    receipt,
+                    success_verification_digest="f" * 64,
+                )
+
+            self.assertIsNone(owner.state()["lease"])
+            self.assertTrue((run_dir / "recovery-parent-verification.json").is_file())
+            self.assertTrue((run_dir / "implementation-handoffs.jsonl").is_file())
 
     def test_prompt_is_not_sent_before_explicit_activation(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1665,6 +3584,43 @@ class RunEvidenceTests(unittest.TestCase):
 
             self.assertEqual(result, 1)
             self.assertEqual(agent_runner.read_json(run_dir / "exit.json"), original_exit)
+
+    def test_wait_can_report_a_soft_observation_timeout_without_cli_failure(self) -> None:
+        receipt = {
+            "schema_version": 1,
+            "status": "running",
+            "worker_pid": 111,
+            "codex_pid": 222,
+        }
+        for soft_timeout_exit_zero, expected_exit in ((False, 3), (True, 0)):
+            with self.subTest(soft_timeout_exit_zero=soft_timeout_exit_zero):
+                args = Namespace(
+                    run_dir=".",
+                    timeout=0.0,
+                    poll_seconds=1.0,
+                    soft_timeout_exit_zero=soft_timeout_exit_zero,
+                )
+                output = io.StringIO()
+                with mock.patch.object(agent_runner, "audit_guardian_health"), mock.patch.object(
+                    agent_runner, "public_receipt", return_value=receipt.copy()
+                ), redirect_stdout(output):
+                    result = agent_runner.wait_run(args)
+
+                self.assertEqual(result, expected_exit)
+                observed = json.loads(output.getvalue())
+                self.assertEqual(observed["status"], "timeout")
+                self.assertEqual(observed["worker_pid"], 111)
+                self.assertEqual(observed["codex_pid"], 222)
+
+    def test_wait_soft_timeout_flag_is_explicit_and_off_by_default(self) -> None:
+        parser = agent_runner.build_parser()
+        default = parser.parse_args(["wait", "--run-dir", "."])
+        soft = parser.parse_args(
+            ["wait", "--run-dir", ".", "--soft-timeout-exit-zero"]
+        )
+
+        self.assertFalse(default.soft_timeout_exit_zero)
+        self.assertTrue(soft.soft_timeout_exit_zero)
 
     @unittest.skipIf(os.name == "nt", "POSIX permission contract")
     def test_run_artifacts_are_private_on_posix(self) -> None:

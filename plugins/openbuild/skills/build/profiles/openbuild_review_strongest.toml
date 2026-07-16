@@ -1,9 +1,11 @@
 name = "openbuild_review_strongest"
-description = "Read-only review for critical or escalated OpenBuild changes."
+description = "Read-only review for explicitly confirmed critical OpenBuild changes."
 model = "gpt-5.6-sol"
 model_reasoning_effort = "xhigh"
+routing_rung = "sol-xhigh"
+routing_tuple_confirmed = true
 sandbox_mode = "read-only"
 developer_instructions = """
-Review only the supplied specification, full diff, validation, lifecycle, security, and acceptance evidence at maximum rigor.
-Return evidence-backed findings and a verdict. Do not edit, commit, push, publish, decide product behavior, or spawn another agent.
+Review only an explicitly confirmed critical change and its supplied specification, full diff, validation, lifecycle, security, and acceptance evidence at maximum rigor. This Sol/xhigh profile is critical-only and is never the next rung for a non-critical review.
+Return evidence-backed findings and a verdict. Escalate only on configured concrete evidence; score alone and timeout, auth, quota, sandbox, or transport failures never escalate. Do not edit, commit, push, publish, decide product behavior, or spawn another agent.
 """

@@ -25,7 +25,7 @@ Use a fresh context with conversation-history inheritance disabled when the runt
 
 Resolve `review.<risk>` through `<build-skill-root>/scripts/model_map.py` and select its first exact returned reviewer. Start it through `<build-skill-root>/scripts/agent_runner.py`; `codex-exec-explicit-model` pins the resolved model, reasoning effort, and read-only sandbox in a separate process. Record the map source/hash and route step, the unactivated `running` receipt, call `activate`, record `review-agent-activated`, and wait for the stopped terminal receipt. Accept a review only after that receipt records `turn.completed`, creation-bound exit code zero, valid result evidence, and a semantically completed review. Transport failure blocks the exact review/release gate; create no replacement reviewer.
 
-Run the resolved route strictly sequentially, moving at most one configured step at a time and stopping at `max_steps`. The packaged defaults start fast for low, balanced for medium/high, and strongest for critical. After every dispatch, record this complete lifecycle before using the result:
+Run the resolved route strictly sequentially, moving at most one configured step at a time and stopping at both `max_steps` and the risk-specific ceiling. The packaged defaults start Luna/medium for low, Terra/medium for medium/high, and Sol/xhigh for critical; low and non-critical routes raise reasoning on the same model before changing models. The non-critical route ends at Sol/high; Sol/xhigh is critical-only and is never a post-review escalation target for low, medium, or high risk. After every dispatch, record this complete lifecycle before using the result:
 
 ```text
 Review routing receipt (first `running`, then terminal):
@@ -33,10 +33,10 @@ routing_map_source: <project | user | packaged path>
 routing_map_sha256: <effective map hash>
 route_step: <1..max_steps>
 diff_revision: <commit/status/hash identity>
-risk_floor: <fast|balanced|strong|strongest>
+risk_floor: <exact first configured profile/model-effort step>
 requested_agent: <exact openbuild_review_* profile>
 task_name: <independent descriptive task label>
-requested_tier: <fast|balanced|strong|strongest>
+requested_tier: <exact configured profile/model-effort step>
 dispatch_method: <codex-exec-explicit-model|unavailable>
 configured_model: <profile model or unknown>
 model_reasoning_effort: <profile effort or unknown>
@@ -78,7 +78,7 @@ Ask for this structure:
 ```text
 Review mode: independent | self-review-limited
 Routing mode: codex-exec-explicit-model | diagnostic-root-review
-Requested tier: fast | balanced | strong | strongest | unknown
+Requested tier: fast | luna_xhigh | balanced | strong | sol_high | strongest | unknown
 Observed model/tier: <verified value or unknown>
 Diff identity: <commit range, status, or artifact hashes>
 Verdict: ACCEPT | REVISE | ESCALATE | BLOCKED
@@ -148,11 +148,11 @@ After adjudication and remediation, move one configured route step when a trigge
 - relevant validation fails or cannot be interpreted;
 - a high or critical finding remains unresolved;
 - the diff changed materially after the previous review;
-- a material dispute remains after a strong review and needs a final strongest adjudication.
+- a material dispute remains and the next configured reviewer is still within the classified risk ceiling.
 
 Escalation means a stronger confirmed model/profile or supported reasoning effort. Changing only the prompt, role label, or thread is not a model escalation; report it accurately.
 
-Dispatch the next exact reviewer only after the current reviewer returns its structured result, the root adjudicates every finding, confirmed changes are remediated through the owning TDD/minimality workflow, and affected validation is green. If no configured trigger remains, stop; do not spend another route step merely to seek a higher score. If a trigger remains, advance exactly one available configured step and give the next reviewer source artifacts rather than the previous conclusion.
+Dispatch the next exact reviewer only after the current reviewer returns its structured result, the root adjudicates every finding, confirmed changes are remediated through the owning TDD/minimality workflow, and affected validation is green. If no configured trigger remains, stop; do not spend another route step merely to seek a higher score. If a trigger remains, advance exactly one available configured step within the classified risk ceiling and give the next reviewer source artifacts rather than the previous conclusion. An unresolved low-, medium-, or high-risk Sol/high review exhausts the route and leaves the task incomplete; it never promotes the diff to the critical-only Sol/xhigh profile.
 
 ## Loop bounds
 
@@ -161,9 +161,9 @@ Dispatch the next exact reviewer only after the current reviewer returns its str
 - Follow the resolved ordered route without skipping a configured intermediate step.
 - Fix confirmed issues before moving up unless the stronger tier is needed to resolve a conflict.
 - Never downgrade below the task's complexity floor.
-- Stop escalating when `max_steps` or the distinct configured profiles are exhausted.
+- Stop escalating when `max_steps`, the distinct configured profiles, or the risk-specific ceiling is exhausted; non-critical review stops at Sol/high and strongest remains critical-only.
 - If exact review is unavailable, a root self-review may diagnose gaps but cannot satisfy the review or release gate without a new explicit user override.
-- If the strongest available review still returns blocking issues, keep the milestone or task incomplete and record the blocker.
+- If the highest risk-eligible review still returns blocking issues, keep the milestone or task incomplete and record the blocker.
 
 ## Acceptance gate
 

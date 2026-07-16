@@ -5,10 +5,13 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import errno
 import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import signal
 import shutil
 import stat
@@ -26,6 +29,13 @@ if sys.version_info < (3, 11):
 
 import tomllib
 
+# The control plane is intentionally private and separate from the public
+# receipt schema.  The script is also loaded directly by focused unit tests.
+_SCRIPT_DIRECTORY = str(Path(__file__).resolve().parent)
+if _SCRIPT_DIRECTORY not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIRECTORY)
+from recovery_state import RecoveryRegistry, RecoveryStateError
+
 
 SUPPORTED_AGENTS = {
     "openbuild_search_separate",
@@ -33,12 +43,16 @@ SUPPORTED_AGENTS = {
     "openbuild_search_strong",
     "openbuild_search_strongest",
     "openbuild_implementation_fast",
+    "openbuild_implementation_luna_xhigh",
     "openbuild_implementation_balanced",
     "openbuild_implementation_strong",
+    "openbuild_implementation_sol_high",
     "openbuild_implementation_strongest",
     "openbuild_review_fast",
+    "openbuild_review_luna_xhigh",
     "openbuild_review_balanced",
     "openbuild_review_strong",
+    "openbuild_review_sol_high",
     "openbuild_review_strongest",
 }
 AGENT_NAME = re.compile(r"^[a-z0-9_]+$")
@@ -65,6 +79,45 @@ SEARCH_DEVELOPER_INSTRUCTIONS = (
 ACTIVE_WORKER_CHILD: Any | None = None
 ACTIVE_WINDOWS_JOB: Any | None = None
 ACTIVE_WORKER_FINALIZING = False
+_WINDOWS_CREATE_SUSPENDED = 0x00000004
+_CLONE_PIDFD = 0x00001000
+_CLONE_INTO_CGROUP = 0x200000000
+_SYS_CLONE3 = 435
+ROUTING_RUNG_BY_AGENT = {
+    **{
+        f"openbuild_{role}_fast": "luna-medium"
+        for role in ("implementation", "review")
+    },
+    **{
+        f"openbuild_{role}_luna_xhigh": "luna-xhigh"
+        for role in ("implementation", "review")
+    },
+    **{
+        f"openbuild_{role}_balanced": "terra-medium"
+        for role in ("implementation", "review")
+    },
+    **{
+        f"openbuild_{role}_strong": "terra-xhigh"
+        for role in ("implementation", "review")
+    },
+    **{
+        f"openbuild_{role}_sol_high": "sol-high"
+        for role in ("implementation", "review")
+    },
+    **{
+        f"openbuild_{role}_strongest": "sol-xhigh"
+        for role in ("implementation", "review")
+    },
+}
+KNOWN_MODEL_EFFORT_RUNG = {
+    ("gpt-5.6-luna", "medium"): "luna-medium",
+    ("gpt-5.6-luna", "xhigh"): "luna-xhigh",
+    ("gpt-5.6-terra", "medium"): "terra-medium",
+    ("gpt-5.6-terra", "xhigh"): "terra-xhigh",
+    ("gpt-5.6-sol", "high"): "sol-high",
+    ("gpt-5.6-sol", "xhigh"): "sol-xhigh",
+}
+KNOWN_ROUTING_MODELS = {model for model, _ in KNOWN_MODEL_EFFORT_RUNG}
 
 
 class RunnerError(RuntimeError):
@@ -91,6 +144,116 @@ def sha256_bytes(value: bytes) -> str:
 
 def sha256_file(path: Path) -> str:
     return sha256_bytes(path.read_bytes())
+
+
+def _canonical_json_bytes(value: Mapping[str, Any]) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def sign_guardian_message(
+    secret: bytes,
+    kind: str,
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    if len(secret) != 32 or not kind:
+        raise RunnerError("guardian IPC requires a 32-byte secret and non-empty kind")
+    body = {"kind": kind, "payload": dict(payload)}
+    body["authentication"] = hmac.new(
+        secret,
+        b"openbuild-guardian-ipc-v1\0" + _canonical_json_bytes(body),
+        hashlib.sha256,
+    ).hexdigest()
+    return body
+
+
+def verify_guardian_message(
+    message: Mapping[str, Any],
+    secret: bytes,
+    expected_kind: str,
+) -> dict[str, Any]:
+    if message.get("kind") != expected_kind:
+        raise RunnerError("guardian IPC message kind does not match the expected transition")
+    payload = message.get("payload")
+    authentication = message.get("authentication")
+    if not isinstance(payload, dict) or not isinstance(authentication, str):
+        raise RunnerError("guardian IPC authentication is missing")
+    expected = sign_guardian_message(secret, expected_kind, payload)["authentication"]
+    if not hmac.compare_digest(authentication, expected):
+        raise RunnerError("guardian IPC authentication failed")
+    return dict(payload)
+
+
+def write_guardian_message(
+    path: Path,
+    secret: bytes,
+    kind: str,
+    payload: Mapping[str, Any],
+) -> None:
+    atomic_write_json(path, sign_guardian_message(secret, kind, payload))
+
+
+def read_guardian_message(
+    path: Path,
+    secret: bytes,
+    expected_kind: str,
+    *,
+    publish_retry_timeout: float = 1.0,
+) -> dict[str, Any]:
+    """Read an atomically published IPC message across transient Windows sharing locks."""
+    deadline = time.monotonic() + publish_retry_timeout
+    while True:
+        try:
+            return verify_guardian_message(read_json(path), secret, expected_kind)
+        except OSError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.02)
+
+
+def await_worker_containment_gate(
+    run_dir: Path,
+    *,
+    expected_pid: int,
+    expected_identity: str,
+    timeout: float,
+) -> dict[str, Any]:
+    path = run_dir / "containment-bound.json"
+    deadline = time.monotonic() + timeout
+    while not path.is_file():
+        if time.monotonic() >= deadline:
+            raise RunnerError("authenticated containment gate was not committed before worker startup")
+        time.sleep(0.02)
+    try:
+        secret = (run_dir / "guardian.key").read_bytes()
+    except OSError as exc:
+        raise RunnerError(f"guardian IPC key is unavailable: {exc}") from exc
+    payload = read_guardian_message(path, secret, "containment-bound")
+    if (
+        int(payload.get("worker_pid") or 0) != expected_pid
+        or payload.get("worker_identity") != expected_identity
+    ):
+        raise RunnerError("containment gate does not match the creation-bound worker")
+    return payload
+
+
+def parse_linux_cgroup_events(value: str) -> dict[str, int]:
+    events: dict[str, int] = {}
+    for line in value.splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            raise RunnerError("Linux cgroup.events is malformed")
+        try:
+            events[parts[0]] = int(parts[1])
+        except ValueError as exc:
+            raise RunnerError("Linux cgroup.events is malformed") from exc
+    if "populated" not in events:
+        raise RunnerError("Linux cgroup.events lacks the populated state")
+    return events
 
 
 def atomic_write_json(path: Path, value: Mapping[str, Any]) -> None:
@@ -385,6 +548,41 @@ def validate_lease_id(agent_name: str, lease_id: str | None) -> str | None:
     return None
 
 
+def recovery_registry_for_agent(
+    agent_name: str,
+    repo: Path,
+    *,
+    state_root: Path | None = None,
+) -> RecoveryRegistry | None:
+    """Return the single-writer owner only for write-capable implementation lanes."""
+
+    if not agent_name.startswith("openbuild_implementation_"):
+        return None
+    return RecoveryRegistry(repo, state_root=state_root)
+
+
+def validate_recovery_start_options(
+    agent_name: str,
+    allowed_files: list[str] | None,
+    specification_revision: str | None,
+    recovery_target_milestone: str | None,
+) -> tuple[list[str], str | None, str | None]:
+    allowed = [value.strip() for value in (allowed_files or []) if value.strip()]
+    revision = specification_revision.strip() if isinstance(specification_revision, str) else ""
+    target = recovery_target_milestone.strip() if isinstance(recovery_target_milestone, str) else ""
+    if (allowed or revision or target) and not agent_name.startswith("openbuild_implementation_"):
+        raise RunnerError("recovery preflight options are valid only for implementation agents")
+    if allowed and (not revision or not target):
+        raise RunnerError(
+            "--allowed-file, --specification-revision, and --recovery-target-milestone must be supplied together"
+        )
+    if (revision or target) and not allowed:
+        raise RunnerError(
+            "--allowed-file, --specification-revision, and --recovery-target-milestone must be supplied together"
+        )
+    return allowed, revision or None, target or None
+
+
 def _required_string(data: Mapping[str, Any], field: str, path: Path) -> str:
     value = data.get(field)
     if not isinstance(value, str) or not value.strip():
@@ -403,6 +601,23 @@ def _profile_from_data(data: Mapping[str, Any], path: Path, agent_name: str) -> 
     if any(marker in model for marker in ("<", ">", "\n", "\r")):
         raise RunnerError(f"{path}: model must be a concrete runtime model ID")
     reasoning_effort = _required_string(data, "model_reasoning_effort", path)
+    expected_rung = ROUTING_RUNG_BY_AGENT.get(name)
+    if expected_rung is not None:
+        routing_rung = _required_string(data, "routing_rung", path)
+        if routing_rung != expected_rung:
+            raise RunnerError(
+                f"{path}: {name} requires routing_rung={expected_rung!r}, got {routing_rung!r}"
+            )
+        if data.get("routing_tuple_confirmed") is not True:
+            raise RunnerError(
+                f"{path}: {name} requires routing_tuple_confirmed = true"
+            )
+        known_rung = KNOWN_MODEL_EFFORT_RUNG.get((model, reasoning_effort))
+        if model in KNOWN_ROUTING_MODELS and known_rung != expected_rung:
+            raise RunnerError(
+                f"{path}: known model/effort tuple {model}/{reasoning_effort} does not match "
+                f"routing rung {expected_rung}"
+            )
     sandbox = _required_string(data, "sandbox_mode", path)
     required_sandbox = expected_sandbox(name)
     if sandbox != required_sandbox:
@@ -818,16 +1033,28 @@ def _windows_kernel32() -> Any:
     kernel32.SetInformationJobObject.restype = ctypes.c_int
     kernel32.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     kernel32.AssignProcessToJobObject.restype = ctypes.c_int
+    kernel32.IsProcessInJob.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
+    kernel32.IsProcessInJob.restype = ctypes.c_int
+    kernel32.QueryInformationJobObject.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+    ]
+    kernel32.QueryInformationJobObject.restype = ctypes.c_int
     kernel32.GetCurrentProcess.argtypes = []
     kernel32.GetCurrentProcess.restype = ctypes.c_void_p
     kernel32.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
     kernel32.TerminateProcess.restype = ctypes.c_int
+    kernel32.TerminateJobObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    kernel32.TerminateJobObject.restype = ctypes.c_int
     kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
     kernel32.WaitForSingleObject.restype = ctypes.c_uint32
     return kernel32
 
 
-def create_windows_kill_job() -> Any:
+def create_windows_kill_job(*, bind_current: bool = True) -> Any:
     class BasicLimitInformation(ctypes.Structure):
         _fields_ = [
             ("per_process_user_time_limit", ctypes.c_int64),
@@ -872,11 +1099,435 @@ def create_windows_kill_job() -> Any:
         9,
         ctypes.byref(information),
         ctypes.sizeof(information),
-    ) or not kernel32.AssignProcessToJobObject(handle, kernel32.GetCurrentProcess()):
+    ):
+        error = ctypes.WinError()
+        kernel32.CloseHandle(handle)
+        raise RunnerError(f"cannot configure Windows cleanup Job Object: {error}")
+    if bind_current and not kernel32.AssignProcessToJobObject(handle, kernel32.GetCurrentProcess()):
         error = ctypes.WinError()
         kernel32.CloseHandle(handle)
         raise RunnerError(f"cannot bind worker to Windows cleanup Job Object: {error}")
     return handle
+
+
+def assign_windows_process_to_job(job: Any, process: Any) -> None:
+    kernel32 = _windows_kernel32()
+    process_handle = getattr(process, "_handle", None)
+    opened = False
+    if not process_handle:
+        process_handle = kernel32.OpenProcess(0x001F0FFF, False, int(process.pid))
+        opened = True
+    if not process_handle:
+        raise RunnerError(f"cannot open worker {process.pid} for Job assignment")
+    try:
+        if not kernel32.AssignProcessToJobObject(job, process_handle):
+            raise RunnerError(f"cannot assign worker to Windows cleanup Job Object: {ctypes.WinError()}")
+    finally:
+        if opened:
+            kernel32.CloseHandle(process_handle)
+
+
+def verify_windows_process_in_job(job: Any, process: Any) -> None:
+    kernel32 = _windows_kernel32()
+    process_handle = getattr(process, "_handle", None)
+    if not process_handle:
+        raise RunnerError("suspended Windows worker lacks a creation-bound process handle")
+    assigned = ctypes.c_int()
+    if not kernel32.IsProcessInJob(process_handle, job, ctypes.byref(assigned)):
+        raise RunnerError(f"cannot verify Windows Job assignment: {ctypes.WinError()}")
+    if not assigned.value:
+        raise RunnerError("Windows worker was not retained by its guardian-owned Job")
+
+
+def resume_windows_suspended_process(process: Any) -> None:
+    process_handle = getattr(process, "_handle", None)
+    if not process_handle:
+        raise RunnerError("suspended Windows worker lacks a creation-bound process handle")
+    ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
+    ntdll.NtResumeProcess.argtypes = [ctypes.c_void_p]
+    ntdll.NtResumeProcess.restype = ctypes.c_long
+    status = int(ntdll.NtResumeProcess(process_handle))
+    if status < 0:
+        raise RunnerError(f"cannot resume creation-bound Windows worker: NTSTATUS 0x{status & 0xFFFFFFFF:08x}")
+
+
+def query_windows_job_active_processes(job: Any) -> int:
+    class BasicAccountingInformation(ctypes.Structure):
+        _fields_ = [
+            ("total_user_time", ctypes.c_int64),
+            ("total_kernel_time", ctypes.c_int64),
+            ("this_period_total_user_time", ctypes.c_int64),
+            ("this_period_total_kernel_time", ctypes.c_int64),
+            ("total_page_fault_count", ctypes.c_uint32),
+            ("total_processes", ctypes.c_uint32),
+            ("active_processes", ctypes.c_uint32),
+            ("total_terminated_processes", ctypes.c_uint32),
+        ]
+
+    information = BasicAccountingInformation()
+    if not _windows_kernel32().QueryInformationJobObject(
+        job,
+        1,
+        ctypes.byref(information),
+        ctypes.sizeof(information),
+        None,
+    ):
+        raise RunnerError(f"cannot query Windows cleanup Job Object: {ctypes.WinError()}")
+    return int(information.active_processes)
+
+
+def close_windows_job(job: Any) -> None:
+    if job and not _windows_kernel32().CloseHandle(job):
+        raise RunnerError(f"cannot close Windows cleanup Job Object: {ctypes.WinError()}")
+
+
+def create_linux_cgroup(guardian_id: str) -> Path:
+    if sys.platform != "linux":
+        raise RunnerError("Linux cgroup v2 containment is unavailable on this platform")
+    if os.environ.get("OPENBUILD_CGROUP_V2_DELEGATION") != "verified-no-migration":
+        raise RunnerError("Linux cgroup v2 delegation is not explicitly verified as migration-resistant")
+    root = Path(os.environ.get("OPENBUILD_CGROUP_V2_ROOT", "/sys/fs/cgroup")).resolve()
+    if not (root / "cgroup.controllers").is_file():
+        raise RunnerError("Linux cgroup v2 unified hierarchy is unavailable")
+    cgroup = root / f"openbuild-{guardian_id}"
+    try:
+        cgroup.mkdir(mode=0o700)
+    except OSError as exc:
+        raise RunnerError(f"cannot create Linux cgroup v2 containment: {exc}") from exc
+    if not (cgroup / "cgroup.procs").is_file() or not (cgroup / "cgroup.events").is_file():
+        try:
+            cgroup.rmdir()
+        except OSError:
+            pass
+        raise RunnerError("Linux cgroup v2 provider did not expose required control files")
+    return cgroup
+
+
+def query_linux_cgroup_members(cgroup: Path) -> set[int]:
+    try:
+        return {int(value) for value in (cgroup / "cgroup.procs").read_text(encoding="ascii").split()}
+    except (OSError, ValueError) as exc:
+        raise RunnerError(f"cannot read Linux cgroup v2 membership: {exc}") from exc
+
+
+_LINUX_CLONE_NEWNS = 0x00020000
+_LINUX_CLONE_NEWCGROUP = 0x02000000
+_LINUX_MS_RDONLY = 0x00000001
+_LINUX_MS_REMOUNT = 0x00000020
+_LINUX_MS_BIND = 0x00001000
+_LINUX_MS_REC = 0x00004000
+_LINUX_MS_PRIVATE = 0x00040000
+_LINUX_PR_SET_SECUREBITS = 28
+_LINUX_PR_CAPBSET_DROP = 24
+_LINUX_PR_SET_NO_NEW_PRIVS = 38
+_LINUX_SECUREBITS_LOCKED_NO_ROOT = 0xEF
+_LINUX_CAP_VERSION_3 = 0x20080522
+
+
+def _linux_libc() -> Any:
+    return ctypes.CDLL(None, use_errno=True)
+
+
+def _linux_call(name: str, result: int) -> None:
+    if result != 0:
+        code = ctypes.get_errno()
+        raise RunnerError(f"Linux anti-migration {name} failed: {os.strerror(code)}")
+
+
+def _decode_linux_mount_path(value: str) -> str:
+    return re.sub(r"\\([0-7]{3})", lambda match: chr(int(match.group(1), 8)), value)
+
+
+def linux_cgroup2_mounts() -> list[dict[str, Any]]:
+    try:
+        lines = Path("/proc/self/mountinfo").read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise RunnerError(f"cannot read Linux mount namespace: {exc}") from exc
+    mounts: list[dict[str, Any]] = []
+    for line in lines:
+        if " - " not in line:
+            raise RunnerError("Linux mountinfo is malformed")
+        before, after = line.split(" - ", 1)
+        left = before.split()
+        right = after.split()
+        if len(left) < 6 or len(right) < 3:
+            raise RunnerError("Linux mountinfo is malformed")
+        if right[0] == "cgroup2":
+            mounts.append(
+                {
+                    "root": _decode_linux_mount_path(left[3]),
+                    "mountpoint": _decode_linux_mount_path(left[4]),
+                    "options": set(left[5].split(",")),
+                }
+            )
+    if not mounts:
+        raise RunnerError("Linux anti-migration boundary found no cgroup v2 mount")
+    return mounts
+
+
+def _linux_mount(source: str | None, target: str, flags: int) -> None:
+    libc = _linux_libc()
+    mount = libc.mount
+    mount.argtypes = [
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+        ctypes.c_ulong,
+        ctypes.c_void_p,
+    ]
+    mount.restype = ctypes.c_int
+    _linux_call(
+        f"mount({target})",
+        mount(
+            source.encode("utf-8") if source is not None else None,
+            target.encode("utf-8"),
+            None,
+            flags,
+            None,
+        ),
+    )
+
+
+def _linux_drop_all_capabilities() -> None:
+    class CapabilityHeader(ctypes.Structure):
+        _fields_ = [("version", ctypes.c_uint32), ("pid", ctypes.c_int)]
+
+    class CapabilityData(ctypes.Structure):
+        _fields_ = [
+            ("effective", ctypes.c_uint32),
+            ("permitted", ctypes.c_uint32),
+            ("inheritable", ctypes.c_uint32),
+        ]
+
+    libc = _linux_libc()
+    prctl = libc.prctl
+    prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+    prctl.restype = ctypes.c_int
+    _linux_call(
+        "securebits lock",
+        prctl(_LINUX_PR_SET_SECUREBITS, _LINUX_SECUREBITS_LOCKED_NO_ROOT, 0, 0, 0),
+    )
+    try:
+        cap_last = int(Path("/proc/sys/kernel/cap_last_cap").read_text(encoding="ascii").strip())
+    except (OSError, ValueError) as exc:
+        raise RunnerError(f"cannot read Linux capability ceiling: {exc}") from exc
+    for capability in range(cap_last + 1):
+        result = prctl(_LINUX_PR_CAPBSET_DROP, capability, 0, 0, 0)
+        if result != 0 and ctypes.get_errno() != errno.EINVAL:
+            _linux_call(f"capability bounding drop {capability}", result)
+    header = CapabilityHeader(_LINUX_CAP_VERSION_3, 0)
+    data = (CapabilityData * 2)()
+    capset = libc.capset
+    capset.argtypes = [ctypes.POINTER(CapabilityHeader), ctypes.POINTER(CapabilityData)]
+    capset.restype = ctypes.c_int
+    _linux_call("capability clear", capset(ctypes.byref(header), data))
+    _linux_call("no-new-privileges", prctl(_LINUX_PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0))
+
+
+def _linux_status_security() -> dict[str, Any]:
+    try:
+        lines = Path("/proc/self/status").read_text(encoding="ascii").splitlines()
+    except OSError as exc:
+        raise RunnerError(f"cannot read Linux process security state: {exc}") from exc
+    values: dict[str, str] = {}
+    for line in lines:
+        if line.startswith(("CapInh:", "CapPrm:", "CapEff:", "CapBnd:", "CapAmb:", "NoNewPrivs:")):
+            key, value = line.split(None, 1)
+            values[key.rstrip(":")] = value.strip()
+    if any(
+        values.get(field) != "0000000000000000"
+        for field in ["CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"]
+    ):
+        raise RunnerError("Linux anti-migration worker retained capabilities")
+    if values.get("NoNewPrivs") != "1":
+        raise RunnerError("Linux anti-migration worker lacks no-new-privileges")
+    return {"capabilities_zero": True, "no_new_privs": True}
+
+
+def _linux_unprivileged_user_namespaces_disabled() -> bool:
+    observed = False
+    for path in [
+        Path("/proc/sys/kernel/unprivileged_userns_clone"),
+        Path("/proc/sys/user/max_user_namespaces"),
+    ]:
+        if not path.is_file():
+            continue
+        observed = True
+        try:
+            if path.read_text(encoding="ascii").strip() == "0":
+                return True
+        except OSError as exc:
+            raise RunnerError(f"cannot read Linux user-namespace policy: {exc}") from exc
+    if not observed:
+        raise RunnerError("Linux user-namespace policy is unavailable")
+    return False
+
+
+def _linux_assert_no_cgroup_control_fds(mounts: list[dict[str, Any]]) -> None:
+    mountpoints = [Path(item["mountpoint"]).resolve() for item in mounts]
+    try:
+        descriptors = list(Path("/proc/self/fd").iterdir())
+    except OSError as exc:
+        raise RunnerError(f"cannot enumerate Linux worker descriptors: {exc}") from exc
+    for descriptor in descriptors:
+        try:
+            target = descriptor.resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if any(target == root or target.is_relative_to(root) for root in mountpoints):
+            raise RunnerError("Linux anti-migration worker inherited a cgroup control descriptor")
+
+
+def establish_linux_anti_migration_boundary(run_dir: Path, worker_identity: str) -> dict[str, Any]:
+    """Create kernel-observed cgroup+mount isolation before delegated auth or code."""
+    secret = _guardian_secret(run_dir)
+    request_path = run_dir / "linux-anti-migration-request.json"
+    deadline = time.monotonic() + 20.0
+    while not request_path.is_file():
+        if time.monotonic() >= deadline:
+            raise RunnerError("Linux anti-migration request was not published before worker startup")
+        time.sleep(0.05)
+    request = read_guardian_message(request_path, secret, "linux-anti-migration-request")
+    if (
+        int(request.get("worker_pid") or 0) != os.getpid()
+        or request.get("worker_identity") != worker_identity
+        or not isinstance(request.get("guardian_id"), str)
+    ):
+        raise RunnerError("Linux anti-migration request changed the creation-bound worker")
+    cgroup = Path(str(request.get("cgroup_path") or "")).resolve()
+    if not cgroup.is_dir() or os.getpid() not in query_linux_cgroup_members(cgroup):
+        raise RunnerError("Linux anti-migration worker is not attached to its planned cgroup")
+
+    libc = _linux_libc()
+    unshare = libc.unshare
+    unshare.argtypes = [ctypes.c_int]
+    unshare.restype = ctypes.c_int
+    _linux_call(
+        "cgroup+mount namespace creation",
+        unshare(_LINUX_CLONE_NEWCGROUP | _LINUX_CLONE_NEWNS),
+    )
+    _linux_mount(None, "/", _LINUX_MS_REC | _LINUX_MS_PRIVATE)
+    for mount in linux_cgroup2_mounts():
+        _linux_mount(None, mount["mountpoint"], _LINUX_MS_BIND | _LINUX_MS_REMOUNT | _LINUX_MS_RDONLY)
+    _linux_drop_all_capabilities()
+    if os.geteuid() == 0:
+        raise RunnerError("Linux recovery containment refuses a root-identity worker")
+    if not _linux_unprivileged_user_namespaces_disabled():
+        raise RunnerError("Linux unprivileged user namespaces could reacquire mount capability")
+    security = _linux_status_security()
+    mounts = linux_cgroup2_mounts()
+    if any("ro" not in mount["options"] or "rw" in mount["options"] for mount in mounts):
+        raise RunnerError("Linux cgroup v2 view remained writable after namespace isolation")
+    for mount in mounts:
+        control = Path(mount["mountpoint"]) / "cgroup.procs"
+        try:
+            descriptor = os.open(control, os.O_WRONLY | getattr(os, "O_CLOEXEC", 0))
+        except OSError as exc:
+            if exc.errno not in {errno.EACCES, errno.EPERM, errno.EROFS}:
+                raise RunnerError(f"Linux cgroup write-denial probe failed: {exc}") from exc
+        else:
+            os.close(descriptor)
+            raise RunnerError("Linux cgroup v2 control remained writable inside the worker namespace")
+    _linux_assert_no_cgroup_control_fds(mounts)
+    try:
+        self_cgroup = Path("/proc/self/cgroup").read_text(encoding="ascii").splitlines()
+        cgroup_namespace = os.readlink("/proc/self/ns/cgroup")
+        mount_namespace = os.readlink("/proc/self/ns/mnt")
+    except OSError as exc:
+        raise RunnerError(f"cannot read Linux anti-migration namespace identity: {exc}") from exc
+    if self_cgroup != ["0::/"]:
+        raise RunnerError("Linux cgroup namespace is not rooted at the contained cgroup")
+    receipt = {
+        "guardian_id": request["guardian_id"],
+        "worker_pid": os.getpid(),
+        "worker_identity": worker_identity,
+        "cgroup_namespace": cgroup_namespace,
+        "mount_namespace": mount_namespace,
+        "self_cgroup": "/",
+        "cgroup_mount_count": len(mounts),
+        "cgroup_mounts_read_only": True,
+        "cgroup_write_denied": True,
+        "no_cgroup_control_fds": True,
+        "unprivileged_user_namespaces_disabled": True,
+        **security,
+    }
+    write_guardian_message(
+        run_dir / "linux-anti-migration-ready.json",
+        secret,
+        "linux-anti-migration-ready",
+        receipt,
+    )
+    return receipt
+
+
+def validate_linux_anti_migration_receipt(
+    receipt: Mapping[str, Any],
+    *,
+    guardian_id: str,
+    worker_pid: int,
+    worker_identity: str,
+    guardian_cgroup_namespace: str,
+    guardian_mount_namespace: str,
+) -> None:
+    if (
+        receipt.get("guardian_id") != guardian_id
+        or int(receipt.get("worker_pid") or 0) != worker_pid
+        or receipt.get("worker_identity") != worker_identity
+    ):
+        raise RunnerError("Linux anti-migration receipt changed the guardian or worker binding")
+    for field in [
+        "cgroup_mounts_read_only",
+        "cgroup_write_denied",
+        "no_cgroup_control_fds",
+        "unprivileged_user_namespaces_disabled",
+        "capabilities_zero",
+        "no_new_privs",
+    ]:
+        if receipt.get(field) is not True:
+            raise RunnerError(f"Linux anti-migration receipt lacks kernel proof: {field}")
+    if int(receipt.get("cgroup_mount_count") or 0) < 1 or receipt.get("self_cgroup") != "/":
+        raise RunnerError("Linux anti-migration receipt lacks a rooted read-only cgroup view")
+    if (
+        not isinstance(receipt.get("cgroup_namespace"), str)
+        or not isinstance(receipt.get("mount_namespace"), str)
+        or receipt["cgroup_namespace"] == guardian_cgroup_namespace
+        or receipt["mount_namespace"] == guardian_mount_namespace
+    ):
+        raise RunnerError("Linux worker did not enter private cgroup and mount namespaces")
+
+
+def query_linux_cgroup_populated(cgroup: Path) -> bool:
+    try:
+        events = parse_linux_cgroup_events((cgroup / "cgroup.events").read_text(encoding="ascii"))
+    except OSError as exc:
+        raise RunnerError(f"cannot read Linux cgroup v2 zero proof: {exc}") from exc
+    return events["populated"] != 0
+
+
+def close_linux_cgroup(cgroup: Path) -> None:
+    if query_linux_cgroup_populated(cgroup):
+        raise RunnerError("cannot remove a populated Linux cgroup v2 containment")
+    try:
+        cgroup.rmdir()
+    except OSError as exc:
+        raise RunnerError(f"cannot remove Linux cgroup v2 containment: {exc}") from exc
+
+
+def terminate_guardian_provider(provider: str, handle: Any) -> None:
+    if provider == "windows-job":
+        if not _windows_kernel32().TerminateJobObject(handle, 1):
+            raise RunnerError(f"cannot terminate Windows cleanup Job Object: {ctypes.WinError()}")
+        return
+    if provider == "linux-cgroup-v2":
+        kill_path = handle / "cgroup.kill"
+        if not kill_path.is_file():
+            raise RunnerError("Linux cgroup v2 provider lacks cgroup.kill")
+        try:
+            kill_path.write_text("1\n", encoding="ascii", newline="\n")
+        except OSError as exc:
+            raise RunnerError(f"cannot terminate Linux cgroup v2 containment: {exc}") from exc
+        return
+    raise RunnerError("unknown containment provider")
 
 
 def terminate_windows_process_record(record: Mapping[str, Any], timeout: float) -> None:
@@ -1257,6 +1908,1230 @@ def _background_options() -> dict[str, Any]:
     return {"start_new_session": True}
 
 
+def _guardian_secret(run_dir: Path) -> bytes:
+    try:
+        secret = (run_dir / "guardian.key").read_bytes()
+    except OSError as exc:
+        raise RunnerError(f"guardian IPC key is unavailable: {exc}") from exc
+    if len(secret) != 32:
+        raise RunnerError("guardian IPC key must contain exactly 32 bytes")
+    return secret
+
+
+def _spawn_worker_process(
+    run_dir: Path,
+    runner_log: Any,
+    *,
+    contained: bool,
+    provider: str | None = None,
+    start_suspended: bool = False,
+) -> Any:
+    environment = dict(os.environ)
+    if contained:
+        environment["OPENBUILD_CONTAINED_BY_GUARDIAN"] = "1"
+        if provider is not None:
+            environment["OPENBUILD_CONTAINMENT_PROVIDER"] = provider
+    else:
+        environment.pop("OPENBUILD_CONTAINED_BY_GUARDIAN", None)
+        environment.pop("OPENBUILD_CONTAINMENT_PROVIDER", None)
+    options = _background_options()
+    if start_suspended:
+        if os.name != "nt":
+            raise RunnerError("suspended worker creation is available only on Windows")
+        options["creationflags"] |= _WINDOWS_CREATE_SUSPENDED
+    return subprocess.Popen(
+        [sys.executable, str(Path(__file__).resolve()), "_worker", "--run-dir", str(run_dir)],
+        stdin=subprocess.DEVNULL,
+        stdout=runner_log,
+        stderr=runner_log,
+        close_fds=True,
+        env=environment,
+        **options,
+    )
+
+
+class _LinuxClone3Process:
+    """Small Popen-compatible owner for a direct clone3 child."""
+
+    def __init__(self, pid: int, pidfd: int, args: list[str]) -> None:
+        self.pid = pid
+        self.pidfd = pidfd
+        self.args = args
+        self.returncode: int | None = None
+
+    def _record_status(self, status: int) -> int:
+        if os.WIFEXITED(status):
+            self.returncode = os.WEXITSTATUS(status)
+        elif os.WIFSIGNALED(status):
+            self.returncode = -os.WTERMSIG(status)
+        else:
+            raise RunnerError("clone3 worker produced a non-terminal wait status")
+        if self.pidfd >= 0:
+            try:
+                os.close(self.pidfd)
+            except OSError:
+                pass
+            self.pidfd = -1
+        return self.returncode
+
+    def poll(self) -> int | None:
+        if self.returncode is not None:
+            return self.returncode
+        try:
+            observed_pid, status = os.waitpid(self.pid, os.WNOHANG)
+        except ChildProcessError:
+            return self.returncode
+        if observed_pid == 0:
+            return None
+        return self._record_status(status)
+
+    def wait(self, timeout: float | None = None) -> int:
+        if self.returncode is not None:
+            return self.returncode
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            result = self.poll()
+            if result is not None:
+                return result
+            if deadline is not None and time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(self.args, timeout)
+            time.sleep(0.02)
+
+    def send_signal(self, sig: int) -> None:
+        if self.poll() is not None:
+            return
+        if self.pidfd >= 0 and hasattr(signal, "pidfd_send_signal"):
+            signal.pidfd_send_signal(self.pidfd, sig)
+        else:
+            os.kill(self.pid, sig)
+
+    def terminate(self) -> None:
+        self.send_signal(signal.SIGTERM)
+
+    def kill(self) -> None:
+        self.send_signal(signal.SIGKILL)
+
+
+class _LinuxCloneArgs(ctypes.Structure):
+    _fields_ = [
+        ("flags", ctypes.c_uint64),
+        ("pidfd", ctypes.c_uint64),
+        ("child_tid", ctypes.c_uint64),
+        ("parent_tid", ctypes.c_uint64),
+        ("exit_signal", ctypes.c_uint64),
+        ("stack", ctypes.c_uint64),
+        ("stack_size", ctypes.c_uint64),
+        ("tls", ctypes.c_uint64),
+        ("set_tid", ctypes.c_uint64),
+        ("set_tid_size", ctypes.c_uint64),
+        ("cgroup", ctypes.c_uint64),
+    ]
+
+
+def _clone3_process_into_cgroup(
+    cgroup_fd: int,
+    *,
+    argv: list[str],
+    environment: Mapping[str, str],
+    stdin_fd: int,
+    output_fd: int,
+) -> _LinuxClone3Process:
+    if sys.platform != "linux":
+        raise RunnerError("clone3 cgroup creation is available only on Linux")
+    pidfd = ctypes.c_int(-1)
+    arguments = _LinuxCloneArgs(
+        flags=_CLONE_PIDFD | _CLONE_INTO_CGROUP,
+        pidfd=ctypes.addressof(pidfd),
+        exit_signal=signal.SIGCHLD,
+        cgroup=cgroup_fd,
+    )
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.syscall.restype = ctypes.c_long
+    ctypes.set_errno(0)
+    result = int(
+        libc.syscall(
+            ctypes.c_long(_SYS_CLONE3),
+            ctypes.byref(arguments),
+            ctypes.sizeof(arguments),
+        )
+    )
+    if result == -1:
+        error = ctypes.get_errno()
+        raise RunnerError(
+            f"Linux clone3(CLONE_INTO_CGROUP) failed closed: {os.strerror(error)}"
+        )
+    if result == 0:
+        try:
+            os.setsid()
+            os.dup2(stdin_fd, 0)
+            os.dup2(output_fd, 1)
+            os.dup2(output_fd, 2)
+            try:
+                descriptors = [
+                    int(name)
+                    for name in os.listdir("/proc/self/fd")
+                    if name.isdigit() and int(name) > 2
+                ]
+            except OSError:
+                descriptors = list(range(3, 4096))
+            for descriptor in descriptors:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            os.execve(argv[0], argv, dict(environment))
+        except BaseException as exc:
+            try:
+                os.write(2, f"OpenBuild creation-bound exec failed: {exc}\n".encode("utf-8", "replace"))
+            except BaseException:
+                pass
+            os._exit(127)
+    if result <= 0 or pidfd.value < 0:
+        if result > 0:
+            try:
+                os.kill(result, signal.SIGKILL)
+                os.waitpid(result, 0)
+            except OSError:
+                pass
+        raise RunnerError("clone3 did not return a creation-bound PID and pidfd")
+    return _LinuxClone3Process(result, pidfd.value, argv)
+
+
+def spawn_linux_worker_creation_bound(
+    cgroup: Path,
+    run_dir: Path,
+    runner_log: Any,
+    *,
+    provider: str,
+) -> _LinuxClone3Process:
+    """Create the worker inside its cgroup before any worker exec code can run."""
+    if provider != "linux-cgroup-v2":
+        raise RunnerError("Linux creation-bound spawn requires the cgroup v2 provider")
+    environment = dict(os.environ)
+    environment["OPENBUILD_CONTAINED_BY_GUARDIAN"] = "1"
+    environment["OPENBUILD_CONTAINMENT_PROVIDER"] = provider
+    argv = [sys.executable, str(Path(__file__).resolve()), "_worker", "--run-dir", str(run_dir)]
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+    cgroup_fd = os.open(cgroup, directory_flags)
+    stdin_fd = os.open(os.devnull, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+    try:
+        return _clone3_process_into_cgroup(
+            cgroup_fd,
+            argv=argv,
+            environment=environment,
+            stdin_fd=stdin_fd,
+            output_fd=runner_log.fileno(),
+        )
+    finally:
+        os.close(stdin_fd)
+        os.close(cgroup_fd)
+
+
+def _guardian_provider_populated(provider: str, handle: Any) -> bool:
+    if provider == "windows-job":
+        return query_windows_job_active_processes(handle) != 0
+    if provider == "linux-cgroup-v2":
+        return query_linux_cgroup_populated(handle)
+    raise RunnerError("unknown containment provider")
+
+
+def _guardian_provider_close(provider: str, handle: Any) -> None:
+    if provider == "windows-job":
+        close_windows_job(handle)
+        return
+    if provider == "linux-cgroup-v2":
+        close_linux_cgroup(handle)
+        return
+    raise RunnerError("unknown containment provider")
+
+
+def guardian_run(run_dir: Path) -> int:
+    """Own native containment outside the worker until root archives the handoff."""
+    secret = _guardian_secret(run_dir)
+    guardian_request = read_guardian_message(
+        run_dir / "guardian-request.json",
+        secret,
+        "guardian-request",
+    )
+    guardian_id = guardian_request.get("guardian_id")
+    if not isinstance(guardian_id, str) or not guardian_id:
+        raise RunnerError("guardian request lacks a private guardian identity")
+    private_request = read_json(run_dir / "request.json")
+    agent_name = guardian_request.get("agent_name")
+    repo_value = guardian_request.get("repo")
+    lease_id = guardian_request.get("lease_id")
+    allowed_set_digest = guardian_request.get("allowed_set_digest")
+    provider_plan_id = guardian_request.get("provider_plan_id")
+    ipc_plan_id = guardian_request.get("ipc_plan_id")
+    private_plan = private_request.get("containment_plan")
+    if (
+        not isinstance(agent_name, str)
+        or not isinstance(repo_value, str)
+        or not isinstance(lease_id, str)
+        or not isinstance(allowed_set_digest, str)
+        or not isinstance(provider_plan_id, str)
+        or not provider_plan_id
+        or not isinstance(ipc_plan_id, str)
+        or not ipc_plan_id
+        or not isinstance(private_plan, dict)
+        or private_request.get("profile", {}).get("name") != agent_name
+        or private_request.get("repo") != repo_value
+        or private_request.get("lease_id") != lease_id
+        or private_request.get("lifecycle_allowed_set_digest") != allowed_set_digest
+        or private_plan.get("provider_plan_id") != provider_plan_id
+        or private_plan.get("ipc_plan_id") != ipc_plan_id
+    ):
+        raise RunnerError("guardian request changed the private registry boundary binding")
+    registry = recovery_registry_for_agent(agent_name, Path(repo_value))
+    if registry is None:
+        raise RunnerError("containment guardian cannot resolve the implementation registry")
+    worker: Any | None = None
+    provider: str | None = None
+    provider_handle: Any | None = None
+    boundary_committed = False
+    worker_resumed = False
+    try:
+        if os.name == "nt":
+            provider = "windows-job"
+            provider_handle = create_windows_kill_job(bind_current=False)
+        elif sys.platform == "linux":
+            provider = "linux-cgroup-v2"
+            provider_handle = create_linux_cgroup(guardian_id)
+        else:
+            raise RunnerError("no creation-bound containment provider is available on this platform")
+
+        with open_private_binary(run_dir / "runner.log", append=True) as runner_log:
+            if provider == "linux-cgroup-v2":
+                worker = spawn_linux_worker_creation_bound(
+                    provider_handle,
+                    run_dir,
+                    runner_log,
+                    provider=provider,
+                )
+                worker_resumed = True
+            else:
+                worker = _spawn_worker_process(
+                    run_dir,
+                    runner_log,
+                    contained=True,
+                    provider=provider,
+                    start_suspended=True,
+                )
+        worker_identity = process_identity_from_popen(worker)
+        if worker_identity is None:
+            raise RunnerError("guardian cannot record worker creation identity")
+        setattr(worker, "_openbuild_process_identity", worker_identity)
+        if provider == "windows-job":
+            assign_windows_process_to_job(provider_handle, worker)
+            verify_windows_process_in_job(provider_handle, worker)
+            resume_windows_suspended_process(worker)
+            worker_resumed = True
+        else:
+            if worker.pid not in query_linux_cgroup_members(provider_handle):
+                raise RunnerError("Linux worker was not born inside the creation-bound cgroup")
+        if not _guardian_provider_populated(provider, provider_handle):
+            raise RunnerError("containment provider is empty immediately after worker attachment")
+        worker_record = {
+            "pid": worker.pid,
+            "identity": worker_identity,
+            "process_group_id": worker.pid,
+            "started_at": utc_now(),
+        }
+        atomic_write_json(run_dir / "worker.json", worker_record)
+        guardian_identity = process_identity(os.getpid())
+        if guardian_identity is None:
+            raise RunnerError("guardian creation identity is unavailable")
+        anti_migration: dict[str, Any] | None = None
+        if provider == "linux-cgroup-v2":
+            guardian_cgroup_namespace = os.readlink("/proc/self/ns/cgroup")
+            guardian_mount_namespace = os.readlink("/proc/self/ns/mnt")
+            write_guardian_message(
+                run_dir / "linux-anti-migration-request.json",
+                secret,
+                "linux-anti-migration-request",
+                {
+                    "guardian_id": guardian_id,
+                    "worker_pid": worker.pid,
+                    "worker_identity": worker_identity,
+                    "cgroup_path": str(provider_handle),
+                },
+            )
+            anti_path = run_dir / "linux-anti-migration-ready.json"
+            anti_deadline = time.monotonic() + 20.0
+            while not anti_path.is_file():
+                if worker.poll() is not None:
+                    raise RunnerError("Linux worker exited before anti-migration proof")
+                if time.monotonic() >= anti_deadline:
+                    raise RunnerError("Linux worker did not publish anti-migration proof")
+                if not _guardian_provider_populated(provider, provider_handle):
+                    raise RunnerError("Linux cgroup lost the worker before anti-migration proof")
+                time.sleep(0.05)
+            anti_migration = read_guardian_message(
+                anti_path,
+                secret,
+                "linux-anti-migration-ready",
+            )
+            validate_linux_anti_migration_receipt(
+                anti_migration,
+                guardian_id=guardian_id,
+                worker_pid=worker.pid,
+                worker_identity=worker_identity,
+                guardian_cgroup_namespace=guardian_cgroup_namespace,
+                guardian_mount_namespace=guardian_mount_namespace,
+            )
+            if worker.pid not in query_linux_cgroup_members(provider_handle):
+                raise RunnerError("Linux worker escaped before the durable process boundary")
+        ready_payload = {
+            "guardian_id": guardian_id,
+            "guardian_pid": os.getpid(),
+            "guardian_identity": guardian_identity,
+            "provider": provider,
+            "provider_plan_id": provider_plan_id,
+            "ipc_plan_id": ipc_plan_id,
+            "policy": "kill-on-close-no-breakaway" if provider == "windows-job" else "cgroup-v2-populated",
+            "active_processes": 1,
+            "worker": worker_record,
+            "anti_migration": anti_migration,
+        }
+        write_guardian_message(
+            run_dir / "guardian-ready.json",
+            secret,
+            "guardian-ready",
+            ready_payload,
+        )
+
+        precommit_request_path = run_dir / "guardian-precommit-request.json"
+        precommit_nonce: str | None = None
+        boundary_path = run_dir / "containment-bound.json"
+        boundary_deadline = time.monotonic() + float(guardian_request.get("boundary_timeout") or 600.0)
+        while not boundary_path.is_file():
+            if worker.poll() is not None:
+                raise RunnerError("contained worker exited before the durable process boundary")
+            if time.monotonic() >= boundary_deadline:
+                raise RunnerError("durable process boundary was not committed before guardian timeout")
+            if not _guardian_provider_populated(provider, provider_handle):
+                raise RunnerError("containment provider lost the worker before the durable boundary")
+            if precommit_request_path.is_file() and precommit_nonce is None:
+                precommit = read_guardian_message(
+                    precommit_request_path,
+                    secret,
+                    "guardian-precommit-request",
+                )
+                if (
+                    precommit.get("guardian_id") != guardian_id
+                    or int(precommit.get("worker_pid") or 0) != worker.pid
+                    or precommit.get("worker_identity") != worker_identity
+                    or precommit.get("provider_plan_id") != provider_plan_id
+                    or precommit.get("ipc_plan_id") != ipc_plan_id
+                    or not isinstance(precommit.get("precommit_nonce"), str)
+                    or not precommit["precommit_nonce"]
+                ):
+                    raise RunnerError("guardian precommit request changed the creation-bound worker")
+                if (
+                    provider == "linux-cgroup-v2"
+                    and worker.pid not in query_linux_cgroup_members(provider_handle)
+                ):
+                    raise RunnerError("Linux worker escaped before the precommit attestation")
+                precommit_nonce = precommit["precommit_nonce"]
+                if not _guardian_provider_populated(provider, provider_handle):
+                    raise RunnerError("containment provider failed during precommit arbitration")
+                precommit_payload = {
+                    "guardian_id": guardian_id,
+                    "guardian_pid": os.getpid(),
+                    "guardian_identity": guardian_identity,
+                    "worker_pid": worker.pid,
+                    "worker_identity": worker_identity,
+                    "provider": provider,
+                    "provider_plan_id": provider_plan_id,
+                    "ipc_plan_id": ipc_plan_id,
+                    "provider_populated": True,
+                    "membership_verified": True,
+                    "precommit_nonce": precommit_nonce,
+                    "attested_at": utc_now(),
+                }
+                bound_state = registry.bind_process_unactivated(
+                    lease_id,
+                    allowed_set_digest=allowed_set_digest,
+                    provider_receipt={
+                        **{key: value for key, value in ready_payload.items() if key != "worker"},
+                        "precommit": precommit_payload,
+                    },
+                    process_receipt=worker_record,
+                )
+                boundary_committed = True
+                write_guardian_message(
+                    run_dir / "guardian-precommit-ready.json",
+                    secret,
+                    "guardian-precommit-ready",
+                    {
+                        **precommit_payload,
+                        "registry_digest": bound_state["digest"],
+                    },
+                )
+            time.sleep(0.05)
+        boundary = read_guardian_message(boundary_path, secret, "containment-bound")
+        if (
+            precommit_nonce is None
+            or boundary.get("precommit_nonce") != precommit_nonce
+            or int(boundary.get("worker_pid") or 0) != worker.pid
+            or boundary.get("worker_identity") != worker_identity
+            or boundary.get("guardian_id") != guardian_id
+            or boundary.get("provider_plan_id") != provider_plan_id
+            or boundary.get("ipc_plan_id") != ipc_plan_id
+        ):
+            raise RunnerError("durable process boundary changed precommit, guardian or worker binding")
+        boundary_committed = True
+
+        cancel_path = run_dir / "guardian-cancel.json"
+        cancellation_applied = False
+        while _guardian_provider_populated(provider, provider_handle):
+            if (
+                provider == "linux-cgroup-v2"
+                and worker.poll() is None
+                and worker.pid not in query_linux_cgroup_members(provider_handle)
+            ):
+                raise RunnerError("Linux worker escaped its cgroup after the durable boundary")
+            if cancel_path.is_file() and not cancellation_applied:
+                cancellation = read_guardian_message(
+                    cancel_path,
+                    secret,
+                    "guardian-cancel",
+                )
+                if cancellation.get("guardian_id") != guardian_id:
+                    raise RunnerError("guardian cancellation changed the private guardian identity")
+                terminate_guardian_provider(provider, provider_handle)
+                cancellation_applied = True
+            time.sleep(0.1)
+        if provider == "linux-cgroup-v2" and worker.poll() is None:
+            raise RunnerError("Linux cgroup became empty while the creation-bound worker remained alive")
+        zero_payload = {
+            "guardian_id": guardian_id,
+            "provider": provider,
+            "populated": False,
+            "identity_verified": True,
+            "worker_pid": worker.pid,
+            "worker_identity": worker_identity,
+            "proved_at": utc_now(),
+        }
+        write_guardian_message(run_dir / "guardian-zero.json", secret, "guardian-zero", zero_payload)
+
+        close_path = run_dir / "guardian-close.json"
+        while not close_path.is_file():
+            time.sleep(0.1)
+        close_request = read_guardian_message(close_path, secret, "guardian-close")
+        if close_request.get("guardian_id") != guardian_id:
+            raise RunnerError("guardian close changed the private guardian identity")
+        _guardian_provider_close(provider, provider_handle)
+        provider_handle = None
+        write_guardian_message(
+            run_dir / "guardian-closed.json",
+            secret,
+            "guardian-closed",
+            {"guardian_id": guardian_id, "closed": True, "closed_at": utc_now()},
+        )
+        return 0
+    except BaseException as exc:
+        cleanup_error: str | None = None
+        tree_empty = worker is None
+        if worker is not None and not worker_resumed and worker.poll() is None:
+            try:
+                worker.kill()
+                worker.wait(timeout=5.0)
+            except BaseException as suspended_cleanup_exc:
+                cleanup_error = str(suspended_cleanup_exc) or type(suspended_cleanup_exc).__name__
+        if provider is not None and provider_handle is not None:
+            try:
+                if _guardian_provider_populated(provider, provider_handle):
+                    terminate_guardian_provider(provider, provider_handle)
+                    cleanup_deadline = time.monotonic() + 5.0
+                    while (
+                        _guardian_provider_populated(provider, provider_handle)
+                        and time.monotonic() < cleanup_deadline
+                    ):
+                        time.sleep(0.05)
+                    if _guardian_provider_populated(provider, provider_handle):
+                        raise RunnerError("containment provider remained populated during teardown")
+                _guardian_provider_close(provider, provider_handle)
+                provider_handle = None
+                if worker is not None:
+                    try:
+                        worker.wait(timeout=5.0)
+                    except subprocess.TimeoutExpired:
+                        pass
+                tree_empty = worker is None or worker.poll() is not None
+            except BaseException as cleanup_exc:
+                cleanup_error = str(cleanup_exc) or type(cleanup_exc).__name__
+        try:
+            write_guardian_message(
+                run_dir / "guardian-failure.json",
+                secret,
+                "guardian-failure",
+                {
+                    "guardian_id": guardian_id,
+                    "boundary_committed": boundary_committed,
+                    "tree_empty": tree_empty,
+                    "no_user_code": not boundary_committed,
+                    "failure": str(exc) or type(exc).__name__,
+                    "cleanup_error": cleanup_error,
+                },
+            )
+        except BaseException:
+            pass
+        if not isinstance(exc, Exception):
+            raise
+        return 1
+
+
+def await_guardian_launch(
+    run_dir: Path,
+    secret: bytes,
+    guardian: Any,
+    *,
+    timeout: float = 20.0,
+) -> tuple[str, dict[str, Any]]:
+    deadline = time.monotonic() + timeout
+    while True:
+        failure_path = run_dir / "guardian-failure.json"
+        if failure_path.is_file():
+            return "failed", read_guardian_message(
+                failure_path, secret, "guardian-failure"
+            )
+        if (run_dir / "guardian-ready.json").is_file():
+            ready = read_guardian_message(
+                run_dir / "guardian-ready.json", secret, "guardian-ready"
+            )
+            if failure_path.is_file():
+                return "failed", read_guardian_message(
+                    failure_path, secret, "guardian-failure"
+                )
+            if guardian.poll() is not None:
+                if failure_path.is_file():
+                    return "failed", read_guardian_message(
+                        failure_path, secret, "guardian-failure"
+                    )
+                raise RunnerError("containment guardian stopped after publishing launch readiness")
+            return "ready", ready
+        if guardian.poll() is not None:
+            raise RunnerError("containment guardian exited without an authenticated launch receipt")
+        if time.monotonic() >= deadline:
+            raise RunnerError("containment guardian did not publish a launch receipt within 20 seconds")
+        time.sleep(0.05)
+
+
+def await_guardian_precommit(
+    run_dir: Path,
+    secret: bytes,
+    guardian: Any,
+    ready: Mapping[str, Any],
+    *,
+    timeout: float = 20.0,
+) -> tuple[str, dict[str, Any]]:
+    worker = ready.get("worker")
+    if not isinstance(worker, dict):
+        raise RunnerError("guardian launch receipt lacks the worker creation receipt")
+    precommit_nonce = secrets.token_hex(32)
+    write_guardian_message(
+        run_dir / "guardian-precommit-request.json",
+        secret,
+        "guardian-precommit-request",
+        {
+            "guardian_id": ready.get("guardian_id"),
+            "worker_pid": worker.get("pid"),
+            "worker_identity": worker.get("identity"),
+            "provider_plan_id": ready.get("provider_plan_id"),
+            "ipc_plan_id": ready.get("ipc_plan_id"),
+            "precommit_nonce": precommit_nonce,
+        },
+    )
+    failure_path = run_dir / "guardian-failure.json"
+    response_path = run_dir / "guardian-precommit-ready.json"
+    deadline = time.monotonic() + timeout
+    while True:
+        if failure_path.is_file():
+            return "failed", read_guardian_message(
+                failure_path, secret, "guardian-failure"
+            )
+        if response_path.is_file():
+            response = read_guardian_message(
+                response_path,
+                secret,
+                "guardian-precommit-ready",
+            )
+            if failure_path.is_file():
+                return "failed", read_guardian_message(
+                    failure_path, secret, "guardian-failure"
+                )
+            if guardian.poll() is not None:
+                if failure_path.is_file():
+                    return "failed", read_guardian_message(
+                        failure_path, secret, "guardian-failure"
+                    )
+                raise RunnerError("containment guardian stopped after precommit attestation")
+            if (
+                response.get("guardian_id") != ready.get("guardian_id")
+                or response.get("guardian_pid") != ready.get("guardian_pid")
+                or response.get("guardian_identity") != ready.get("guardian_identity")
+                or int(response.get("worker_pid") or 0) != int(worker.get("pid") or 0)
+                or response.get("worker_identity") != worker.get("identity")
+                or response.get("provider") != ready.get("provider")
+                or response.get("provider_plan_id") != ready.get("provider_plan_id")
+                or response.get("ipc_plan_id") != ready.get("ipc_plan_id")
+                or response.get("provider_populated") is not True
+                or response.get("membership_verified") is not True
+                or response.get("precommit_nonce") != precommit_nonce
+                or not re.fullmatch(r"[0-9a-f]{64}", str(response.get("registry_digest") or ""))
+            ):
+                raise RunnerError("guardian precommit attestation changed the launch binding")
+            return "ready", response
+        if guardian.poll() is not None:
+            if failure_path.is_file():
+                return "failed", read_guardian_message(
+                    failure_path, secret, "guardian-failure"
+                )
+            raise RunnerError("containment guardian exited before precommit attestation")
+        if time.monotonic() >= deadline:
+            raise RunnerError("containment guardian did not publish a precommit attestation")
+        time.sleep(0.05)
+
+
+def await_guardian_record(
+    run_dir: Path,
+    secret: bytes,
+    filename: str,
+    kind: str,
+    *,
+    timeout: float = 20.0,
+) -> dict[str, Any]:
+    path = run_dir / filename
+    deadline = time.monotonic() + timeout
+    while not path.is_file():
+        if (run_dir / "guardian-failure.json").is_file():
+            failure = read_guardian_message(
+                run_dir / "guardian-failure.json", secret, "guardian-failure"
+            )
+            raise RunnerError(
+                f"containment guardian failed during terminalization: {failure.get('failure')}"
+            )
+        if time.monotonic() >= deadline:
+            raise RunnerError(f"containment guardian did not publish {filename} within 20 seconds")
+        time.sleep(0.05)
+    return read_guardian_message(path, secret, kind)
+
+
+def spawn_containment_guardian(run_dir: Path, runner_log: Any) -> Any:
+    return subprocess.Popen(
+        [sys.executable, str(Path(__file__).resolve()), "_guardian", "--run-dir", str(run_dir)],
+        stdin=subprocess.DEVNULL,
+        stdout=runner_log,
+        stderr=runner_log,
+        close_fds=True,
+        **_background_options(),
+    )
+
+
+def _terminal_binding(receipt: Mapping[str, Any]) -> dict[str, Any]:
+    fields = (
+        "run_dir",
+        "status",
+        "agent_name",
+        "task_name",
+        "lease_id",
+        "activated",
+        "configured_model",
+        "model_reasoning_effort",
+        "sandbox",
+        "worker_pid",
+        "worker_process_identity",
+        "codex_pid",
+        "codex_process_identity",
+        "terminal_event",
+        "codex_exit_evidence",
+        "codex_exit_code",
+        "result_evidence",
+        "process_tree_stopped",
+    )
+    return {field: receipt.get(field) for field in fields}
+
+
+def audit_guardian_health(run_dir: Path) -> None:
+    ready_path = run_dir / "guardian-ready.json"
+    failure_path = run_dir / "guardian-failure.json"
+    if not ready_path.is_file() and not failure_path.is_file():
+        return
+    request = read_json(run_dir / "request.json")
+    registry = recovery_registry_for_agent(request["profile"]["name"], Path(request["repo"]))
+    lease_id = request.get("lease_id")
+    try:
+        secret = _guardian_secret(run_dir)
+        ready = (
+            read_guardian_message(ready_path, secret, "guardian-ready")
+            if ready_path.is_file()
+            else None
+        )
+        failure = (
+            read_guardian_message(failure_path, secret, "guardian-failure")
+            if failure_path.is_file()
+            else None
+        )
+        closed = (
+            read_guardian_message(
+                run_dir / "guardian-closed.json",
+                secret,
+                "guardian-closed",
+            )
+            if (run_dir / "guardian-closed.json").is_file()
+            else None
+        )
+    except RunnerError as exc:
+        ready = None
+        failure = None
+        loss_cause = f"guardian-ipc-loss: {exc}"
+    else:
+        loss_cause = None
+        if isinstance(failure, dict) and failure.get("boundary_committed") is True:
+            loss_cause = str(failure.get("failure") or "guardian-loss-after-boundary")
+        elif isinstance(closed, dict) and (
+            closed.get("closed") is not True
+            or not isinstance(ready, dict)
+            or closed.get("guardian_id") != ready.get("guardian_id")
+        ):
+            loss_cause = "guardian-close-authentication-loss"
+        elif isinstance(ready, dict) and not isinstance(closed, dict):
+            guardian_record = {
+                "pid": ready.get("guardian_pid"),
+                "identity": ready.get("guardian_identity"),
+            }
+            guardian_state = process_record_state(guardian_record)
+            if guardian_state != "running":
+                loss_cause = f"guardian-process-{guardian_state}"
+    if loss_cause is None:
+        return
+    if registry is None or not isinstance(lease_id, str):
+        raise RunnerError(f"contained guardian failed after its durable boundary: {loss_cause}")
+    state = registry.state()
+    if state.get("quarantine") != "containment-loss-after-boundary":
+        try:
+            registry.quarantine_containment_loss(
+                lease_id,
+                loss_cause,
+            )
+        except RecoveryStateError as exc:
+            raise RunnerError(f"guardian loss could not be quarantined: {exc}") from exc
+    raise RunnerError(
+        "contained guardian failed after the durable process boundary; "
+        "the writer lease is quarantined for manual reconciliation"
+    )
+
+
+def reconcile_implementation_registry(
+    run_dir: Path,
+    receipt: Mapping[str, Any],
+    *,
+    success_verification_digest: str | None = None,
+) -> None:
+    """Drive a terminal implementation receipt through one durable owner lifecycle."""
+    if receipt.get("status") not in {"completed", "failed"} or receipt.get("process_tree_stopped") is not True:
+        return
+    request = read_json(run_dir / "request.json")
+    agent_name = request["profile"]["name"]
+    registry = recovery_registry_for_agent(agent_name, Path(request["repo"]))
+    lease_id = request.get("lease_id")
+    if registry is None or not isinstance(lease_id, str):
+        return
+    state = registry.state()
+    lease = state.get("lease")
+    if lease is None:
+        return
+    if not isinstance(lease, dict) or lease.get("lease_id") != lease_id:
+        raise RunnerError("terminal receipt does not own the current workspace lease")
+    if lease.get("recovery_capable") is not True:
+        try:
+            registry.release_legacy_terminal(
+                lease_id,
+                {
+                    "success": receipt.get("status") == "completed",
+                    "process_tree_stopped": True,
+                },
+            )
+        except RecoveryStateError as exc:
+            raise RunnerError(f"legacy implementation lease could not be released: {exc}") from exc
+        return
+
+    try:
+        secret = _guardian_secret(run_dir)
+        if (run_dir / "guardian-failure.json").is_file():
+            failure = read_guardian_message(
+                run_dir / "guardian-failure.json",
+                secret,
+                "guardian-failure",
+            )
+            if failure.get("boundary_committed") is True:
+                registry.quarantine_containment_loss(
+                    lease_id,
+                    str(failure.get("failure") or "guardian-loss-after-boundary"),
+                )
+                raise RecoveryStateError("guardian loss after the durable boundary is quarantined")
+        zero = await_guardian_record(
+            run_dir,
+            secret,
+            "guardian-zero.json",
+            "guardian-zero",
+        )
+        allowed_set_digest = request.get("lifecycle_allowed_set_digest") or (
+            request.get("recovery_preflight") or {}
+        ).get("allowed_set_digest", "")
+        binding = _terminal_binding(receipt)
+        binding_digest = sha256_bytes(_canonical_json_bytes(binding))
+        state_name = lease.get("state")
+        if state_name in {"running", "active"}:
+            state = registry.record_terminal_evidence(
+                lease_id,
+                {
+                    "success": receipt.get("status") == "completed",
+                    "binding_digest": binding_digest,
+                    "terminal_event": receipt.get("terminal_event"),
+                },
+                allowed_set_digest,
+            )
+            lease = state["lease"]
+            state_name = lease["state"]
+        elif lease.get("terminal_receipt", {}).get("binding_digest") != binding_digest:
+            raise RecoveryStateError("terminal receipt binding drifted during reload")
+        if state_name == "terminal-pending-stop":
+            state = registry.prove_contained_tree_empty(
+                lease_id,
+                zero,
+                allowed_set_digest,
+            )
+            lease = state["lease"]
+            state_name = lease["state"]
+
+        semantic_disposition = lease.get("semantic_disposition")
+        if isinstance(semantic_disposition, dict):
+            semantic_receipt = {
+                "event": "semantic-handoff-rejected",
+                "run_id": semantic_disposition.get("run_id"),
+                "lease_id": lease_id,
+                "disposition": semantic_disposition.get("disposition"),
+                "evidence_digest": semantic_disposition.get("evidence_digest"),
+                "checkpoint_allowed": semantic_disposition.get("checkpoint_allowed"),
+                "checkpoint_invalidation": semantic_disposition.get(
+                    "checkpoint_invalidation"
+                ),
+                "checkpoint_digest": semantic_disposition.get("checkpoint_digest"),
+            }
+            if semantic_disposition.get("checkpoint_invalidation") != "completed":
+                atomic_write_json(
+                    run_dir / "semantic-rejection.json", semantic_receipt
+                )
+            if semantic_disposition.get("disposition") == "needs-escalation":
+                source_state_id = semantic_disposition.get("source_state_id")
+                evidence_digest = semantic_disposition.get("evidence_digest")
+                if not isinstance(source_state_id, str):
+                    raise RecoveryStateError(
+                        "semantic escalation has no source checkpoint binding"
+                    )
+                if not isinstance(evidence_digest, str):
+                    raise RecoveryStateError(
+                        "semantic escalation has no evidence digest binding"
+                    )
+                if semantic_disposition.get("checkpoint_invalidation") == "completed":
+                    invalidated_checkpoint = registry.public_checkpoint_for_source(
+                        source_state_id
+                    )
+                else:
+                    invalidated_checkpoint = registry.invalidate_source_checkpoint(
+                        source_state_id,
+                        reason="semantic-needs-escalation",
+                        evidence_digest=evidence_digest,
+                    )
+                checkpoint_digest = invalidated_checkpoint.get("checkpoint_digest")
+                if not isinstance(checkpoint_digest, str):
+                    raise RecoveryStateError(
+                        "invalidated source checkpoint has no durable digest"
+                    )
+                if semantic_disposition.get("checkpoint_invalidation") != "completed":
+                    state = registry.complete_source_checkpoint_invalidation(
+                        lease_id,
+                        source_state_id=source_state_id,
+                        checkpoint_digest=checkpoint_digest,
+                        evidence_digest=evidence_digest,
+                    )
+                    lease = state["lease"]
+                    semantic_disposition = lease["semantic_disposition"]
+                elif semantic_disposition.get("checkpoint_digest") != checkpoint_digest:
+                    raise RecoveryStateError(
+                        "completed source checkpoint artifact digest drifted"
+                    )
+                atomic_write_json(
+                    run_dir / "recovery-checkpoint.json", invalidated_checkpoint
+                )
+                semantic_receipt["checkpoint_invalidation"] = "completed"
+                semantic_receipt["checkpoint_digest"] = checkpoint_digest
+                atomic_write_json(
+                    run_dir / "semantic-rejection.json", semantic_receipt
+                )
+        semantic_success = (
+            receipt.get("status") == "completed"
+            and not isinstance(semantic_disposition, dict)
+            and lease.get("terminal_receipt", {}).get("success") is True
+        )
+
+        checkpoint: dict[str, Any] | None = None
+        verification_checkpoint: dict[str, Any] | None = None
+        preflight = request.get("recovery_preflight")
+        if isinstance(preflight, dict) and (
+            not isinstance(semantic_disposition, dict)
+            or semantic_disposition.get("checkpoint_allowed") is True
+        ):
+            checkpoint_path = run_dir / "recovery-checkpoint.json"
+            try:
+                checkpoint = (
+                    read_json(checkpoint_path)
+                    if checkpoint_path.is_file()
+                    else registry.finalize_prepared_checkpoint(
+                        preflight,
+                        source_receipt_digest=binding_digest,
+                    )
+                )
+                checkpoint = registry.revalidate_checkpoint(checkpoint)
+                atomic_write_json(checkpoint_path, checkpoint)
+            except RecoveryStateError as checkpoint_exc:
+                if semantic_success:
+                    raise
+                atomic_write_json(
+                    run_dir / "recovery-checkpoint-unavailable.json",
+                    {
+                        "disposition": "recovery-capability-unavailable",
+                        "reason": str(checkpoint_exc),
+                        "receipt_digest": binding_digest,
+                    },
+                )
+                checkpoint = None
+
+        parent_checkpoint = request.get("recovery_parent_checkpoint")
+        if isinstance(parent_checkpoint, dict) and semantic_success:
+            verification_checkpoint = registry.revalidate_checkpoint(parent_checkpoint)
+            atomic_write_json(
+                run_dir / "recovery-parent-verification.json",
+                verification_checkpoint,
+            )
+        else:
+            verification_checkpoint = checkpoint
+
+        if semantic_success and state_name == "stopped-terminal":
+            if success_verification_digest is None:
+                return
+            if not re.fullmatch(r"[0-9a-f]{64}", success_verification_digest):
+                raise RecoveryStateError("root success verification digest must be lowercase SHA-256")
+            if (
+                verification_checkpoint is None
+                or verification_checkpoint.get("disposition") != "recovery-eligible"
+            ):
+                raise RecoveryStateError("successful handoff failed the final allowed-set verification")
+            payload = {
+                "lease_id": lease_id,
+                "run_id": run_dir.name,
+                "receipt_digest": binding_digest,
+                "checkpoint_digest": verification_checkpoint["checkpoint_digest"],
+                "allowed_set_digest": allowed_set_digest,
+                "root_verification_digest": success_verification_digest,
+            }
+            event_id = sha256_bytes(
+                b"openbuild-contained-handoff-v1\0" + _canonical_json_bytes(payload)
+            )
+            state = registry.commit_handoff(
+                lease_id,
+                {"event_id": event_id, "payload": payload},
+                allowed_set_digest,
+            )
+            state = registry.materialize_handoff(
+                lease_id,
+                run_dir / "implementation-handoffs.jsonl",
+            )
+            lease = state["lease"]
+            state_name = lease["state"]
+        elif semantic_success and state_name == "handoff-committed":
+            registry.materialize_handoff(
+                lease_id,
+                run_dir / "implementation-handoffs.jsonl",
+            )
+
+        state = registry.state()
+        lease = state.get("lease")
+        if not isinstance(lease, dict):
+            return
+        if not lease.get("guardian_close"):
+            guardian_id = lease.get("provider_receipt", {}).get("guardian_id")
+            write_guardian_message(
+                run_dir / "guardian-close.json",
+                secret,
+                "guardian-close",
+                {"guardian_id": guardian_id, "zero_digest": sha256_bytes(_canonical_json_bytes(zero))},
+            )
+            closed = await_guardian_record(
+                run_dir,
+                secret,
+                "guardian-closed.json",
+                "guardian-closed",
+            )
+            registry.acknowledge_guardian_close(lease_id, closed)
+        registry.release_contained_terminal(lease_id)
+    except (OSError, RecoveryStateError) as exc:
+        raise RunnerError(f"contained implementation terminalization failed closed: {exc}") from exc
+
+
+def finalize_success_run(args: argparse.Namespace) -> int:
+    run_dir = Path(args.run_dir).expanduser().resolve()
+    if (run_dir / "semantic-rejection.json").is_file():
+        raise RunnerError("root success finalization is forbidden after semantic handoff rejection")
+    audit_guardian_health(run_dir)
+    receipt = public_receipt(run_dir)
+    if receipt.get("status") != "completed":
+        raise RunnerError("root success finalization requires an accepted completed runner receipt")
+    request = read_json(run_dir / "request.json")
+    registry = recovery_registry_for_agent(request["profile"]["name"], Path(request["repo"]))
+    if registry is not None and any(
+        event.get("event") == "semantic-handoff-rejected"
+        and event.get("run_id") == run_dir.name
+        for event in registry.state().get("history", [])
+    ):
+        raise RunnerError("root success finalization is forbidden after semantic handoff rejection")
+    reconcile_implementation_registry(
+        run_dir,
+        receipt,
+        success_verification_digest=args.primary_signal_digest,
+    )
+    print(json.dumps(receipt, ensure_ascii=False, indent=2))
+    return 0
+
+
+def reject_semantic_handoff_run(args: argparse.Namespace) -> int:
+    run_dir = Path(args.run_dir).expanduser().resolve()
+    semantic_path = run_dir / "semantic-rejection.json"
+    existing_semantic = read_json(semantic_path) if semantic_path.is_file() else None
+    if isinstance(existing_semantic, dict):
+        if (
+            existing_semantic.get("disposition") != args.disposition
+            or existing_semantic.get("evidence_digest") != args.evidence_digest
+        ):
+            raise RunnerError("semantic handoff rejection replay binding drifted")
+        if existing_semantic.get("checkpoint_invalidation") != "pending":
+            raise RunnerError("semantic handoff rejection was already consumed for this run")
+    if not re.fullmatch(r"[0-9a-f]{64}", args.evidence_digest):
+        raise RunnerError("semantic rejection evidence digest must be lowercase SHA-256")
+    audit_guardian_health(run_dir)
+    receipt = public_receipt(run_dir)
+    if receipt.get("status") != "completed" or receipt.get("process_tree_stopped") is not True:
+        raise RunnerError("semantic rejection requires stopped transport-success evidence")
+    reconcile_implementation_registry(run_dir, receipt)
+    if isinstance(existing_semantic, dict):
+        completed_semantic = read_json(semantic_path)
+        if completed_semantic.get("checkpoint_invalidation") != "completed":
+            raise RunnerError("semantic handoff rejection retry did not complete checkpoint invalidation")
+        print(json.dumps(completed_semantic, ensure_ascii=False, indent=2))
+        return 0
+    if semantic_path.is_file():
+        reconstructed_semantic = read_json(semantic_path)
+        if (
+            reconstructed_semantic.get("disposition") == args.disposition
+            and reconstructed_semantic.get("evidence_digest") == args.evidence_digest
+        ):
+            print(json.dumps(reconstructed_semantic, ensure_ascii=False, indent=2))
+            return 0
+    request = read_json(run_dir / "request.json")
+    registry = recovery_registry_for_agent(request["profile"]["name"], Path(request["repo"]))
+    lease_id = request.get("lease_id")
+    if registry is None or not isinstance(lease_id, str):
+        raise RunnerError("semantic rejection requires a recovery-capable implementation lease")
+    checkpoint_allowed = args.disposition == "blocked"
+    try:
+        registry.reject_semantic_handoff(
+            lease_id,
+            run_id=run_dir.name,
+            disposition=args.disposition,
+            evidence_digest=args.evidence_digest,
+            checkpoint_allowed=checkpoint_allowed,
+        )
+        reconcile_implementation_registry(run_dir, receipt)
+    except RecoveryStateError as exc:
+        raise RunnerError(f"semantic handoff rejection failed closed: {exc}") from exc
+    semantic_receipt = read_json(semantic_path)
+    print(json.dumps(semantic_receipt, ensure_ascii=False, indent=2))
+    return 0
+
+
+def authorize_recovery_run(args: argparse.Namespace) -> int:
+    repo = Path(args.repo).expanduser().resolve()
+    checkpoint_path = Path(args.checkpoint_file).expanduser().resolve()
+    prompt_path = Path(args.prompt_file).expanduser().resolve()
+    run_dir = Path(args.run_dir).expanduser().resolve()
+    if not repo.is_dir() or not checkpoint_path.is_file() or not prompt_path.is_file():
+        raise RunnerError("recovery authorization requires an existing repo, checkpoint and prompt")
+    if run_dir.exists() and any(run_dir.iterdir()):
+        raise RunnerError("reserved recovery run directory must be absent or empty")
+    lease_id = validate_lease_id("openbuild_implementation_fast", args.lease_id)
+    if lease_id is None:
+        raise RunnerError("recovery target lease ID is required")
+    try:
+        prompt_bytes = prompt_path.read_bytes()
+        prompt_bytes.decode("utf-8")
+        checkpoint = read_json(checkpoint_path)
+        registry = recovery_registry_for_agent("openbuild_implementation_fast", repo)
+        if registry is None:
+            raise RecoveryStateError("implementation recovery registry is unavailable")
+        state = registry.initialize()
+        existing = state.get("lease")
+        if isinstance(existing, dict):
+            plan = existing.get("plan", {})
+            if (
+                existing.get("lease_id") != lease_id
+                or existing.get("lease_kind") != "recovery-target"
+                or plan.get("run_id") != run_dir.name
+                or plan.get("prompt_sha256") != sha256_bytes(prompt_bytes)
+                or existing.get("source_state_id") != checkpoint.get("source_state_id")
+            ):
+                raise RecoveryStateError("workspace is occupied by another recovery lifecycle")
+            output = {
+                "event": "recovery-target-reserved",
+                "lease_id": lease_id,
+                "grant_id": existing.get("grant_id"),
+                "target_milestone": existing.get("target_milestone"),
+                "allowed_set_digest": existing.get("allowed_set_digest"),
+                "reconstructed": True,
+            }
+        else:
+            checkpoint = registry.revalidate_checkpoint(checkpoint)
+            grant = registry.grant_authorization(
+                checkpoint,
+                user_action_digest=args.user_action_digest,
+                specification_revision=args.specification_revision,
+            )
+            registry.consume_grant_and_reserve(
+                grant_id=grant["grant_id"],
+                checkpoint=checkpoint,
+                target_plan={
+                    "lease_id": lease_id,
+                    "run_id": run_dir.name,
+                    "prompt_sha256": sha256_bytes(prompt_bytes),
+                    "launch_token": secrets.token_hex(32),
+                    "provider_plan_id": uuid.uuid4().hex,
+                    "ipc_plan_id": uuid.uuid4().hex,
+                    "allowed_set_digest": checkpoint["allowed_set_digest"],
+                },
+            )
+            output = {
+                "event": "recovery-target-reserved",
+                "lease_id": lease_id,
+                "reconstructed": False,
+                "authorization": grant,
+            }
+    except RecoveryStateError as exc:
+        raise RunnerError(f"recovery authorization failed closed: {exc}") from exc
+    print(json.dumps(output, ensure_ascii=False, indent=2))
+    return 0
+
+
 def public_receipt(run_dir: Path) -> dict[str, Any]:
     request = read_json(run_dir / "request.json")
     profile = request["profile"]
@@ -1307,8 +3182,34 @@ def public_receipt(run_dir: Path) -> dict[str, Any]:
         and not codex_spawn_unconfirmed
         and all(process_tree_record_state(record) == "stopped" for record in process_records)
     )
+    if (run_dir / "guardian-ready.json").is_file():
+        guardian_zero = False
+        try:
+            secret = _guardian_secret(run_dir)
+            ready = read_guardian_message(
+                run_dir / "guardian-ready.json",
+                secret,
+                "guardian-ready",
+            )
+            if (run_dir / "guardian-zero.json").is_file():
+                zero = read_guardian_message(
+                    run_dir / "guardian-zero.json",
+                    secret,
+                    "guardian-zero",
+                )
+                guardian_zero = (
+                    zero.get("guardian_id") == ready.get("guardian_id")
+                    and zero.get("populated") is False
+                    and zero.get("identity_verified") is True
+                )
+        except RunnerError:
+            guardian_zero = False
+        process_tree_stopped = process_tree_stopped and guardian_zero
     if exit_record:
-        if exit_record.get("startup_process_stopped") is True:
+        if (
+            exit_record.get("startup_process_stopped") is True
+            and not (run_dir / "guardian-ready.json").is_file()
+        ):
             process_tree_stopped = True
         elif (
             exit_record.get("startup_process_stopped") is False
@@ -1409,6 +3310,43 @@ def public_receipt(run_dir: Path) -> dict[str, Any]:
     }
 
 
+def apply_preboundary_guardian_failure(
+    registry: RecoveryRegistry,
+    lease_id: str,
+    containment_plan: Mapping[str, Any],
+    guardian_receipt: Mapping[str, Any],
+    *,
+    run_dir: Path,
+    runner_log: Any,
+) -> tuple[Any, str]:
+    if guardian_receipt.get("boundary_committed") is True:
+        raise RunnerError("containment guardian failed after the durable process boundary")
+    if (
+        guardian_receipt.get("tree_empty") is not True
+        or guardian_receipt.get("no_user_code") is not True
+        or guardian_receipt.get("cleanup_error")
+    ):
+        raise RunnerError("pre-boundary containment teardown is unproven")
+    cause = str(guardian_receipt.get("failure") or "containment-provider-unavailable")
+    if containment_plan.get("recovery_target") is True:
+        registry.fail_recovery_target_before_boundary(
+            lease_id,
+            cause,
+            {"tree_empty": True, "no_user_code": True},
+        )
+        raise RunnerError("recovery target containment failed before process binding")
+    registry.containment_failed_before_boundary(lease_id, cause)
+    registry.prove_fallback_teardown(
+        lease_id,
+        {"tree_empty": True, "no_user_code": True},
+    )
+    registry.claim_normal_fallback(
+        lease_id,
+        str(containment_plan["fallback_token"]),
+    )
+    return _spawn_worker_process(run_dir, runner_log, contained=False), "fallback"
+
+
 def start_run(args: argparse.Namespace) -> int:
     repo = Path(args.repo).expanduser().resolve()
     prompt_file = Path(args.prompt_file).expanduser().resolve()
@@ -1417,6 +3355,12 @@ def start_run(args: argparse.Namespace) -> int:
     if not prompt_file.is_file():
         raise RunnerError(f"prompt file does not exist: {prompt_file}")
     lease_id = validate_lease_id(args.agent, args.lease_id)
+    allowed_files, specification_revision, recovery_target_milestone = validate_recovery_start_options(
+        args.agent,
+        getattr(args, "allowed_file", None),
+        getattr(args, "specification_revision", None),
+        getattr(args, "recovery_target_milestone", None),
+    )
     try:
         source_prompt = prompt_file.read_bytes()
         task_prompt = source_prompt.decode("utf-8")
@@ -1468,35 +3412,298 @@ def start_run(args: argparse.Namespace) -> int:
         "auth_mode": auth_mode,
         "activation_timeout": args.activation_timeout,
         "command": command,
+        "recovery_preflight": None,
+        "recovery_parent_checkpoint": None,
+        "recovery_capability_unavailable": None,
+        "lifecycle_allowed_set_digest": "",
+        "recovery_target": False,
+        "containment_plan": None,
     }
+
+    registry = recovery_registry_for_agent(args.agent, repo)
+    registry_lease_id = lease_id
+    recovery_target_lease: dict[str, Any] | None = None
+    if registry is not None and registry_lease_id is not None:
+        try:
+            registry_state = registry.initialize()
+        except RecoveryStateError as exc:
+            raise RunnerError(f"workspace recovery registry rejected start: {exc}") from exc
+        existing_lease = registry_state.get("lease")
+        if existing_lease is not None:
+            if (
+                isinstance(existing_lease, dict)
+                and existing_lease.get("lease_id") == registry_lease_id
+                and existing_lease.get("lease_kind") == "recovery-target"
+                and existing_lease.get("state") == "reserved"
+            ):
+                recovery_target_lease = existing_lease
+                target_plan = existing_lease.get("plan", {})
+                if (
+                    target_plan.get("run_id") != run_dir.name
+                    or target_plan.get("prompt_sha256") != request["prompt_sha256"]
+                    or existing_lease.get("target_milestone") != request["task_name"]
+                ):
+                    raise RunnerError("reserved recovery target run, prompt or milestone binding drifted")
+                if not (allowed_files and specification_revision and recovery_target_milestone):
+                    raise RunnerError("reserved recovery target requires structured next-checkpoint options")
+                parent_checkpoint = registry.public_checkpoint_for_source(
+                    existing_lease["source_state_id"]
+                )
+                if parent_checkpoint.get("specification_revision") != specification_revision:
+                    raise RunnerError("reserved recovery target specification revision drifted")
+                registry.assert_checkpoint_allowed_paths(parent_checkpoint, allowed_files)
+                request["recovery_parent_checkpoint"] = parent_checkpoint
+                request["lifecycle_allowed_set_digest"] = existing_lease["allowed_set_digest"]
+                request["recovery_target"] = True
+            else:
+                raise RunnerError("workspace recovery registry rejected start: workspace is not vacant")
+        if allowed_files and specification_revision and recovery_target_milestone:
+            source_id = sha256_bytes(
+                f"{registry_lease_id}\0{run_dir.name}\0{request['prompt_sha256']}".encode("utf-8")
+            )
+            try:
+                request["recovery_preflight"] = registry.prepare_source_checkpoint(
+                    source_id=source_id,
+                    source_lease_id=registry_lease_id,
+                    source_milestone=request["task_name"],
+                    target_milestone=recovery_target_milestone,
+                    allowed_paths=allowed_files,
+                    specification_revision=specification_revision,
+                )
+            except RecoveryStateError as exc:
+                request["recovery_capability_unavailable"] = str(exc)
+    if recovery_target_lease is not None:
+        target_plan = recovery_target_lease["plan"]
+        request["containment_plan"] = {
+            "guardian_id": uuid.uuid4().hex,
+            "provider_plan_id": target_plan["provider_plan_id"],
+            "ipc_plan_id": target_plan["ipc_plan_id"],
+            "contained_launch_token": target_plan["launch_token"],
+            "fallback_token": None,
+            "recovery_target": True,
+        }
+    elif request.get("recovery_preflight") is not None:
+        request["lifecycle_allowed_set_digest"] = request["recovery_preflight"][
+            "allowed_set_digest"
+        ]
+        request["containment_plan"] = {
+            "guardian_id": uuid.uuid4().hex,
+            "provider_plan_id": uuid.uuid4().hex,
+            "ipc_plan_id": uuid.uuid4().hex,
+            "contained_launch_token": secrets.token_hex(32),
+            "fallback_token": secrets.token_hex(32),
+            "recovery_target": False,
+        }
     atomic_write_json(run_dir / "request.json", request)
+
+    if (
+        registry is not None
+        and registry_lease_id is not None
+        and recovery_target_lease is None
+    ):
+        preflight = request.get("recovery_preflight")
+        reservation_acquired = False
+        try:
+            registry.reserve_normal(
+                registry_lease_id,
+                allowed_set_digest=(preflight or {}).get("allowed_set_digest", ""),
+                recovery_capable=preflight is not None,
+                source_state_id=(preflight or {}).get("source_state_id"),
+                run_id=run_dir.name,
+                prompt_sha256=request["prompt_sha256"],
+                containment_plan=request.get("containment_plan"),
+            )
+            reservation_acquired = True
+            if preflight is not None:
+                registry.bind_reserved_source_snapshot(registry_lease_id, preflight)
+        except RecoveryStateError as exc:
+            if reservation_acquired:
+                try:
+                    registry.release_unactivated_reservation(registry_lease_id)
+                except RecoveryStateError as release_exc:
+                    raise RunnerError(
+                        "workspace recovery registry rejected the reserved source boundary "
+                        f"and retained its lease: {exc}; release failed: {release_exc}"
+                    ) from exc
+            raise RunnerError(f"workspace recovery registry rejected start: {exc}") from exc
 
     worker: Any | None = None
     worker_record: dict[str, Any] = {}
-    runner_log = open_private_binary(run_dir / "runner.log", append=True)
+    launch_mode = "unstarted"
+    fallback_bind_attempted = False
+    fallback_bind_verified = False
     try:
+        runner_log = open_private_binary(run_dir / "runner.log", append=True)
         try:
-            worker = subprocess.Popen(
-                [sys.executable, str(Path(__file__).resolve()), "_worker", "--run-dir", str(run_dir)],
-                stdin=subprocess.DEVNULL,
-                stdout=runner_log,
-                stderr=runner_log,
-                close_fds=True,
-                **_background_options(),
-            )
+            containment_plan = request.get("containment_plan")
+            if (
+                registry is not None
+                and registry_lease_id is not None
+                and isinstance(containment_plan, dict)
+            ):
+                secret = secrets.token_bytes(32)
+                atomic_write_bytes(run_dir / "guardian.key", secret)
+                write_guardian_message(
+                    run_dir / "guardian-request.json",
+                    secret,
+                    "guardian-request",
+                    {
+                        "guardian_id": containment_plan["guardian_id"],
+                        "provider_plan_id": containment_plan["provider_plan_id"],
+                        "ipc_plan_id": containment_plan["ipc_plan_id"],
+                        "agent_name": profile.name,
+                        "repo": str(repo),
+                        "lease_id": registry_lease_id,
+                        "allowed_set_digest": request["lifecycle_allowed_set_digest"],
+                        "boundary_timeout": max(600.0, float(args.activation_timeout)),
+                    },
+                )
+                if containment_plan.get("recovery_target") is True:
+                    registry.claim_launch(
+                        registry_lease_id,
+                        containment_plan["contained_launch_token"],
+                    )
+                else:
+                    registry.claim_contained_launch(
+                        registry_lease_id,
+                        containment_plan["contained_launch_token"],
+                    )
+                guardian = spawn_containment_guardian(run_dir, runner_log)
+                disposition, guardian_receipt = await_guardian_launch(run_dir, secret, guardian)
+                if disposition == "ready":
+                    candidate_worker = guardian_receipt.get("worker")
+                    if not isinstance(candidate_worker, dict):
+                        raise RunnerError("guardian launch receipt lacks the worker creation receipt")
+                    worker_record = dict(candidate_worker)
+                    disposition, precommit_receipt = await_guardian_precommit(
+                        run_dir,
+                        secret,
+                        guardian,
+                        guardian_receipt,
+                    )
+                    if disposition == "failed":
+                        guardian_receipt = precommit_receipt
+                    else:
+                        bound_state = registry.state()
+                        bound_lease = bound_state.get("lease")
+                        bound_plan = (
+                            bound_lease.get("plan", {})
+                            if isinstance(bound_lease, dict)
+                            and bound_lease.get("lease_kind") == "recovery-target"
+                            else bound_lease.get("containment_plan", {})
+                            if isinstance(bound_lease, dict)
+                            else {}
+                        )
+                        provider_receipt = (
+                            bound_lease.get("provider_receipt", {})
+                            if isinstance(bound_lease, dict)
+                            else {}
+                        )
+                        if (
+                            bound_state.get("digest") != precommit_receipt.get("registry_digest")
+                            or not isinstance(bound_lease, dict)
+                            or bound_lease.get("lease_id") != registry_lease_id
+                            or bound_lease.get("state") != "process-bound-unactivated"
+                            or bound_lease.get("allowed_set_digest")
+                            != request["lifecycle_allowed_set_digest"]
+                            or bound_lease.get("process_receipt") != worker_record
+                            or bound_plan.get("provider_plan_id")
+                            != containment_plan["provider_plan_id"]
+                            or bound_plan.get("ipc_plan_id") != containment_plan["ipc_plan_id"]
+                            or guardian_receipt.get("provider_plan_id")
+                            != containment_plan["provider_plan_id"]
+                            or guardian_receipt.get("ipc_plan_id")
+                            != containment_plan["ipc_plan_id"]
+                            or precommit_receipt.get("provider_plan_id")
+                            != containment_plan["provider_plan_id"]
+                            or precommit_receipt.get("ipc_plan_id")
+                            != containment_plan["ipc_plan_id"]
+                            or provider_receipt.get("provider_plan_id")
+                            != containment_plan["provider_plan_id"]
+                            or provider_receipt.get("ipc_plan_id")
+                            != containment_plan["ipc_plan_id"]
+                            or provider_receipt.get("precommit", {}).get("provider_plan_id")
+                            != containment_plan["provider_plan_id"]
+                            or provider_receipt.get("precommit", {}).get("ipc_plan_id")
+                            != containment_plan["ipc_plan_id"]
+                            or provider_receipt.get("precommit", {})
+                            .get("precommit_nonce")
+                            != precommit_receipt.get("precommit_nonce")
+                        ):
+                            raise RunnerError(
+                                "guardian precommit did not atomically commit the registry boundary"
+                            )
+                        write_guardian_message(
+                            run_dir / "containment-bound.json",
+                            secret,
+                            "containment-bound",
+                            {
+                                "guardian_id": containment_plan["guardian_id"],
+                                "worker_pid": worker_record["pid"],
+                                "worker_identity": worker_record["identity"],
+                                "allowed_set_digest": request["lifecycle_allowed_set_digest"],
+                                "provider_plan_id": containment_plan["provider_plan_id"],
+                                "ipc_plan_id": containment_plan["ipc_plan_id"],
+                                "precommit_nonce": precommit_receipt["precommit_nonce"],
+                            },
+                        )
+                        worker = guardian
+                        launch_mode = "contained"
+                if disposition == "failed":
+                    worker, launch_mode = apply_preboundary_guardian_failure(
+                        registry,
+                        registry_lease_id,
+                        containment_plan,
+                        guardian_receipt,
+                        run_dir=run_dir,
+                        runner_log=runner_log,
+                    )
+            else:
+                worker = _spawn_worker_process(run_dir, runner_log, contained=False)
+                launch_mode = "legacy"
         finally:
             runner_log.close()
-        worker_identity = process_identity_from_popen(worker)
-        if worker_identity is None:
-            raise RunnerError("cannot record worker process creation identity")
-        setattr(worker, "_openbuild_process_identity", worker_identity)
-        worker_record = {
-            "pid": worker.pid,
-            "identity": worker_identity,
-            "process_group_id": worker.pid,
-            "started_at": utc_now(),
-        }
-        atomic_write_json(run_dir / "worker.json", worker_record)
+        if launch_mode != "contained":
+            worker_identity = process_identity_from_popen(worker)
+            if worker_identity is None:
+                raise RunnerError("cannot record worker process creation identity")
+            setattr(worker, "_openbuild_process_identity", worker_identity)
+            worker_record = {
+                "pid": worker.pid,
+                "identity": worker_identity,
+                "process_group_id": worker.pid,
+                "started_at": utc_now(),
+            }
+            atomic_write_json(run_dir / "worker.json", worker_record)
+            if registry is not None and registry_lease_id is not None:
+                if launch_mode == "fallback":
+                    fallback_bind_attempted = True
+                    fallback_bound = registry.bind_fallback_process_unactivated(
+                        registry_lease_id,
+                        process_receipt=worker_record,
+                    )
+                    fallback_bound_lease = fallback_bound.get("lease")
+                    fallback_bound_digest = fallback_bound.get("digest")
+                    if (
+                        not isinstance(fallback_bound_digest, str)
+                        or re.fullmatch(r"[0-9a-f]{64}", fallback_bound_digest) is None
+                        or not isinstance(fallback_bound_lease, dict)
+                        or fallback_bound_lease.get("lease_id") != registry_lease_id
+                        or fallback_bound_lease.get("lease_kind") != "normal-fallback"
+                        or fallback_bound_lease.get("recovery_capable") is not False
+                        or fallback_bound_lease.get("state")
+                        != "ordinary-process-bound-unactivated"
+                        or fallback_bound_lease.get("process_receipt") != worker_record
+                    ):
+                        raise RunnerError(
+                            "ordinary fallback process bind did not return its exact durable receipt"
+                        )
+                    fallback_bind_verified = True
+                else:
+                    registry.bind_legacy_process_unactivated(
+                        registry_lease_id,
+                        process_receipt=worker_record,
+                    )
         startup_deadline = time.monotonic() + 20.0
         while not (run_dir / "codex.json").is_file():
             worker_state = process_record_state(worker_record)
@@ -1610,6 +3817,32 @@ def start_run(args: argparse.Namespace) -> int:
                 f"startup cleanup was attempted but failure receipt could not be written: {record_error}; "
                 f"artifacts: {run_dir}"
             ) from record_error
+        fallback_launch_quarantined = False
+        if registry is not None and registry_lease_id is not None:
+            try:
+                registry_state = registry.state()
+                registry_lease = registry_state.get("lease")
+                if isinstance(registry_lease, dict) and (
+                    registry_lease.get("state") == "ordinary-fallback-claimed"
+                    or (
+                        registry_lease.get("state") == "ordinary-process-bound-unactivated"
+                        and fallback_bind_attempted
+                        and not fallback_bind_verified
+                    )
+                ):
+                    registry.quarantine_fallback_launch(
+                        registry_lease_id,
+                        (
+                            "fallback-process-bind-ambiguous"
+                            if fallback_bind_attempted
+                            else "fallback-spawn-or-identity-ambiguous"
+                        ),
+                    )
+                    fallback_launch_quarantined = True
+            except RecoveryStateError as quarantine_exc:
+                raise RunnerError(
+                    f"{exc}; ambiguous fallback launch could not be quarantined: {quarantine_exc}"
+                ) from exc
         if cleanup_errors:
             raise RunnerError(
                 f"{exc}; startup cleanup was not confirmed for {run_dir}: {'; '.join(cleanup_errors)}"
@@ -1619,6 +3852,44 @@ def start_run(args: argparse.Namespace) -> int:
                 f"{exc}; startup cleanup is unconfirmed because creation-bound stopped-process "
                 f"evidence is unavailable; artifacts: {run_dir}"
             ) from exc
+        if (
+            registry is not None
+            and registry_lease_id is not None
+            and not fallback_launch_quarantined
+        ):
+            try:
+                registry_state = registry.state()
+                registry_lease = registry_state.get("lease")
+                if not isinstance(registry_lease, dict):
+                    pass
+                elif registry_lease.get("state") in {
+                    "reserved",
+                    "normal-preflight-reserved",
+                    "normal-snapshot-bound",
+                }:
+                    registry.release_unactivated_reservation(registry_lease_id)
+                elif registry_lease.get("recovery_capable") is False:
+                    registry.release_legacy_terminal(
+                        registry_lease_id,
+                        {"success": False, "process_tree_stopped": True},
+                    )
+                elif registry_lease.get("state") == "process-bound-unactivated":
+                    try:
+                        registry.containment_failed_before_boundary(
+                            registry_lease_id,
+                            "startup-failure-after-containment-boundary",
+                        )
+                    except RecoveryStateError as quarantine_exc:
+                        if "quarantined" not in str(quarantine_exc):
+                            raise
+                else:
+                    raise RecoveryStateError(
+                        f"startup stopped in retained recovery lifecycle {registry_lease.get('state')}"
+                    )
+            except RecoveryStateError as release_exc:
+                raise RunnerError(
+                    f"{exc}; startup stopped but private workspace reservation could not be released: {release_exc}"
+                ) from exc
         raise RunnerError(f"{exc}; startup process tree stopped; artifacts: {run_dir}") from exc
 
 
@@ -1735,6 +4006,22 @@ def worker_run(run_dir: Path) -> int:
         os.umask(0o077)
         signal.signal(signal.SIGTERM, worker_termination_handler)
         signal.signal(signal.SIGINT, worker_termination_handler)
+    contained_by_guardian = os.environ.get("OPENBUILD_CONTAINED_BY_GUARDIAN") == "1"
+    if contained_by_guardian:
+        worker_identity = process_identity(os.getpid())
+        if worker_identity is None:
+            raise RunnerError("contained worker creation identity is unavailable")
+        provider = os.environ.get("OPENBUILD_CONTAINMENT_PROVIDER")
+        if provider == "linux-cgroup-v2":
+            establish_linux_anti_migration_boundary(run_dir, worker_identity)
+        elif sys.platform == "linux":
+            raise RunnerError("Linux contained worker lacks an anti-migration provider")
+        await_worker_containment_gate(
+            run_dir,
+            expected_pid=os.getpid(),
+            expected_identity=worker_identity,
+            timeout=600.0,
+        )
     await_worker_record(run_dir)
     request = read_json(run_dir / "request.json")
     profile_data = request["profile"]
@@ -1758,7 +4045,7 @@ def worker_run(run_dir: Path) -> int:
         prompt = effective_prompt(profile, request["task_name"], task_prompt).encode("utf-8")
         environment = scrub_api_credentials(os.environ)
         validate_subscription_configuration(Path(request["codex_home"]), Path(request["repo"]))
-        if os.name == "nt" and ACTIVE_WINDOWS_JOB is None:
+        if os.name == "nt" and ACTIVE_WINDOWS_JOB is None and not contained_by_guardian:
             ACTIVE_WINDOWS_JOB = create_windows_kill_job()
         require_chatgpt_login(request["command"][0], environment)
         with open_private_binary(run_dir / "events.jsonl") as stdout, open_private_binary(
@@ -1857,15 +4144,20 @@ def worker_run(run_dir: Path) -> int:
 
 
 def status_run(args: argparse.Namespace) -> int:
-    receipt = public_receipt(Path(args.run_dir).expanduser().resolve())
+    run_dir = Path(args.run_dir).expanduser().resolve()
+    audit_guardian_health(run_dir)
+    receipt = public_receipt(run_dir)
+    reconcile_implementation_registry(run_dir, receipt)
     print(json.dumps(receipt, ensure_ascii=False, indent=2))
     return 1 if receipt["status"] == "failed" else 0
 
 
 def activate_run(args: argparse.Namespace) -> int:
     run_dir = Path(args.run_dir).expanduser().resolve()
+    audit_guardian_health(run_dir)
     receipt = public_receipt(run_dir)
     if receipt["status"] != "running":
+        reconcile_implementation_registry(run_dir, receipt)
         print(json.dumps(receipt, ensure_ascii=False, indent=2))
         return 0 if receipt["status"] == "completed" else 1
     if not receipt.get("codex_pid") or not receipt.get("codex_process_identity"):
@@ -1879,6 +4171,29 @@ def activate_run(args: argparse.Namespace) -> int:
         ):
             raise RunnerError("existing activation does not match the live creation-bound Codex process")
     else:
+        request_path = run_dir / "request.json"
+        if request_path.is_file():
+            request = read_json(request_path)
+            registry = recovery_registry_for_agent(request["profile"]["name"], Path(request["repo"]))
+            lease_id = request.get("lease_id")
+            if registry is not None and isinstance(lease_id, str):
+                allowed_set_digest = request.get("lifecycle_allowed_set_digest") or (
+                    request.get("recovery_preflight") or {}
+                ).get("allowed_set_digest", "")
+                state = registry.state_for_activation()
+                lease = state.get("lease")
+                if not isinstance(lease, dict) or lease.get("lease_id") != lease_id:
+                    raise RunnerError("workspace activation lease is missing or changed")
+                if lease.get("state") in {
+                    "process-bound-unactivated",
+                    "ordinary-process-bound-unactivated",
+                    "running",
+                    "active",
+                    "legacy-running",
+                }:
+                    registry.commit_activation(lease_id, allowed_set_digest)
+                else:
+                    raise RunnerError("workspace activation lifecycle is not resumable")
         atomic_write_json(
             activation_path,
             {
@@ -1896,14 +4211,16 @@ def wait_run(args: argparse.Namespace) -> int:
     run_dir = Path(args.run_dir).expanduser().resolve()
     deadline = time.monotonic() + args.timeout
     while True:
+        audit_guardian_health(run_dir)
         receipt = public_receipt(run_dir)
         if receipt["status"] != "running":
+            reconcile_implementation_registry(run_dir, receipt)
             print(json.dumps(receipt, ensure_ascii=False, indent=2))
             return 0 if receipt["status"] == "completed" else 1
         if time.monotonic() >= deadline:
             receipt["status"] = "timeout"
             print(json.dumps(receipt, ensure_ascii=False, indent=2))
-            return 3
+            return 0 if args.soft_timeout_exit_zero else 3
         time.sleep(args.poll_seconds)
 
 
@@ -2030,8 +4347,10 @@ def terminate_process_tree(
 
 def cancel_run(args: argparse.Namespace) -> int:
     run_dir = Path(args.run_dir).expanduser().resolve()
+    audit_guardian_health(run_dir)
     receipt = public_receipt(run_dir)
     if receipt["status"] != "running":
+        reconcile_implementation_registry(run_dir, receipt)
         print(json.dumps(receipt, ensure_ascii=False, indent=2))
         return 0 if receipt["status"] == "completed" else 1
     worker_record = {
@@ -2044,9 +4363,33 @@ def cancel_run(args: argparse.Namespace) -> int:
         "identity": receipt.get("codex_process_identity"),
         "process_group_id": receipt.get("codex_process_group_id"),
     }
-    terminate_process_tree(worker_record, codex_record, args.grace_seconds)
+    if (run_dir / "guardian-ready.json").is_file():
+        secret = _guardian_secret(run_dir)
+        ready = read_guardian_message(
+            run_dir / "guardian-ready.json",
+            secret,
+            "guardian-ready",
+        )
+        write_guardian_message(
+            run_dir / "guardian-cancel.json",
+            secret,
+            "guardian-cancel",
+            {"guardian_id": ready.get("guardian_id"), "cancelled_at": utc_now()},
+        )
+        await_guardian_record(
+            run_dir,
+            secret,
+            "guardian-zero.json",
+            "guardian-zero",
+            timeout=max(20.0, float(args.grace_seconds)),
+        )
+        if not _wait_until_stopped([worker_record, codex_record], args.grace_seconds):
+            raise RunnerError("contained worker records did not stop after guardian cancellation")
+    else:
+        terminate_process_tree(worker_record, codex_record, args.grace_seconds)
     receipt = public_receipt(run_dir)
     if receipt["status"] == "completed":
+        reconcile_implementation_registry(run_dir, receipt)
         print(json.dumps(receipt, ensure_ascii=False, indent=2))
         return 0
     evidence = read_event_evidence(run_dir / "events.jsonl")
@@ -2087,6 +4430,7 @@ def cancel_run(args: argparse.Namespace) -> int:
             },
         )
         receipt = public_receipt(run_dir)
+        reconcile_implementation_registry(run_dir, receipt)
         print(json.dumps(receipt, ensure_ascii=False, indent=2))
         return 0
     if not (run_dir / "exit.json").is_file():
@@ -2117,6 +4461,7 @@ def cancel_run(args: argparse.Namespace) -> int:
             },
         )
     receipt = public_receipt(run_dir)
+    reconcile_implementation_registry(run_dir, receipt)
     print(json.dumps(receipt, ensure_ascii=False, indent=2))
     return 0 if receipt["status"] == "completed" else 1
 
@@ -2132,6 +4477,9 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--prompt-file", required=True)
     start.add_argument("--run-dir")
     start.add_argument("--lease-id")
+    start.add_argument("--allowed-file", action="append", default=[])
+    start.add_argument("--specification-revision")
+    start.add_argument("--recovery-target-milestone")
     start.add_argument("--activation-timeout", type=float, default=300.0)
     start.add_argument("--codex-bin", default=os.environ.get("OPENBUILD_CODEX_BIN", "codex"))
     start.set_defaults(handler=start_run)
@@ -2148,6 +4496,11 @@ def build_parser() -> argparse.ArgumentParser:
     wait.add_argument("--run-dir", required=True)
     wait.add_argument("--timeout", type=float, default=1800.0)
     wait.add_argument("--poll-seconds", type=float, default=1.0)
+    wait.add_argument(
+        "--soft-timeout-exit-zero",
+        action="store_true",
+        help="return zero for a non-terminal observation timeout while preserving status=timeout",
+    )
     wait.set_defaults(handler=wait_run)
 
     cancel = subparsers.add_parser("cancel", help="stop a running worker process tree")
@@ -2158,6 +4511,27 @@ def build_parser() -> argparse.ArgumentParser:
     worker = subparsers.add_parser("_worker", help=argparse.SUPPRESS)
     worker.add_argument("--run-dir", required=True)
     worker.set_defaults(handler=lambda args: worker_run(Path(args.run_dir).resolve()))
+    guardian = subparsers.add_parser("_guardian", help=argparse.SUPPRESS)
+    guardian.add_argument("--run-dir", required=True)
+    guardian.set_defaults(handler=lambda args: guardian_run(Path(args.run_dir).resolve()))
+    finalize = subparsers.add_parser("_finalize-success", help=argparse.SUPPRESS)
+    finalize.add_argument("--run-dir", required=True)
+    finalize.add_argument("--primary-signal-digest", required=True)
+    finalize.set_defaults(handler=finalize_success_run)
+    reject = subparsers.add_parser("_reject-handoff", help=argparse.SUPPRESS)
+    reject.add_argument("--run-dir", required=True)
+    reject.add_argument("--disposition", choices=["blocked", "needs-escalation"], required=True)
+    reject.add_argument("--evidence-digest", required=True)
+    reject.set_defaults(handler=reject_semantic_handoff_run)
+    authorize = subparsers.add_parser("_authorize-recovery", help=argparse.SUPPRESS)
+    authorize.add_argument("--repo", required=True)
+    authorize.add_argument("--checkpoint-file", required=True)
+    authorize.add_argument("--prompt-file", required=True)
+    authorize.add_argument("--run-dir", required=True)
+    authorize.add_argument("--lease-id", required=True)
+    authorize.add_argument("--user-action-digest", required=True)
+    authorize.add_argument("--specification-revision", required=True)
+    authorize.set_defaults(handler=authorize_recovery_run)
     return parser
 
 
