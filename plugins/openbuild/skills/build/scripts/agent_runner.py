@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import ctypes
 import errno
 import hashlib
 import hmac
+import io
 import json
 import os
 import re
@@ -20,7 +22,7 @@ import sys
 import tempfile
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, NamedTuple
 
@@ -65,6 +67,7 @@ PROVIDER_ENVIRONMENT_OVERRIDES = {
 }
 TERMINAL_EVENTS = {"turn.completed", "turn.failed"}
 SCHEMA_VERSION = 1
+OBSERVATION_BUDGET_SECONDS = 900
 PACKAGED_PROFILE_DIR = Path(__file__).resolve().parents[1] / "profiles"
 SEARCH_DEVELOPER_INSTRUCTIONS = (
     "You are the already-delegated read-only Explorer. Do not spawn or delegate to another agent.\n\n"
@@ -136,6 +139,23 @@ class AgentProfile(NamedTuple):
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def activation_window(now: datetime | None = None) -> dict[str, str]:
+    """Return the immutable public observation window for a newly activated run."""
+    activated_at = now or datetime.now(timezone.utc)
+    if activated_at.tzinfo is None:
+        raise RunnerError("activation timestamp must be timezone-aware")
+    activated_at = activated_at.astimezone(timezone.utc)
+    return {
+        "activated_at": activated_at.isoformat(timespec="microseconds").replace("+00:00", "Z"),
+        "observation_started_at": activated_at.isoformat(timespec="microseconds").replace(
+            "+00:00", "Z"
+        ),
+        "observation_deadline_at": (activated_at + timedelta(seconds=OBSERVATION_BUDGET_SECONDS))
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z"),
+    }
 
 
 def sha256_bytes(value: bytes) -> str:
@@ -3135,6 +3155,11 @@ def authorize_recovery_run(args: argparse.Namespace) -> int:
 def public_receipt(run_dir: Path) -> dict[str, Any]:
     request = read_json(run_dir / "request.json")
     profile = request["profile"]
+    activation = (
+        read_json(run_dir / "activate.json")
+        if (run_dir / "activate.json").is_file()
+        else {}
+    )
     exit_record = read_json(run_dir / "exit.json") if (run_dir / "exit.json").is_file() else None
     worker = read_json(run_dir / "worker.json") if (run_dir / "worker.json").is_file() else {}
     codex_process = read_json(run_dir / "codex.json") if (run_dir / "codex.json").is_file() else {}
@@ -3250,7 +3275,10 @@ def public_receipt(run_dir: Path) -> dict[str, Any]:
         "agent_name": profile["name"],
         "task_name": request["task_name"],
         "lease_id": request.get("lease_id"),
-        "activated": (run_dir / "activate.json").is_file(),
+        "activated": bool(activation),
+        "activated_at": activation.get("activated_at"),
+        "observation_started_at": activation.get("observation_started_at"),
+        "observation_deadline_at": activation.get("observation_deadline_at"),
         "configured_model": profile["model"],
         "model_reasoning_effort": profile["reasoning_effort"],
         "observed_agent": profile["name"] if status == "completed" else None,
@@ -3721,6 +3749,7 @@ def start_run(args: argparse.Namespace) -> int:
             or not receipt.get("codex_process_identity")
         ):
             raise RunnerError("worker did not publish a valid unactivated running receipt")
+        atomic_write_json(run_dir / "dispatch-unactivated-receipt.json", receipt)
         print(json.dumps(receipt, ensure_ascii=False, indent=2))
         return 0
     except BaseException as exc:
@@ -4197,14 +4226,44 @@ def activate_run(args: argparse.Namespace) -> int:
         atomic_write_json(
             activation_path,
             {
-                "activated_at": utc_now(),
+                **activation_window(),
                 "codex_pid": receipt["codex_pid"],
                 "codex_process_identity": receipt["codex_process_identity"],
             },
         )
     receipt = public_receipt(run_dir)
+    atomic_write_json(run_dir / "dispatch-activated-receipt.json", receipt)
     print(json.dumps(receipt, ensure_ascii=False, indent=2))
     return 1 if receipt["status"] == "failed" else 0
+
+
+def dispatch_run(args: argparse.Namespace) -> int:
+    """Atomically create the unactivated receipt and activate that exact run.
+
+    Legacy callers may still use ``start`` and ``activate`` independently.  Normal
+    OpenBuild orchestration uses this owner-side sequence so no root action can
+    interleave between the durable unactivated and activated receipts.
+    """
+    if not getattr(args, "run_dir", None):
+        args.run_dir = str(default_run_dir().resolve())
+    start_output = io.StringIO()
+    with contextlib.redirect_stdout(start_output):
+        started = start_run(args)
+    if started != 0:
+        print(start_output.getvalue(), end="")
+        return started
+    run_dir = getattr(args, "run_dir", None)
+    if not isinstance(run_dir, str) or not run_dir:
+        raise RunnerError("dispatch did not retain the started run directory")
+    resolved_run_dir = Path(run_dir).expanduser().resolve()
+    unactivated = read_json(resolved_run_dir / "dispatch-unactivated-receipt.json")
+    if unactivated.get("status") != "running" or unactivated.get("activated") is not False:
+        raise RunnerError("dispatch requires the durable unactivated receipt for the exact started run")
+    with contextlib.redirect_stdout(io.StringIO()):
+        activated = activate_run(argparse.Namespace(run_dir=run_dir))
+    activated_receipt = read_json(resolved_run_dir / "dispatch-activated-receipt.json")
+    print(json.dumps(activated_receipt, ensure_ascii=False, indent=2))
+    return activated
 
 
 def wait_run(args: argparse.Namespace) -> int:
@@ -4483,6 +4542,23 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--activation-timeout", type=float, default=300.0)
     start.add_argument("--codex-bin", default=os.environ.get("OPENBUILD_CODEX_BIN", "codex"))
     start.set_defaults(handler=start_run)
+
+    dispatch = subparsers.add_parser(
+        "dispatch",
+        help="start and immediately activate one explicit-model Codex agent",
+    )
+    dispatch.add_argument("--agent", required=True, choices=sorted(SUPPORTED_AGENTS))
+    dispatch.add_argument("--task-name", required=True)
+    dispatch.add_argument("--repo", required=True)
+    dispatch.add_argument("--prompt-file", required=True)
+    dispatch.add_argument("--run-dir")
+    dispatch.add_argument("--lease-id")
+    dispatch.add_argument("--allowed-file", action="append", default=[])
+    dispatch.add_argument("--specification-revision")
+    dispatch.add_argument("--recovery-target-milestone")
+    dispatch.add_argument("--activation-timeout", type=float, default=300.0)
+    dispatch.add_argument("--codex-bin", default=os.environ.get("OPENBUILD_CODEX_BIN", "codex"))
+    dispatch.set_defaults(handler=dispatch_run)
 
     status = subparsers.add_parser("status", help="print the current audited run receipt")
     status.add_argument("--run-dir", required=True)

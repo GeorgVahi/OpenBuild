@@ -562,6 +562,7 @@ class ImplementationDelegationContractTests(unittest.TestCase):
         self.tdd_workflow = (SKILL / "references" / "tdd-workflow.md").read_text(encoding="utf-8")
         self.readme = (ROOT / "README.md").read_text(encoding="utf-8")
         self.readme_ru = (ROOT / "README.ru.md").read_text(encoding="utf-8")
+        self.runner_text = (SKILL / "scripts" / "agent_runner.py").read_text(encoding="utf-8")
 
     def validate(self, **overrides: str) -> list[str]:
         return validate_implementation_delegation_contract(
@@ -571,6 +572,7 @@ class ImplementationDelegationContractTests(unittest.TestCase):
             overrides.get("tdd_workflow", self.tdd_workflow),
             overrides.get("readme", self.readme),
             overrides.get("readme_ru", self.readme_ru),
+            overrides.get("runner_text", self.runner_text),
         )
 
     def test_adaptive_delegation_protocol_is_required_and_linked(self) -> None:
@@ -601,7 +603,7 @@ class ImplementationDelegationContractTests(unittest.TestCase):
         self.assertTrue(any("root handoff" in error for error in self.validate(protocol_text=protocol)))
 
         protocol = self.protocol_text.replace(
-            "Do not repair an edited or failed milestone through the root or a replacement lease",
+            "Do not repair an edited or failed milestone through a replacement lease without new explicit user authority",
             "Repair that milestone through a new route",
         )
         self.assertTrue(any("root handoff" in error for error in self.validate(protocol_text=protocol)))
@@ -611,6 +613,65 @@ class ImplementationDelegationContractTests(unittest.TestCase):
             "select a fallback writer",
         )
         self.assertTrue(any("failed exact writer recovery" in error for error in self.validate(tdd_workflow=tdd_workflow)))
+
+    def test_automatic_orchestration_contract_cannot_regress_to_manual_control(self) -> None:
+        skill = self.skill_text.replace("runner-owned `dispatch`", "manual `start`")
+        self.assertTrue(
+            any("runner-owned dispatch" in error for error in self.validate(skill_text=skill))
+        )
+
+        routing = self.model_routing.replace(
+            "one immutable 900-second observation budget", "manual observation windows"
+        )
+        self.assertTrue(
+            any("automatic deadline" in error for error in self.validate(model_routing=routing))
+        )
+
+        protocol = self.protocol_text.replace(
+            "normalized-malformed-needs-escalation", "manual-escalation"
+        )
+        self.assertTrue(
+            any("malformed escalation" in error for error in self.validate(protocol_text=protocol))
+        )
+
+        protocol = self.protocol_text.replace("same-profile-retry", "manual-retry")
+        self.assertTrue(
+            any("same-profile retry" in error for error in self.validate(protocol_text=protocol))
+        )
+
+        runner = self.runner_text.replace("dispatch-unactivated-receipt.json", "manual-receipt")
+        self.assertTrue(
+            any("durable unactivated receipt" in error for error in self.validate(runner_text=runner))
+        )
+
+        skill = self.skill_text.replace(
+            "Only a new recovery target writer requires explicit user opt-in",
+            "Every failed contained run requires explicit user opt-in",
+        )
+        self.assertTrue(
+            any("recovery target authority boundary" in error for error in self.validate(skill_text=skill))
+        )
+
+        tdd_workflow = self.tdd_workflow.replace("runner-owned `dispatch`", "manual `start` and `activate`")
+        self.assertTrue(
+            any("tdd-workflow.md automatic orchestration" in error for error in self.validate(tdd_workflow=tdd_workflow))
+        )
+
+        readme = self.readme.replace(
+            "continues observing automatically within one immutable 15-minute budget",
+            "asks whether to continue after the third checkpoint",
+        )
+        self.assertTrue(
+            any("README.md automatic orchestration" in error for error in self.validate(readme=readme))
+        )
+
+        readme_ru = self.readme_ru.replace(
+            "Только новый checkpoint-bound recovery target writer требует явного разрешения пользователя",
+            "Любое продолжение требует явного разрешения пользователя",
+        )
+        self.assertTrue(
+            any("README.ru.md automatic orchestration" in error for error in self.validate(readme_ru=readme_ru))
+        )
 
 
 
@@ -626,7 +687,7 @@ class ChangelogContractTests(unittest.TestCase):
     def test_released_version_is_pinned_in_both_install_channels(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         readme_ru = (ROOT / "README.ru.md").read_text(encoding="utf-8")
-        self.assertEqual(validate_release_docs_contract(readme, readme_ru, "2.2.0"), [])
+        self.assertEqual(validate_release_docs_contract(readme, readme_ru, "2.2.1"), [])
 
         mutated = readme.replace("--ref v2.2.0", "--ref main")
         self.assertTrue(any("README.md" in error for error in validate_release_docs_contract(mutated, readme_ru, "2.2.0")))
@@ -1925,6 +1986,13 @@ class UsageRoutingContractTests(unittest.TestCase):
             "use legacy `openbuild-discovery` when needed",
         )
         self.assertTrue(any("legacy openbuild-discovery" in error for error in self.validate(code_discovery=code_discovery)))
+
+    def test_search_and_review_activation_are_runner_owned(self) -> None:
+        code_discovery = self.code_discovery.replace("runner-owned `dispatch`", "manual `start` and `activate`")
+        self.assertTrue(any("exact agent dispatch" in error for error in self.validate(code_discovery=code_discovery)))
+
+        review_protocol = self.review_protocol.replace("runner-owned `dispatch`", "manual `start` and `activate`")
+        self.assertTrue(any("exact reviewer routing" in error for error in self.validate(review_protocol=review_protocol)))
 
     def test_silent_generic_fallback_and_missing_receipt_are_rejected(self) -> None:
         model_routing = self.model_routing.replace(

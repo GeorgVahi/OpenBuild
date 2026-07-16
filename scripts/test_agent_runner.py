@@ -14,6 +14,7 @@ import tempfile
 import unittest
 from argparse import Namespace
 from contextlib import redirect_stdout
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -2806,6 +2807,87 @@ class CodexInvocationTests(unittest.TestCase):
             result = agent_runner.activate_run(Namespace(run_dir=temp))
 
         self.assertEqual(result, 1)
+
+    def test_dispatch_starts_then_immediately_activates_the_same_run(self) -> None:
+        args = Namespace(run_dir=str(ROOT))
+        with mock.patch.object(agent_runner, "start_run", return_value=0) as start, mock.patch.object(
+            agent_runner, "activate_run", return_value=0
+        ) as activate, mock.patch.object(
+            agent_runner, "read_json", return_value={"status": "running", "activated": False}
+        ):
+            self.assertEqual(agent_runner.dispatch_run(args), 0)
+
+        start.assert_called_once_with(args)
+        activate.assert_called_once()
+        self.assertEqual(Path(activate.call_args.args[0].run_dir).resolve(), ROOT.resolve())
+
+    def test_dispatch_emits_only_the_activated_receipt(self) -> None:
+        args = Namespace(run_dir=str(ROOT))
+
+        def receipt(path: Path) -> dict[str, object]:
+            if path.name == "dispatch-unactivated-receipt.json":
+                return {"status": "running", "activated": False}
+            if path.name == "dispatch-activated-receipt.json":
+                return {"status": "running", "activated": True}
+            raise AssertionError(path)
+
+        output = io.StringIO()
+        with mock.patch.object(
+            agent_runner, "start_run", side_effect=lambda _args: print('{"activated": false}') or 0
+        ), mock.patch.object(
+            agent_runner, "activate_run", side_effect=lambda _args: print('{"activated": true}') or 0
+        ), mock.patch.object(agent_runner, "read_json", side_effect=receipt), redirect_stdout(output):
+            self.assertEqual(agent_runner.dispatch_run(args), 0)
+
+        self.assertEqual(json.loads(output.getvalue()), {"status": "running", "activated": True})
+
+    def test_dispatch_allocates_one_run_before_starting_when_none_is_supplied(self) -> None:
+        args = Namespace(run_dir=None)
+        run_dir = ROOT / ".tmp" / "dispatch-fixture"
+        with mock.patch.object(agent_runner, "default_run_dir", return_value=run_dir), mock.patch.object(
+            agent_runner, "start_run", return_value=0
+        ) as start, mock.patch.object(agent_runner, "activate_run", return_value=0) as activate, mock.patch.object(
+            agent_runner, "read_json", return_value={"status": "running", "activated": False}
+        ):
+            self.assertEqual(agent_runner.dispatch_run(args), 0)
+
+        self.assertEqual(args.run_dir, str(run_dir.resolve()))
+        start.assert_called_once_with(args)
+        self.assertEqual(activate.call_args.args[0].run_dir, str(run_dir.resolve()))
+
+    def test_activation_window_is_an_immutable_nine_hundred_second_budget(self) -> None:
+        window = agent_runner.activation_window(
+            datetime(2026, 7, 16, 12, 0, 0, 123456, tzinfo=timezone.utc)
+        )
+
+        self.assertEqual(window["activated_at"], "2026-07-16T12:00:00.123456Z")
+        self.assertEqual(window["observation_started_at"], window["activated_at"])
+        self.assertEqual(window["observation_deadline_at"], "2026-07-16T12:15:00.123456Z")
+
+    def test_dispatch_is_the_new_parser_command_while_start_and_activate_remain_available(self) -> None:
+        parser = agent_runner.build_parser()
+
+        self.assertIs(
+            parser.parse_args(
+                [
+                    "dispatch",
+                    "--agent",
+                    "openbuild_review_fast",
+                    "--task-name",
+                    "fixture",
+                    "--repo",
+                    ".",
+                    "--prompt-file",
+                    "prompt.md",
+                ]
+            ).handler,
+            agent_runner.dispatch_run,
+        )
+        self.assertIs(parser.parse_args(["start", "--agent", "openbuild_review_fast", "--task-name", "fixture", "--repo", ".", "--prompt-file", "prompt.md"]).handler, agent_runner.start_run)
+        self.assertIs(
+            parser.parse_args(["activate", "--run-dir", "."]).handler,
+            agent_runner.activate_run,
+        )
 
     def test_worker_interrupt_after_popen_records_failure_before_reraising(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

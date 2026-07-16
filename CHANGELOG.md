@@ -4,6 +4,19 @@ OpenBuild follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.2.1] - 2026-07-16
+
+### Changed
+
+- OpenBuild now launches exact agents through one runner-owned `dispatch` operation that durably records the unactivated receipt and immediately activates the same run. Legacy `start`/`activate` commands remain compatible, while ordinary orchestration can no longer leave a reviewer or writer waiting behind an unreleased prompt gate.
+- Routine internal decisions no longer interrupt the user: 45/90/120-second checks remain soft observations, the same run continues automatically within one immutable 15-minute budget, and the hard deadline triggers safe cancellation and full-tree-stop verification without a confirmation question.
+- Verified zero-write same-profile retries, canonical or unambiguously malformed configured escalation requests, and safe root completion now follow bounded automatic policies. Transport, infrastructure, containment, scope, route, privacy, or authorization ambiguity still fails closed and material product or architecture decisions remain user-owned.
+- The packaged defaults, `codex-exec-explicit-model`, project → user → packaged precedence, and the ban on unknown-model agent routes remain unchanged; both README files now pin and describe 2.2.1.
+
+### Fixed
+
+- Added immutable activation/deadline evidence and package mutation tests so atomic activation, the 900-second observation budget, automatic retry/escalation boundaries, and the routine-question boundary cannot silently regress.
+
 ## [2.2.0] - 2026-07-16
 
 ### Added

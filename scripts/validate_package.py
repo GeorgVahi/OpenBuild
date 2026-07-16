@@ -3130,9 +3130,11 @@ def validate_implementation_delegation_contract(
     tdd_workflow: str,
     readme: str,
     readme_ru: str,
+    runner_text: str,
 ) -> list[str]:
     errors: list[str] = []
     implementation = markdown_section(skill_text, "## Implement milestones")
+    review = markdown_section(skill_text, "## Run progressive review")
     if "[adaptive implementation delegation](references/implementation-delegation.md)" not in implementation:
         errors.append("SKILL.md implementation section: missing adaptive delegation link")
 
@@ -3169,7 +3171,7 @@ def validate_implementation_delegation_contract(
         "version/changelog/documentation",
         "progressive review",
         "Git exclusively root-owned",
-        "Do not repair an edited or failed milestone through the root or a replacement lease",
+        "Do not repair an edited or failed milestone through a replacement lease without new explicit user authority",
     ]:
         if token not in handoff:
             errors.append(f"implementation-delegation.md root handoff: missing {token}")
@@ -3186,6 +3188,98 @@ def validate_implementation_delegation_contract(
     for token in ["keep the milestone blocked", "create no replacement writer"]:
         if token not in tdd_steps:
             errors.append(f"tdd-workflow.md: failed exact writer recovery contract missing {token}")
+
+    automatic_contracts = [
+        (skill_text, "runner-owned `dispatch`", "SKILL.md automatic orchestration: missing runner-owned dispatch"),
+        (
+            skill_text,
+            "Only a new recovery target writer requires explicit user opt-in",
+            "SKILL.md automatic orchestration: missing recovery target authority boundary",
+        ),
+        (
+            review,
+            "runner-owned `dispatch`",
+            "SKILL.md progressive review: missing runner-owned dispatch",
+        ),
+        (
+            model_routing,
+            "one immutable 900-second observation budget",
+            "model-routing.md automatic deadline: missing immutable 900-second observation budget",
+        ),
+        (
+            model_routing,
+            "Only a new recovery target writer requires explicit user opt-in",
+            "model-routing.md automatic orchestration: missing recovery target authority boundary",
+        ),
+        (
+            tdd_workflow,
+            "runner-owned `dispatch`",
+            "tdd-workflow.md automatic orchestration: missing runner-owned dispatch",
+        ),
+        (
+            protocol_text,
+            "same-profile-retry",
+            "implementation-delegation.md automatic orchestration: missing same-profile retry",
+        ),
+        (
+            protocol_text,
+            "normalized-malformed-needs-escalation",
+            "implementation-delegation.md automatic orchestration: missing malformed escalation classifier",
+        ),
+        (
+            protocol_text,
+            "never asks whether to continue or cancel",
+            "implementation-delegation.md automatic orchestration: missing routine-prompt boundary",
+        ),
+        (
+            protocol_text,
+            "Automatic same-scope root-completion requires no operational user prompt",
+            "implementation-delegation.md automatic orchestration: missing root-completion authority boundary",
+        ),
+        (
+            readme,
+            "continues observing automatically within one immutable 15-minute budget",
+            "README.md automatic orchestration: missing immutable 15-minute continuation",
+        ),
+        (
+            readme,
+            "Only a new checkpoint-bound recovery target writer requires explicit user authorization",
+            "README.md automatic orchestration: missing new-writer authority boundary",
+        ),
+        (
+            readme_ru,
+            "автоматически продолжает наблюдение в пределах одного неизменяемого 15-минутного бюджета",
+            "README.ru.md automatic orchestration: missing immutable 15-minute continuation",
+        ),
+        (
+            readme_ru,
+            "Только новый checkpoint-bound recovery target writer требует явного разрешения пользователя",
+            "README.ru.md automatic orchestration: missing new-writer authority boundary",
+        ),
+    ]
+    for text, token, error in automatic_contracts:
+        if token not in text:
+            errors.append(error)
+
+    for label, text in [
+        ("SKILL.md progressive review", review),
+        ("model-routing.md", model_routing),
+        ("tdd-workflow.md", tdd_workflow),
+    ]:
+        if "call `activate`" in text:
+            errors.append(f"{label}: ordinary orchestration must not require manual activation")
+
+    for token, label in [
+        ("OBSERVATION_BUDGET_SECONDS = 900", "immutable observation budget"),
+        ("def activation_window", "activation deadline evidence"),
+        ("def dispatch_run(args", "runner-owned dispatch"),
+        ("dispatch-unactivated-receipt.json", "durable unactivated receipt"),
+        ("dispatch-activated-receipt.json", "durable activated receipt"),
+        ("activated = activate_run(argparse.Namespace(run_dir=run_dir))", "same-run activation"),
+        ('dispatch = subparsers.add_parser(', "dispatch CLI command"),
+    ]:
+        if token not in runner_text:
+            errors.append(f"agent_runner.py automatic orchestration: missing {label}")
     return errors
 
 
@@ -3491,10 +3585,17 @@ def validate_usage_routing_contract(
         "agent_runner.py",
         "codex-exec-explicit-model",
         "turn.completed",
+        "runner-owned `dispatch`",
     ]:
         if token not in mandatory_search:
-            category = "exact agent dispatch" if "root runs" in token or "generic spawn" in token else "usage routing"
+            category = (
+                "exact agent dispatch"
+                if "root runs" in token or "generic spawn" in token or "runner-owned" in token
+                else "usage routing"
+            )
             errors.append(f"code-discovery.md {category}: missing {token}")
+    if "call `activate`" in mandatory_search:
+        errors.append("code-discovery.md exact agent dispatch: ordinary orchestration must not require manual activation")
 
     model_claims = markdown_section(code_discovery, "## Model and savings claims")
     for token in [
@@ -3607,9 +3708,12 @@ def validate_usage_routing_contract(
         "non-critical route ends at Sol/high",
         "Sol/xhigh is critical-only",
         "risk-specific ceiling",
+        "runner-owned `dispatch`",
     ]:
         if token not in review_dispatch:
             errors.append(f"review-protocol.md exact reviewer routing: missing {token}")
+    if "call `activate`" in review_dispatch:
+        errors.append("review-protocol.md exact reviewer routing: ordinary orchestration must not require manual activation")
     review_tier_vocabulary = (
         "Requested tier: fast | luna_xhigh | balanced | strong | sol_high | strongest | unknown"
     )
@@ -4701,6 +4805,7 @@ def main() -> int:
             tdd_workflow_text,
             readme,
             readme_ru,
+            runner_text,
         )
     )
     errors.extend(
