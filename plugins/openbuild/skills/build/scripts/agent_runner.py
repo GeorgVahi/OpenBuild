@@ -36,7 +36,12 @@ import tomllib
 _SCRIPT_DIRECTORY = str(Path(__file__).resolve().parent)
 if _SCRIPT_DIRECTORY not in sys.path:
     sys.path.insert(0, _SCRIPT_DIRECTORY)
-from recovery_state import RecoveryRegistry, RecoveryStateError
+from recovery_state import (
+    RecoveryRegistry,
+    RecoveryStateError,
+    durable_write_private_bytes,
+    durable_write_private_json,
+)
 
 
 SUPPORTED_AGENTS = {
@@ -68,6 +73,7 @@ PROVIDER_ENVIRONMENT_OVERRIDES = {
 TERMINAL_EVENTS = {"turn.completed", "turn.failed"}
 SCHEMA_VERSION = 1
 OBSERVATION_BUDGET_SECONDS = 900
+RUN_HANDLE = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{10}$")
 PACKAGED_PROFILE_DIR = Path(__file__).resolve().parents[1] / "profiles"
 SEARCH_DEVELOPER_INSTRUCTIONS = (
     "You are the already-delegated read-only Explorer. Do not spawn or delegate to another agent.\n\n"
@@ -284,6 +290,8 @@ def atomic_write_json(path: Path, value: Mapping[str, Any]) -> None:
         json.dump(value, handle, ensure_ascii=False, indent=2, sort_keys=True)
         handle.write("\n")
     os.replace(temporary, path)
+    if os.name == "nt":
+        protect_windows_private_file(path, windows_current_user_sid())
 
 
 def atomic_write_bytes(path: Path, value: bytes) -> None:
@@ -293,6 +301,8 @@ def atomic_write_bytes(path: Path, value: bytes) -> None:
     with os.fdopen(descriptor, "wb") as handle:
         handle.write(value)
     os.replace(temporary, path)
+    if os.name == "nt":
+        protect_windows_private_file(path, windows_current_user_sid())
 
 
 def _windows_security_apis() -> tuple[Any, Any]:
@@ -362,6 +372,12 @@ def _windows_security_apis() -> tuple[Any, Any]:
         ctypes.POINTER(ctypes.c_void_p),
     ]
     advapi32.GetAce.restype = ctypes.c_int
+    advapi32.SetFileSecurityW.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+    ]
+    advapi32.SetFileSecurityW.restype = ctypes.c_int
     return kernel32, advapi32
 
 
@@ -435,7 +451,33 @@ def create_windows_private_directory(path: Path, user_sid: str) -> None:
         kernel32.LocalFree(descriptor)
 
 
-def windows_directory_is_private(path: Path, user_sid: str) -> bool:
+def protect_windows_private_file(path: Path, user_sid: str) -> None:
+    kernel32, advapi32 = _windows_security_apis()
+    descriptor = ctypes.c_void_p()
+    sddl = (
+        f"O:{user_sid}G:{user_sid}D:P"
+        f"(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;{user_sid})"
+    )
+    if not advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        sddl,
+        1,
+        ctypes.byref(descriptor),
+        None,
+    ):
+        raise RunnerError(f"cannot build a private Windows file DACL: {ctypes.WinError()}")
+    try:
+        security_information = 0x00000001 | 0x00000004 | 0x80000000
+        if not advapi32.SetFileSecurityW(
+            str(path), security_information, descriptor
+        ):
+            raise RunnerError(
+                f"cannot protect private Windows file {path}: {ctypes.WinError()}"
+            )
+    finally:
+        kernel32.LocalFree(descriptor)
+
+
+def windows_object_is_private(path: Path, user_sid: str, *, directory: bool) -> bool:
     class AclSizeInformation(ctypes.Structure):
         _fields_ = [
             ("ace_count", ctypes.c_uint32),
@@ -479,7 +521,7 @@ def windows_directory_is_private(path: Path, user_sid: str) -> bool:
         ):
             raise RunnerError(f"cannot inspect the Windows run-directory DACL for {path}")
         user_has_full_access = False
-        allowed_sids = {user_sid, "S-1-5-18"}
+        allowed_sids = {user_sid, "S-1-5-18", "S-1-5-32-544"}
         for index in range(information.ace_count):
             ace_pointer = ctypes.c_void_p()
             if not advapi32.GetAce(dacl, index, ctypes.byref(ace_pointer)):
@@ -492,15 +534,19 @@ def windows_directory_is_private(path: Path, user_sid: str) -> bool:
                 return False
             mask = ctypes.c_uint32.from_address(address + 4).value
             ace_sid = windows_sid_string(ctypes.c_void_p(address + 8))
-            if ace_sid not in allowed_sids:
+            if ace_sid not in allowed_sids or ace_flags & 0x10:
                 return False
             if ace_sid == user_sid:
-                user_has_full_access = (
-                    mask & 0x001F01FF == 0x001F01FF and ace_flags & 0x03 == 0x03
+                user_has_full_access = mask & 0x001F01FF == 0x001F01FF and (
+                    not directory or ace_flags & 0x03 == 0x03
                 )
         return user_has_full_access
     finally:
         kernel32.LocalFree(descriptor)
+
+
+def windows_directory_is_private(path: Path, user_sid: str) -> bool:
+    return windows_object_is_private(path, user_sid, directory=True)
 
 
 def ensure_private_run_dir(path: Path) -> None:
@@ -865,6 +911,480 @@ def read_prompt_snapshot(path: Path, expected_sha256: str) -> str:
         raise RunnerError(f"delegated prompt snapshot is not UTF-8: {exc}") from exc
 
 
+_PROMPT_SNAPSHOT_DOMAIN = b"openbuild-prompt-snapshot-v1\0"
+MAX_PROMPT_BYTES = 1024 * 1024
+
+
+def _is_component_descendant(path: Path, parent: Path) -> bool:
+    """Component-aware containment; never use a string-prefix check."""
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def _prompt_snapshot_paths(registry: RecoveryRegistry) -> tuple[Path, Path, Path]:
+    directory = registry.directory
+    return directory / "prompt-snapshot.key", directory / "prompt-snapshots", directory / "prompt-snapshots.lock"
+
+
+def _prompt_snapshot_key(registry: RecoveryRegistry) -> bytes:
+    key_path, _blobs, _lock = _prompt_snapshot_paths(registry)
+    ensure_private_run_dir(registry.directory)
+    if key_path.exists():
+        try:
+            if os.name != "nt":
+                metadata = key_path.stat()
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or (hasattr(os, "geteuid") and metadata.st_uid != os.geteuid())
+                    or metadata.st_mode & 0o077
+                ):
+                    raise RunnerError("owner prompt snapshot key is not private")
+            key = key_path.read_bytes()
+        except OSError as exc:
+            raise RunnerError("owner prompt snapshot key is unavailable") from exc
+        if len(key) != 32:
+            raise RunnerError("owner prompt snapshot key is malformed")
+        return key
+    key = secrets.token_bytes(32)
+    durable_write_private_bytes(key_path, key)
+    return key
+
+
+def _windows_read_stable_external_prompt(repo: Path, prompt_source: Path) -> bytes:
+    class FileTime(ctypes.Structure):
+        _fields_ = [("low", ctypes.c_uint32), ("high", ctypes.c_uint32)]
+
+    class ByHandleFileInformation(ctypes.Structure):
+        _fields_ = [
+            ("attributes", ctypes.c_uint32),
+            ("creation_time", FileTime),
+            ("access_time", FileTime),
+            ("write_time", FileTime),
+            ("volume_serial", ctypes.c_uint32),
+            ("size_high", ctypes.c_uint32),
+            ("size_low", ctypes.c_uint32),
+            ("links", ctypes.c_uint32),
+            ("file_index_high", ctypes.c_uint32),
+            ("file_index_low", ctypes.c_uint32),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+    ]
+    kernel32.CreateFileW.restype = ctypes.c_void_p
+    kernel32.GetFileInformationByHandle.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ByHandleFileInformation),
+    ]
+    kernel32.GetFileInformationByHandle.restype = ctypes.c_int
+    kernel32.GetFinalPathNameByHandleW.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+    ]
+    kernel32.GetFinalPathNameByHandleW.restype = ctypes.c_uint32
+    kernel32.ReadFile.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_uint32),
+        ctypes.c_void_p,
+    ]
+    kernel32.ReadFile.restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_int
+
+    absolute = Path(os.path.abspath(prompt_source))
+    candidates = [Path(absolute.anchor)]
+    current = candidates[0]
+    for part in absolute.parts[1:]:
+        current = current / part
+        candidates.append(current)
+    generic_read = 0x80000000
+    file_read_attributes = 0x00000080
+    share_read = 0x00000001
+    open_existing = 3
+    backup_semantics = 0x02000000
+    open_reparse_point = 0x00200000
+    reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+    invalid_handle = ctypes.c_void_p(-1).value
+    handles: list[int] = []
+
+    def information(handle: int) -> ByHandleFileInformation:
+        value = ByHandleFileInformation()
+        if not kernel32.GetFileInformationByHandle(
+            ctypes.c_void_p(handle), ctypes.byref(value)
+        ):
+            raise RunnerError(
+                f"prompt-identity-unstable: {ctypes.WinError(ctypes.get_last_error())}"
+            )
+        return value
+
+    def identity(value: ByHandleFileInformation) -> tuple[int, ...]:
+        return (
+            int(value.attributes),
+            int(value.volume_serial),
+            int(value.file_index_high),
+            int(value.file_index_low),
+            int(value.size_high),
+            int(value.size_low),
+            int(value.write_time.high),
+            int(value.write_time.low),
+        )
+
+    try:
+        final_information: ByHandleFileInformation | None = None
+        for index, candidate in enumerate(candidates):
+            try:
+                metadata = candidate.lstat()
+            except OSError as exc:
+                raise RunnerError("prompt-identity-unstable; use owner-private staging API") from exc
+            attributes = int(getattr(metadata, "st_file_attributes", 0))
+            if candidate.is_symlink() or attributes & reparse_flag:
+                raise RunnerError("prompt-identity-unstable; use owner-private staging API")
+            final = index == len(candidates) - 1
+            handle = kernel32.CreateFileW(
+                str(candidate),
+                (generic_read | file_read_attributes) if final else file_read_attributes,
+                share_read,
+                None,
+                open_existing,
+                open_reparse_point | (0 if final else backup_semantics),
+                None,
+            )
+            if handle in (None, invalid_handle):
+                raise RunnerError(
+                    f"prompt-identity-unstable: {ctypes.WinError(ctypes.get_last_error())}"
+                )
+            handle_value = int(handle)
+            handles.append(handle_value)
+            handle_information = information(handle_value)
+            if handle_information.attributes & reparse_flag:
+                raise RunnerError("prompt-identity-unstable; use owner-private staging API")
+            file_index = (
+                int(handle_information.file_index_high) << 32
+            ) | int(handle_information.file_index_low)
+            if int(metadata.st_ino) != file_index:
+                raise RunnerError("prompt-identity-unstable; use owner-private staging API")
+            if final:
+                final_information = handle_information
+        if final_information is None or final_information.attributes & 0x10:
+            raise RunnerError("prompt-identity-unstable; use owner-private staging API")
+        final_handle = handles[-1]
+        buffer = ctypes.create_unicode_buffer(32768)
+        length = kernel32.GetFinalPathNameByHandleW(
+            ctypes.c_void_p(final_handle), buffer, len(buffer), 0
+        )
+        if not length or length >= len(buffer):
+            raise RunnerError("prompt-containment-unprovable; use owner-private staging API")
+        final_value = buffer.value
+        if final_value.startswith("\\\\?\\UNC\\"):
+            final_value = "\\\\" + final_value[8:]
+        elif final_value.startswith("\\\\?\\"):
+            final_value = final_value[4:]
+        final_path = Path(final_value)
+        if _is_component_descendant(final_path, repo):
+            raise RunnerError("prompt-inside-workspace; use owner-private staging API")
+        user_sid = windows_current_user_sid()
+        if (
+            not windows_directory_is_private(final_path.parent, user_sid)
+            or not windows_object_is_private(final_path, user_sid, directory=False)
+        ):
+            raise RunnerError(
+                "prompt-owner-untrusted or prompt-permissions-too-broad; use owner-private staging API"
+            )
+        before = identity(final_information)
+        chunks: list[bytes] = []
+        read_buffer = ctypes.create_string_buffer(64 * 1024)
+        total = 0
+        while True:
+            read = ctypes.c_uint32()
+            if not kernel32.ReadFile(
+                ctypes.c_void_p(final_handle),
+                read_buffer,
+                len(read_buffer),
+                ctypes.byref(read),
+                None,
+            ):
+                raise RunnerError(
+                    f"prompt-identity-unstable: {ctypes.WinError(ctypes.get_last_error())}"
+                )
+            if read.value == 0:
+                break
+            total += int(read.value)
+            if total > MAX_PROMPT_BYTES:
+                raise RunnerError("prompt is not bounded UTF-8")
+            chunks.append(read_buffer.raw[: read.value])
+        if identity(information(final_handle)) != before:
+            raise RunnerError("prompt-identity-unstable; use owner-private staging API")
+        return b"".join(chunks)
+    finally:
+        for handle in reversed(handles):
+            kernel32.CloseHandle(ctypes.c_void_p(handle))
+
+
+def _posix_read_stable_external_prompt(repo: Path, prompt_source: Path) -> bytes:
+    absolute = Path(os.path.abspath(prompt_source))
+    parts = absolute.parts
+    if not parts or parts[0] != os.sep:
+        raise RunnerError("prompt-containment-unprovable; use owner-private staging API")
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptors: list[int] = []
+    try:
+        parent_descriptor = os.open(os.sep, directory_flags)
+        descriptors.append(parent_descriptor)
+        for part in parts[1:-1]:
+            parent_descriptor = os.open(
+                part,
+                directory_flags,
+                dir_fd=parent_descriptor,
+            )
+            descriptors.append(parent_descriptor)
+        descriptor = os.open(parts[-1], file_flags, dir_fd=parent_descriptor)
+        descriptors.append(descriptor)
+    except OSError as exc:
+        for opened in reversed(descriptors):
+            os.close(opened)
+        raise RunnerError("prompt-identity-unstable; use owner-private staging API") from exc
+    try:
+        before = os.fstat(descriptor)
+        parent = os.fstat(parent_descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or (hasattr(os, "geteuid") and before.st_uid != os.geteuid())
+            or before.st_mode & 0o077
+        ):
+            raise RunnerError(
+                "prompt-owner-untrusted or prompt-permissions-too-broad; use owner-private staging API"
+            )
+        if (
+            not stat.S_ISDIR(parent.st_mode)
+            or (hasattr(os, "geteuid") and parent.st_uid != os.geteuid())
+            or parent.st_mode & 0o077
+        ):
+            raise RunnerError("prompt-owner-untrusted; use owner-private staging API")
+        try:
+            if sys.platform == "darwin":
+                import fcntl
+
+                resolved = fcntl.fcntl(descriptor, 50, b"\0" * 4096)
+                final_path = Path(resolved.split(b"\0", 1)[0].decode("utf-8"))
+            else:
+                final_path = Path(os.readlink(f"/proc/self/fd/{descriptor}"))
+        except (OSError, UnicodeDecodeError) as exc:
+            raise RunnerError(
+                "prompt-containment-unprovable; use owner-private staging API"
+            ) from exc
+        if _is_component_descendant(final_path, repo):
+            raise RunnerError("prompt-inside-workspace; use owner-private staging API")
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            block = os.read(descriptor, 64 * 1024)
+            if not block:
+                break
+            total += len(block)
+            if total > MAX_PROMPT_BYTES:
+                raise RunnerError("prompt is not bounded UTF-8")
+            chunks.append(block)
+        after = os.fstat(descriptor)
+        identity_fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_size", "st_mtime_ns")
+        if any(getattr(before, field) != getattr(after, field) for field in identity_fields):
+            raise RunnerError("prompt-identity-unstable; use owner-private staging API")
+        return b"".join(chunks)
+    finally:
+        for opened in reversed(descriptors):
+            os.close(opened)
+
+
+def _read_stable_external_prompt(repo: Path, prompt_source: Path) -> bytes:
+    """Read one owner-private external prompt from the same verified object."""
+    if os.name == "nt":
+        return _windows_read_stable_external_prompt(repo, prompt_source)
+    return _posix_read_stable_external_prompt(repo, prompt_source)
+
+
+def acquire_owner_prompt_snapshot(
+    repo: Path,
+    prompt_source: Path,
+    registry: RecoveryRegistry,
+) -> dict[str, str]:
+    """Import one stable, private external prompt before any lifecycle mutation."""
+    repo = repo.expanduser().resolve(strict=True)
+    source = prompt_source.expanduser()
+    if not source.is_file():
+        raise RunnerError("prompt-identity-unstable; use owner-private staging API")
+    source_prompt = _read_stable_external_prompt(repo, source)
+    return stage_owner_prompt_snapshot(registry, source_prompt)
+
+
+def stage_owner_prompt_snapshot(
+    registry: RecoveryRegistry,
+    source_prompt: bytes,
+) -> dict[str, str]:
+    """Persist bounded UTF-8 bytes without putting prompt content on argv."""
+    if not isinstance(source_prompt, bytes) or len(source_prompt) > MAX_PROMPT_BYTES:
+        raise RunnerError("prompt is not bounded UTF-8")
+    try:
+        source_prompt.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RunnerError("prompt is not bounded UTF-8") from exc
+    prompt_sha256 = sha256_bytes(source_prompt)
+    with registry._lock():
+        key = _prompt_snapshot_key(registry)
+        _key_path, blobs, _lock_path = _prompt_snapshot_paths(registry)
+        ensure_private_run_dir(blobs)
+        prompt_snapshot_id = hmac.new(
+            key, _PROMPT_SNAPSHOT_DOMAIN + bytes.fromhex(prompt_sha256), hashlib.sha256
+        ).hexdigest()
+        target = blobs / f"{prompt_snapshot_id}.blob"
+        if target.exists():
+            existing = target.read_bytes()
+            if sha256_bytes(existing) != prompt_sha256:
+                raise RunnerError("owner prompt snapshot identity drifted")
+        try:
+            durable_write_private_bytes(
+                target,
+                source_prompt,
+                fault=getattr(registry, "fault", None),
+            )
+        except (OSError, RecoveryStateError) as exc:
+            raise RunnerError(f"durable prompt snapshot failed closed: {exc}") from exc
+        return {"prompt_snapshot_id": prompt_snapshot_id, "prompt_sha256": prompt_sha256}
+
+
+def stage_prompt_run(args: argparse.Namespace) -> int:
+    repo = Path(args.repo).expanduser().resolve()
+    if not repo.is_dir():
+        raise RunnerError(f"repository/workspace directory does not exist: {repo}")
+    source_prompt = sys.stdin.buffer.read(MAX_PROMPT_BYTES + 1)
+    binding = stage_owner_prompt_snapshot(RecoveryRegistry(repo), source_prompt)
+    print(json.dumps(binding, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def read_owner_prompt_snapshot(
+    registry: RecoveryRegistry,
+    prompt_snapshot_id: str,
+    prompt_sha256: str,
+) -> str:
+    if not re.fullmatch(r"[0-9a-f]{64}", prompt_snapshot_id) or not re.fullmatch(
+        r"[0-9a-f]{64}", prompt_sha256
+    ):
+        raise RunnerError("owner prompt snapshot binding is malformed")
+    with registry._lock():
+        key = _prompt_snapshot_key(registry)
+        expected_id = hmac.new(
+            key, _PROMPT_SNAPSHOT_DOMAIN + bytes.fromhex(prompt_sha256), hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(expected_id, prompt_snapshot_id):
+            raise RunnerError("owner prompt snapshot binding drifted")
+        _key_path, blobs, _lock_path = _prompt_snapshot_paths(registry)
+        try:
+            prompt = (blobs / f"{prompt_snapshot_id}.blob").read_bytes()
+        except OSError as exc:
+            raise RunnerError("owner prompt snapshot is missing") from exc
+    if sha256_bytes(prompt) != prompt_sha256:
+        raise RunnerError("owner prompt snapshot digest drifted")
+    try:
+        return prompt.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RunnerError("owner prompt snapshot is not UTF-8") from exc
+
+
+def collect_owner_prompt_snapshot_references(registry: RecoveryRegistry) -> dict[str, set[str]]:
+    """Classify private blobs without traversing run directories or public state."""
+    with registry._lock():
+        return _collect_owner_prompt_snapshot_references_locked(registry)
+
+
+def _collect_owner_prompt_snapshot_references_locked(
+    registry: RecoveryRegistry,
+) -> dict[str, set[str]]:
+    states = {
+        "orphan-unreferenced": set(),
+        "grant-referenced": set(),
+        "lease-referenced": set(),
+        "released": set(),
+    }
+    _key_path, blobs, _lock_path = _prompt_snapshot_paths(registry)
+    blob_ids = {
+        path.stem
+        for path in blobs.glob("*.blob")
+        if re.fullmatch(r"[0-9a-f]{64}", path.stem)
+    } if blobs.is_dir() else set()
+    if registry.path.is_file():
+        state = registry._read_registry_locked(rebarrier=True, allow_quarantine=True)
+        for tombstone in state.get("tombstones", []):
+            if tombstone.get("event") == "prompt-snapshot-released":
+                states["released"].add(tombstone["prompt_snapshot_id"])
+        lease = state.get("lease")
+        if isinstance(lease, dict):
+            plan = lease.get("plan", {})
+            snapshot_id = (
+                plan.get("prompt_snapshot_id")
+                if lease.get("lease_kind") == "recovery-target"
+                else lease.get("prompt_snapshot_id")
+            )
+            if isinstance(snapshot_id, str):
+                states["lease-referenced"].add(snapshot_id)
+        if registry.sources_directory.is_dir():
+            for path in registry.sources_directory.glob("*.json"):
+                try:
+                    source = registry._read_source_locked(path.stem, rebarrier=True)
+                except (OSError, RecoveryStateError) as exc:
+                    raise RunnerError(
+                        "owner prompt snapshot reference state is unreadable"
+                    ) from exc
+                authorization = source.get("authorization") if isinstance(source, dict) else None
+                snapshot_id = (
+                    authorization.get("prompt_snapshot_id")
+                    if isinstance(authorization, dict)
+                    else None
+                )
+                if isinstance(snapshot_id, str):
+                    states["grant-referenced"].add(snapshot_id)
+    states["grant-referenced"] -= states["lease-referenced"]
+    states["released"] -= states["grant-referenced"] | states["lease-referenced"]
+    states["orphan-unreferenced"] = blob_ids - set().union(*states.values())
+    return states
+
+
+def garbage_collect_owner_prompt_snapshots(registry: RecoveryRegistry) -> set[str]:
+    """Under the owner lock, remove only orphan/released blobs; run trees are excluded."""
+    deleted: set[str] = set()
+    with registry._lock():
+        references = _collect_owner_prompt_snapshot_references_locked(registry)
+        active = references["grant-referenced"] | references["lease-referenced"]
+        eligible = references["orphan-unreferenced"] | (
+            references["released"] - active
+        )
+        _key_path, blobs, _lock_path = _prompt_snapshot_paths(registry)
+        for snapshot_id in eligible:
+            target = blobs / f"{snapshot_id}.blob"
+            if target.is_file():
+                target.unlink()
+                deleted.add(snapshot_id)
+    return deleted
+
+
 def read_event_evidence(path: Path) -> dict[str, Any]:
     evidence: dict[str, Any] = {
         "completed": False,
@@ -1021,9 +1541,28 @@ def resolve_codex_binary(value: str) -> str:
     raise RunnerError(f"Codex CLI executable not found: {value!r}")
 
 
+def default_run_root() -> Path:
+    return Path(tempfile.gettempdir()) / "openbuild-agent-runs"
+
+
 def default_run_dir() -> Path:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return Path(tempfile.gettempdir()) / "openbuild-agent-runs" / f"{stamp}-{uuid.uuid4().hex[:10]}"
+    return default_run_root() / f"{stamp}-{uuid.uuid4().hex[:10]}"
+
+
+def resolve_run_reference(value: str) -> Path:
+    """Resolve a public generated handle or a caller-retained legacy path."""
+    candidate = value.strip()
+    if RUN_HANDLE.fullmatch(candidate):
+        return (default_run_root().resolve() / candidate).resolve()
+    return Path(candidate).expanduser().resolve()
+
+
+def public_run_handle(run_dir: Path) -> str | None:
+    resolved = run_dir.resolve()
+    if resolved.parent == default_run_root().resolve() and RUN_HANDLE.fullmatch(resolved.name):
+        return resolved.name
+    return None
 
 
 def _windows_kernel32() -> Any:
@@ -2649,9 +3188,19 @@ def spawn_containment_guardian(run_dir: Path, runner_log: Any) -> Any:
     )
 
 
-def _terminal_binding(receipt: Mapping[str, Any]) -> dict[str, Any]:
+def _expected_lease_run_id(lease: Mapping[str, Any]) -> str:
+    if lease.get("lease_kind") == "recovery-target":
+        plan = lease.get("plan")
+        run_id = plan.get("run_id") if isinstance(plan, Mapping) else None
+    else:
+        run_id = lease.get("run_id")
+    if not isinstance(run_id, str) or not run_id:
+        raise RecoveryStateError("recovery-capable lease has no exact run ID binding")
+    return run_id
+
+
+def _terminal_binding(receipt: Mapping[str, Any], *, run_id: str) -> dict[str, Any]:
     fields = (
-        "run_dir",
         "status",
         "agent_name",
         "task_name",
@@ -2670,7 +3219,122 @@ def _terminal_binding(receipt: Mapping[str, Any]) -> dict[str, Any]:
         "result_evidence",
         "process_tree_stopped",
     )
-    return {field: receipt.get(field) for field in fields}
+    return {"run_id": run_id, **{field: receipt.get(field) for field in fields}}
+
+
+def _privacy_safe_classifications(values: tuple[str, ...], label: str) -> list[str]:
+    normalized = sorted(set(values))
+    if not normalized or any(
+        not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", value)
+        for value in normalized
+    ):
+        raise RunnerError(f"{label} requires privacy-safe classification tokens")
+    return normalized
+
+
+def classify_recovery_outcome(
+    *,
+    decision_class: str | None = None,
+    missing_safety_evidence: tuple[str, ...] = (),
+    exhausted_capabilities: tuple[str, ...] = (),
+    terminal_abandonment: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return one closed, privacy-safe recovery report without writer authority."""
+    signals = sum(
+        (
+            decision_class is not None,
+            bool(missing_safety_evidence),
+            bool(exhausted_capabilities),
+            terminal_abandonment is not None,
+        )
+    )
+    if signals != 1:
+        raise RunnerError("recovery outcome requires exactly one closed evidence class")
+    if decision_class is not None:
+        allowed = {
+            "product",
+            "architecture",
+            "scope",
+            "permissions",
+            "privacy",
+            "security",
+            "destructive",
+            "external-action",
+            "publication",
+        }
+        if decision_class not in allowed:
+            raise RunnerError("decision-required class is outside the closed material set")
+        return {
+            "outcome": "decision-required",
+            "decision_class": decision_class,
+            "required_action": "provide-decision",
+            "writer_action": "none",
+        }
+    if missing_safety_evidence:
+        return {
+            "outcome": "blocked",
+            "missing_evidence": _privacy_safe_classifications(
+                missing_safety_evidence, "blocked outcome"
+            ),
+            "required_action": "restore-safety-evidence",
+            "writer_action": "none",
+        }
+    if exhausted_capabilities:
+        return {
+            "outcome": "automation-exhausted",
+            "exhausted_capabilities": _privacy_safe_classifications(
+                exhausted_capabilities, "automation-exhausted outcome"
+            ),
+            "required_action": "none-under-current-authority",
+            "writer_action": "none",
+        }
+    assert terminal_abandonment is not None
+    if (
+        terminal_abandonment.get("outcome") != "terminal-abandoned"
+        or terminal_abandonment.get("schema") != "terminal-abandonment-v1"
+        or terminal_abandonment.get("cause") != "outside-set-drift"
+        or terminal_abandonment.get("checkpoint_invalidation") != "completed"
+    ):
+        raise RunnerError("terminal-abandoned report requires completed exact v1 evidence")
+    return {
+        "outcome": "terminal-abandoned",
+        "schema": "terminal-abandonment-v1",
+        "cause": "outside-set-drift",
+        "required_action": "none",
+        "writer_action": "none",
+    }
+
+
+def root_completion_authorization_record(
+    *,
+    specification_revision: str,
+    milestone: str,
+    allowed_set_digest: str,
+    diff_attribution_digest: str,
+) -> dict[str, Any]:
+    """Build the privacy-safe audit record required before root-only completion."""
+    for value, label in (
+        (specification_revision, "specification revision"),
+        (milestone, "milestone"),
+    ):
+        if not re.fullmatch(r"[A-Za-z0-9_.:-]+", value):
+            raise RunnerError(f"root completion {label} is invalid")
+    for value, label in (
+        (allowed_set_digest, "allowed-set digest"),
+        (diff_attribution_digest, "diff-attribution digest"),
+    ):
+        if not re.fullmatch(r"[0-9a-f]{64}", value):
+            raise RunnerError(f"root completion {label} must be lowercase SHA-256")
+    return {
+        "event": "root-completion-authorized",
+        "authority": "original-build-request",
+        "specification_revision": specification_revision,
+        "milestone": milestone,
+        "allowed_set_digest": allowed_set_digest,
+        "diff_attribution_digest": diff_attribution_digest,
+        "automatic": True,
+        "writer_action": "none",
+    }
 
 
 def audit_guardian_health(run_dir: Path) -> None:
@@ -2748,6 +3412,7 @@ def reconcile_implementation_registry(
     receipt: Mapping[str, Any],
     *,
     success_verification_digest: str | None = None,
+    terminal_abandonment: bool = False,
 ) -> None:
     """Drive a terminal implementation receipt through one durable owner lifecycle."""
     if receipt.get("status") not in {"completed", "failed"} or receipt.get("process_tree_stopped") is not True:
@@ -2761,6 +3426,7 @@ def reconcile_implementation_registry(
     state = registry.state()
     lease = state.get("lease")
     if lease is None:
+        garbage_collect_owner_prompt_snapshots(registry)
         return
     if not isinstance(lease, dict) or lease.get("lease_id") != lease_id:
         raise RunnerError("terminal receipt does not own the current workspace lease")
@@ -2773,9 +3439,13 @@ def reconcile_implementation_registry(
                     "process_tree_stopped": True,
                 },
             )
+            garbage_collect_owner_prompt_snapshots(registry)
         except RecoveryStateError as exc:
             raise RunnerError(f"legacy implementation lease could not be released: {exc}") from exc
         return
+    expected_run_id = _expected_lease_run_id(lease)
+    if run_dir.name != expected_run_id:
+        raise RunnerError("terminal receipt run ID does not own the current workspace lease")
 
     try:
         secret = _guardian_secret(run_dir)
@@ -2800,7 +3470,7 @@ def reconcile_implementation_registry(
         allowed_set_digest = request.get("lifecycle_allowed_set_digest") or (
             request.get("recovery_preflight") or {}
         ).get("allowed_set_digest", "")
-        binding = _terminal_binding(receipt)
+        binding = _terminal_binding(receipt, run_id=expected_run_id)
         binding_digest = sha256_bytes(_canonical_json_bytes(binding))
         state_name = lease.get("state")
         if state_name in {"running", "active"}:
@@ -2827,7 +3497,30 @@ def reconcile_implementation_registry(
             state_name = lease["state"]
 
         semantic_disposition = lease.get("semantic_disposition")
+        if terminal_abandonment and not isinstance(semantic_disposition, dict):
+            if state_name != "stopped-terminal":
+                raise RecoveryStateError(
+                    "terminal abandonment requires a stopped contained lease"
+                )
+            state = registry.record_terminal_abandonment(lease_id)
+            lease = state["lease"]
+            semantic_disposition = lease["semantic_disposition"]
         if isinstance(semantic_disposition, dict):
+            if semantic_disposition.get("disposition") == "abandoned":
+                if semantic_disposition.get("checkpoint_invalidation") != "completed":
+                    state = registry.complete_terminal_abandonment(lease_id)
+                    lease = state["lease"]
+                    semantic_disposition = lease["semantic_disposition"]
+                abandoned_receipt = {
+                    "outcome": "terminal-abandoned",
+                    "schema": semantic_disposition.get("schema"),
+                    "cause": semantic_disposition.get("cause"),
+                    "evidence_digest": semantic_disposition.get("evidence_digest"),
+                    "checkpoint_allowed": semantic_disposition.get("checkpoint_allowed"),
+                    "checkpoint_invalidation": semantic_disposition.get("checkpoint_invalidation"),
+                    "checkpoint_digest": semantic_disposition.get("checkpoint_digest"),
+                }
+                atomic_write_json(run_dir / "terminal-abandonment.json", abandoned_receipt)
             semantic_receipt = {
                 "event": "semantic-handoff-rejected",
                 "run_id": semantic_disposition.get("run_id"),
@@ -2840,7 +3533,10 @@ def reconcile_implementation_registry(
                 ),
                 "checkpoint_digest": semantic_disposition.get("checkpoint_digest"),
             }
-            if semantic_disposition.get("checkpoint_invalidation") != "completed":
+            if (
+                semantic_disposition.get("disposition") != "abandoned"
+                and semantic_disposition.get("checkpoint_invalidation") != "completed"
+            ):
                 atomic_write_json(
                     run_dir / "semantic-rejection.json", semantic_receipt
                 )
@@ -2997,12 +3693,13 @@ def reconcile_implementation_registry(
             )
             registry.acknowledge_guardian_close(lease_id, closed)
         registry.release_contained_terminal(lease_id)
+        garbage_collect_owner_prompt_snapshots(registry)
     except (OSError, RecoveryStateError) as exc:
         raise RunnerError(f"contained implementation terminalization failed closed: {exc}") from exc
 
 
 def finalize_success_run(args: argparse.Namespace) -> int:
-    run_dir = Path(args.run_dir).expanduser().resolve()
+    run_dir = resolve_run_reference(args.run_dir)
     if (run_dir / "semantic-rejection.json").is_file():
         raise RunnerError("root success finalization is forbidden after semantic handoff rejection")
     audit_guardian_health(run_dir)
@@ -3027,7 +3724,7 @@ def finalize_success_run(args: argparse.Namespace) -> int:
 
 
 def reject_semantic_handoff_run(args: argparse.Namespace) -> int:
-    run_dir = Path(args.run_dir).expanduser().resolve()
+    run_dir = resolve_run_reference(args.run_dir)
     semantic_path = run_dir / "semantic-rejection.json"
     existing_semantic = read_json(semantic_path) if semantic_path.is_file() else None
     if isinstance(existing_semantic, dict):
@@ -3081,26 +3778,104 @@ def reject_semantic_handoff_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def reconcile_terminal_abandonment_run(args: argparse.Namespace) -> int:
+    """Privately reconcile the same stopped lifecycle; no caller controls its cause."""
+    run_dir = resolve_run_reference(args.run_dir)
+    audit_guardian_health(run_dir)
+    receipt = public_receipt(run_dir)
+    if receipt.get("status") != "completed" or receipt.get("process_tree_stopped") is not True:
+        raise RunnerError("terminal abandonment requires stopped transport-success evidence")
+    try:
+        reconcile_implementation_registry(
+            run_dir,
+            receipt,
+            terminal_abandonment=True,
+        )
+    except (OSError, RecoveryStateError) as exc:
+        raise RunnerError(f"terminal abandonment failed closed: {exc}") from exc
+    print(json.dumps(read_json(run_dir / "terminal-abandonment.json"), ensure_ascii=False, indent=2))
+    return 0
+
+
+def record_root_completion_authorization_run(args: argparse.Namespace) -> int:
+    """Persist the privacy-safe T-004 audit only after exact terminal vacancy."""
+    run_dir = resolve_run_reference(args.run_dir)
+    request = read_json(run_dir / "request.json")
+    registry = recovery_registry_for_agent(
+        request["profile"]["name"], Path(request["repo"])
+    )
+    lease_id = request.get("lease_id")
+    if registry is None or not isinstance(lease_id, str):
+        raise RunnerError("root completion audit requires an implementation lifecycle")
+    state = registry.state()
+    if (
+        state.get("lease") is not None
+        or state.get("outbox") is not None
+        or state.get("quarantine") is not None
+    ):
+        raise RunnerError("root completion audit requires exact registry vacancy")
+    releases = [
+        event
+        for event in state.get("history", [])
+        if event.get("event") == "contained-terminal-released"
+        and event.get("lease_id") == lease_id
+        and event.get("terminal_success") is False
+        and event.get("handoff_digest") is None
+        and event.get("outbox_digest") is None
+    ]
+    if len(releases) != 1:
+        raise RunnerError("root completion audit requires one no-handoff terminal release")
+    release = releases[0]
+    if release.get("allowed_set_digest") != args.allowed_set_digest:
+        raise RunnerError("root completion audit allowed scope drifted")
+    if request.get("task_name") != args.milestone:
+        raise RunnerError("root completion audit milestone drifted")
+    preflight = request.get("recovery_preflight") or {}
+    if preflight.get("specification_revision") != args.specification_revision:
+        raise RunnerError("root completion audit specification revision drifted")
+    record = root_completion_authorization_record(
+        specification_revision=args.specification_revision,
+        milestone=args.milestone,
+        allowed_set_digest=args.allowed_set_digest,
+        diff_attribution_digest=args.diff_attribution_digest,
+    )
+    path = run_dir / "root-completion-authorized.json"
+    if path.is_file():
+        if read_json(path) != record:
+            raise RunnerError("root completion audit replay binding drifted")
+    try:
+        durable_write_private_json(
+            path,
+            record,
+            fault=getattr(args, "durability_fault", None),
+        )
+    except (OSError, RecoveryStateError) as exc:
+        raise RunnerError(f"durable root completion audit failed closed: {exc}") from exc
+    print(json.dumps(record, ensure_ascii=False, indent=2))
+    return 0
+
+
 def authorize_recovery_run(args: argparse.Namespace) -> int:
     repo = Path(args.repo).expanduser().resolve()
     checkpoint_path = Path(args.checkpoint_file).expanduser().resolve()
-    prompt_path = Path(args.prompt_file).expanduser().resolve()
+    prompt_file_value = getattr(args, "prompt_file", None)
+    prompt_path = Path(prompt_file_value).expanduser() if prompt_file_value else None
+    staged_snapshot_id = getattr(args, "prompt_snapshot_id", None)
+    staged_prompt_sha256 = getattr(args, "prompt_sha256", None)
     run_dir = Path(args.run_dir).expanduser().resolve()
-    if not repo.is_dir() or not checkpoint_path.is_file() or not prompt_path.is_file():
-        raise RunnerError("recovery authorization requires an existing repo, checkpoint and prompt")
+    if not repo.is_dir() or not checkpoint_path.is_file():
+        raise RunnerError("recovery authorization requires an existing repo and checkpoint")
     if run_dir.exists() and any(run_dir.iterdir()):
         raise RunnerError("reserved recovery run directory must be absent or empty")
     lease_id = validate_lease_id("openbuild_implementation_fast", args.lease_id)
     if lease_id is None:
         raise RunnerError("recovery target lease ID is required")
     try:
-        prompt_bytes = prompt_path.read_bytes()
-        prompt_bytes.decode("utf-8")
         checkpoint = read_json(checkpoint_path)
         registry = recovery_registry_for_agent("openbuild_implementation_fast", repo)
         if registry is None:
             raise RecoveryStateError("implementation recovery registry is unavailable")
-        state = registry.initialize()
+        state = registry.state()
         existing = state.get("lease")
         if isinstance(existing, dict):
             plan = existing.get("plan", {})
@@ -3108,10 +3883,22 @@ def authorize_recovery_run(args: argparse.Namespace) -> int:
                 existing.get("lease_id") != lease_id
                 or existing.get("lease_kind") != "recovery-target"
                 or plan.get("run_id") != run_dir.name
-                or plan.get("prompt_sha256") != sha256_bytes(prompt_bytes)
                 or existing.get("source_state_id") != checkpoint.get("source_state_id")
             ):
                 raise RecoveryStateError("workspace is occupied by another recovery lifecycle")
+            if staged_snapshot_id or staged_prompt_sha256:
+                if (
+                    staged_snapshot_id != plan.get("prompt_snapshot_id")
+                    or staged_prompt_sha256 != plan.get("prompt_sha256")
+                ):
+                    raise RecoveryStateError("recovery prompt replay binding drifted")
+            elif prompt_path is not None:
+                replay_prompt = _read_stable_external_prompt(repo, prompt_path)
+                if sha256_bytes(replay_prompt) != plan.get("prompt_sha256"):
+                    raise RecoveryStateError("recovery prompt replay binding drifted")
+            read_owner_prompt_snapshot(
+                registry, plan["prompt_snapshot_id"], plan["prompt_sha256"]
+            )
             output = {
                 "event": "recovery-target-reserved",
                 "lease_id": lease_id,
@@ -3121,11 +3908,28 @@ def authorize_recovery_run(args: argparse.Namespace) -> int:
                 "reconstructed": True,
             }
         else:
+            if staged_snapshot_id or staged_prompt_sha256:
+                if not staged_snapshot_id or not staged_prompt_sha256:
+                    raise RunnerError("owner prompt snapshot binding is incomplete")
+                read_owner_prompt_snapshot(
+                    registry, staged_snapshot_id, staged_prompt_sha256
+                )
+                prompt_binding = {
+                    "prompt_snapshot_id": staged_snapshot_id,
+                    "prompt_sha256": staged_prompt_sha256,
+                }
+            else:
+                if prompt_path is None or not prompt_path.is_file():
+                    raise RunnerError("prompt-identity-unstable; use owner-private staging API")
+                prompt_binding = acquire_owner_prompt_snapshot(repo, prompt_path, registry)
+            registry.initialize()
             checkpoint = registry.revalidate_checkpoint(checkpoint)
             grant = registry.grant_authorization(
                 checkpoint,
                 user_action_digest=args.user_action_digest,
                 specification_revision=args.specification_revision,
+                prompt_snapshot_id=prompt_binding["prompt_snapshot_id"],
+                prompt_sha256=prompt_binding["prompt_sha256"],
             )
             registry.consume_grant_and_reserve(
                 grant_id=grant["grant_id"],
@@ -3133,7 +3937,8 @@ def authorize_recovery_run(args: argparse.Namespace) -> int:
                 target_plan={
                     "lease_id": lease_id,
                     "run_id": run_dir.name,
-                    "prompt_sha256": sha256_bytes(prompt_bytes),
+                    "prompt_snapshot_id": prompt_binding["prompt_snapshot_id"],
+                    "prompt_sha256": prompt_binding["prompt_sha256"],
                     "launch_token": secrets.token_hex(32),
                     "provider_plan_id": uuid.uuid4().hex,
                     "ipc_plan_id": uuid.uuid4().hex,
@@ -3150,6 +3955,30 @@ def authorize_recovery_run(args: argparse.Namespace) -> int:
         raise RunnerError(f"recovery authorization failed closed: {exc}") from exc
     print(json.dumps(output, ensure_ascii=False, indent=2))
     return 0
+
+
+def classify_public_failure(
+    *,
+    evidence: Mapping[str, Any],
+    result_error: str | None,
+    exit_record: Mapping[str, Any],
+    status: str,
+    codex_exit_status: str,
+) -> str | None:
+    """Project private diagnostic detail onto one closed public classification."""
+    if status != "failed":
+        return None
+    if evidence.get("failure_message"):
+        return "agent-terminal-failure"
+    if evidence.get("event_error"):
+        return "event-stream-invalid"
+    if result_error:
+        return "result-evidence-invalid"
+    if exit_record.get("failure_message"):
+        return "runner-failure"
+    if evidence.get("completed") and codex_exit_status != "valid":
+        return "codex-exit-evidence-invalid"
+    return "terminal-record-missing"
 
 
 def public_receipt(run_dir: Path) -> dict[str, Any]:
@@ -3268,7 +4097,7 @@ def public_receipt(run_dir: Path) -> dict[str, Any]:
 
     return {
         "schema_version": SCHEMA_VERSION,
-        "run_dir": str(run_dir.resolve()),
+        "run_handle": public_run_handle(run_dir),
         "status": status,
         "dispatch_method": "codex-exec-explicit-model",
         "dispatch_result": "selected" if status in {"running", "completed"} else "failed",
@@ -3285,7 +4114,8 @@ def public_receipt(run_dir: Path) -> dict[str, Any]:
         "observed_model": profile["model"] if status == "completed" else None,
         "sandbox": profile["sandbox"],
         "auth_mode": request["auth_mode"],
-        "profile_source": request["profile_source"],
+        "prompt_source_classification": "owner-private-snapshot",
+        "prompt_sha256": request.get("prompt_sha256"),
         "worker_pid": worker.get("pid"),
         "worker_process_identity": worker.get("identity"),
         "worker_process_group_id": worker.get("process_group_id"),
@@ -3315,26 +4145,14 @@ def public_receipt(run_dir: Path) -> dict[str, Any]:
                 else "explicit selection did not produce an accepted turn.completed"
             )
         ),
-        "failure_message": (
-            evidence["failure_message"]
-            or evidence["event_error"]
-            or (result_error if status == "failed" else None)
-            or (exit_record or {}).get("failure_message")
-            or (
-                f"Codex exit evidence is {codex_exit_status}"
-                if status == "failed" and evidence["completed"] and codex_exit_status != "valid"
-                else None
-            )
-            or ("runner process exited without a terminal record" if status == "failed" else None)
+        "failure_message": classify_public_failure(
+            evidence=evidence,
+            result_error=result_error,
+            exit_record=exit_record or {},
+            status=status,
+            codex_exit_status=codex_exit_status,
         ),
         "usage": evidence["usage"],
-        "artifacts": {
-            "events": str((run_dir / "events.jsonl").resolve()),
-            "stderr": str((run_dir / "stderr.log").resolve()),
-            "result": str((run_dir / "result.md").resolve()),
-            "codex_exit": str((run_dir / "codex-exit.json").resolve()),
-            "codex_spawn": str((run_dir / "codex-spawn.json").resolve()),
-        },
     }
 
 
@@ -3377,11 +4195,12 @@ def apply_preboundary_guardian_failure(
 
 def start_run(args: argparse.Namespace) -> int:
     repo = Path(args.repo).expanduser().resolve()
-    prompt_file = Path(args.prompt_file).expanduser().resolve()
+    prompt_file_value = getattr(args, "prompt_file", None)
+    prompt_file = Path(prompt_file_value).expanduser() if prompt_file_value else None
+    staged_snapshot_id = getattr(args, "prompt_snapshot_id", None)
+    staged_prompt_sha256 = getattr(args, "prompt_sha256", None)
     if not repo.is_dir():
         raise RunnerError(f"repository/workspace directory does not exist: {repo}")
-    if not prompt_file.is_file():
-        raise RunnerError(f"prompt file does not exist: {prompt_file}")
     lease_id = validate_lease_id(args.agent, args.lease_id)
     allowed_files, specification_revision, recovery_target_milestone = validate_recovery_start_options(
         args.agent,
@@ -3389,11 +4208,57 @@ def start_run(args: argparse.Namespace) -> int:
         getattr(args, "specification_revision", None),
         getattr(args, "recovery_target_milestone", None),
     )
-    try:
-        source_prompt = prompt_file.read_bytes()
-        task_prompt = source_prompt.decode("utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        raise RunnerError(f"cannot read UTF-8 delegated prompt {prompt_file}: {exc}") from exc
+    registry = recovery_registry_for_agent(args.agent, repo)
+    registry_lease_id = lease_id
+    recovery_target_lease: dict[str, Any] | None = None
+    if registry is not None and registry_lease_id is not None:
+        try:
+            existing = registry.state().get("lease")
+        except RecoveryStateError as exc:
+            raise RunnerError(f"workspace recovery registry rejected start: {exc}") from exc
+        if existing is not None:
+            if (
+                isinstance(existing, dict)
+                and existing.get("lease_id") == registry_lease_id
+                and existing.get("lease_kind") == "recovery-target"
+                and existing.get("state") == "reserved"
+            ):
+                recovery_target_lease = existing
+            else:
+                raise RunnerError("workspace recovery registry rejected start: workspace is not vacant")
+    prompt_owner = registry or RecoveryRegistry(repo)
+    if recovery_target_lease is not None:
+        target_plan = recovery_target_lease.get("plan", {})
+        try:
+            task_prompt = read_owner_prompt_snapshot(
+                prompt_owner,
+                target_plan["prompt_snapshot_id"],
+                target_plan["prompt_sha256"],
+            )
+        except (KeyError, RunnerError) as exc:
+            raise RunnerError("reserved recovery target lacks a valid immutable prompt snapshot") from exc
+        prompt_binding = {
+            "prompt_snapshot_id": target_plan["prompt_snapshot_id"],
+            "prompt_sha256": target_plan["prompt_sha256"],
+        }
+    else:
+        if staged_snapshot_id or staged_prompt_sha256:
+            if not staged_snapshot_id or not staged_prompt_sha256:
+                raise RunnerError("owner prompt snapshot binding is incomplete")
+            prompt_binding = {
+                "prompt_snapshot_id": staged_snapshot_id,
+                "prompt_sha256": staged_prompt_sha256,
+            }
+        else:
+            if prompt_file is None or not prompt_file.is_file():
+                raise RunnerError("prompt-identity-unstable; use owner-private staging API")
+            prompt_binding = acquire_owner_prompt_snapshot(repo, prompt_file, prompt_owner)
+        task_prompt = read_owner_prompt_snapshot(
+            prompt_owner,
+            prompt_binding["prompt_snapshot_id"],
+            prompt_binding["prompt_sha256"],
+        )
+    source_prompt = task_prompt.encode("utf-8")
 
     run_dir = Path(args.run_dir).expanduser().resolve() if args.run_dir else default_run_dir().resolve()
     if run_dir.exists() and any(run_dir.iterdir()):
@@ -3416,7 +4281,6 @@ def start_run(args: argparse.Namespace) -> int:
     )
     effective_prompt(profile, args.task_name, task_prompt)
     prompt_snapshot = run_dir / "prompt.md"
-    atomic_write_bytes(prompt_snapshot, source_prompt)
     request = {
         "schema_version": SCHEMA_VERSION,
         "created_at": utc_now(),
@@ -3425,9 +4289,10 @@ def start_run(args: argparse.Namespace) -> int:
         "lease_id": lease_id,
         "repo": str(repo),
         "codex_home": str(codex_home),
-        "prompt_source": str(prompt_file),
+        "prompt_source": str(prompt_file) if prompt_file is not None else None,
         "prompt_file": str(prompt_snapshot),
-        "prompt_sha256": sha256_bytes(source_prompt),
+        "prompt_snapshot_id": prompt_binding["prompt_snapshot_id"],
+        "prompt_sha256": prompt_binding["prompt_sha256"],
         "profile_source": str(profile.source),
         "profile": {
             "name": profile.name,
@@ -3448,9 +4313,6 @@ def start_run(args: argparse.Namespace) -> int:
         "containment_plan": None,
     }
 
-    registry = recovery_registry_for_agent(args.agent, repo)
-    registry_lease_id = lease_id
-    recovery_target_lease: dict[str, Any] | None = None
     if registry is not None and registry_lease_id is not None:
         try:
             registry_state = registry.initialize()
@@ -3468,6 +4330,7 @@ def start_run(args: argparse.Namespace) -> int:
                 target_plan = existing_lease.get("plan", {})
                 if (
                     target_plan.get("run_id") != run_dir.name
+                    or target_plan.get("prompt_snapshot_id") != request["prompt_snapshot_id"]
                     or target_plan.get("prompt_sha256") != request["prompt_sha256"]
                     or existing_lease.get("target_milestone") != request["task_name"]
                 ):
@@ -3522,7 +4385,11 @@ def start_run(args: argparse.Namespace) -> int:
             "fallback_token": secrets.token_hex(32),
             "recovery_target": False,
         }
-    atomic_write_json(run_dir / "request.json", request)
+    try:
+        durable_write_private_bytes(prompt_snapshot, source_prompt)
+        durable_write_private_json(run_dir / "request.json", request)
+    except (OSError, RecoveryStateError) as exc:
+        raise RunnerError(f"durable run prompt binding failed closed: {exc}") from exc
 
     if (
         registry is not None
@@ -3538,6 +4405,7 @@ def start_run(args: argparse.Namespace) -> int:
                 recovery_capable=preflight is not None,
                 source_state_id=(preflight or {}).get("source_state_id"),
                 run_id=run_dir.name,
+                prompt_snapshot_id=request["prompt_snapshot_id"],
                 prompt_sha256=request["prompt_sha256"],
                 containment_plan=request.get("containment_plan"),
             )
@@ -3554,6 +4422,26 @@ def start_run(args: argparse.Namespace) -> int:
                         f"and retained its lease: {exc}; release failed: {release_exc}"
                     ) from exc
             raise RunnerError(f"workspace recovery registry rejected start: {exc}") from exc
+
+    if registry is not None:
+        try:
+            prompt_owner.mark_prompt_snapshot_released(
+                request["prompt_snapshot_id"],
+                request["prompt_sha256"],
+            )
+            garbage_collect_owner_prompt_snapshots(prompt_owner)
+        except (OSError, RunnerError, RecoveryStateError) as exc:
+            if registry_lease_id is not None and recovery_target_lease is None:
+                try:
+                    registry.release_unactivated_reservation(registry_lease_id)
+                except RecoveryStateError as release_exc:
+                    raise RunnerError(
+                        "owner prompt release marker failed and the unactivated lease was retained: "
+                        f"{exc}; release failed: {release_exc}"
+                    ) from exc
+            raise RunnerError(f"owner prompt release marker failed before spawn: {exc}") from exc
+    else:
+        garbage_collect_owner_prompt_snapshots(prompt_owner)
 
     worker: Any | None = None
     worker_record: dict[str, Any] = {}
@@ -4173,7 +5061,7 @@ def worker_run(run_dir: Path) -> int:
 
 
 def status_run(args: argparse.Namespace) -> int:
-    run_dir = Path(args.run_dir).expanduser().resolve()
+    run_dir = resolve_run_reference(args.run_dir)
     audit_guardian_health(run_dir)
     receipt = public_receipt(run_dir)
     reconcile_implementation_registry(run_dir, receipt)
@@ -4182,7 +5070,7 @@ def status_run(args: argparse.Namespace) -> int:
 
 
 def activate_run(args: argparse.Namespace) -> int:
-    run_dir = Path(args.run_dir).expanduser().resolve()
+    run_dir = resolve_run_reference(args.run_dir)
     audit_guardian_health(run_dir)
     receipt = public_receipt(run_dir)
     if receipt["status"] != "running":
@@ -4267,7 +5155,7 @@ def dispatch_run(args: argparse.Namespace) -> int:
 
 
 def wait_run(args: argparse.Namespace) -> int:
-    run_dir = Path(args.run_dir).expanduser().resolve()
+    run_dir = resolve_run_reference(args.run_dir)
     deadline = time.monotonic() + args.timeout
     while True:
         audit_guardian_health(run_dir)
@@ -4405,7 +5293,7 @@ def terminate_process_tree(
 
 
 def cancel_run(args: argparse.Namespace) -> int:
-    run_dir = Path(args.run_dir).expanduser().resolve()
+    run_dir = resolve_run_reference(args.run_dir)
     audit_guardian_health(run_dir)
     receipt = public_receipt(run_dir)
     if receipt["status"] != "running":
@@ -4533,7 +5421,10 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--agent", required=True, choices=sorted(SUPPORTED_AGENTS))
     start.add_argument("--task-name", required=True)
     start.add_argument("--repo", required=True)
-    start.add_argument("--prompt-file", required=True)
+    start_prompt = start.add_mutually_exclusive_group(required=True)
+    start_prompt.add_argument("--prompt-file")
+    start_prompt.add_argument("--prompt-snapshot-id")
+    start.add_argument("--prompt-sha256")
     start.add_argument("--run-dir")
     start.add_argument("--lease-id")
     start.add_argument("--allowed-file", action="append", default=[])
@@ -4550,7 +5441,10 @@ def build_parser() -> argparse.ArgumentParser:
     dispatch.add_argument("--agent", required=True, choices=sorted(SUPPORTED_AGENTS))
     dispatch.add_argument("--task-name", required=True)
     dispatch.add_argument("--repo", required=True)
-    dispatch.add_argument("--prompt-file", required=True)
+    dispatch_prompt = dispatch.add_mutually_exclusive_group(required=True)
+    dispatch_prompt.add_argument("--prompt-file")
+    dispatch_prompt.add_argument("--prompt-snapshot-id")
+    dispatch.add_argument("--prompt-sha256")
     dispatch.add_argument("--run-dir")
     dispatch.add_argument("--lease-id")
     dispatch.add_argument("--allowed-file", action="append", default=[])
@@ -4584,6 +5478,13 @@ def build_parser() -> argparse.ArgumentParser:
     cancel.add_argument("--grace-seconds", type=float, default=5.0)
     cancel.set_defaults(handler=cancel_run)
 
+    stage_prompt = subparsers.add_parser(
+        "stage-prompt",
+        help="stage bounded UTF-8 prompt bytes from stdin in owner-private storage",
+    )
+    stage_prompt.add_argument("--repo", required=True)
+    stage_prompt.set_defaults(handler=stage_prompt_run)
+
     worker = subparsers.add_parser("_worker", help=argparse.SUPPRESS)
     worker.add_argument("--run-dir", required=True)
     worker.set_defaults(handler=lambda args: worker_run(Path(args.run_dir).resolve()))
@@ -4599,10 +5500,25 @@ def build_parser() -> argparse.ArgumentParser:
     reject.add_argument("--disposition", choices=["blocked", "needs-escalation"], required=True)
     reject.add_argument("--evidence-digest", required=True)
     reject.set_defaults(handler=reject_semantic_handoff_run)
+    abandon = subparsers.add_parser("_reconcile-terminal-abandonment", help=argparse.SUPPRESS)
+    abandon.add_argument("--run-dir", required=True)
+    abandon.set_defaults(handler=reconcile_terminal_abandonment_run)
+    root_completion = subparsers.add_parser(
+        "_record-root-completion", help=argparse.SUPPRESS
+    )
+    root_completion.add_argument("--run-dir", required=True)
+    root_completion.add_argument("--specification-revision", required=True)
+    root_completion.add_argument("--milestone", required=True)
+    root_completion.add_argument("--allowed-set-digest", required=True)
+    root_completion.add_argument("--diff-attribution-digest", required=True)
+    root_completion.set_defaults(handler=record_root_completion_authorization_run)
     authorize = subparsers.add_parser("_authorize-recovery", help=argparse.SUPPRESS)
     authorize.add_argument("--repo", required=True)
     authorize.add_argument("--checkpoint-file", required=True)
-    authorize.add_argument("--prompt-file", required=True)
+    authorize_prompt = authorize.add_mutually_exclusive_group(required=True)
+    authorize_prompt.add_argument("--prompt-file")
+    authorize_prompt.add_argument("--prompt-snapshot-id")
+    authorize.add_argument("--prompt-sha256")
     authorize.add_argument("--run-dir", required=True)
     authorize.add_argument("--lease-id", required=True)
     authorize.add_argument("--user-action-digest", required=True)

@@ -376,6 +376,13 @@ class CodexInvocationTests(unittest.TestCase):
             source=Path("profile.toml"),
         )
 
+    def private_prompt(self, root: Path, content: bytes = b"bounded task\n") -> Path:
+        directory = root / "prompt-owner"
+        agent_runner.ensure_private_run_dir(directory)
+        prompt = directory / "prompt.md"
+        agent_runner.atomic_write_bytes(prompt, content)
+        return prompt
+
     def test_command_pins_model_effort_sandbox_jsonl_and_result_file(self) -> None:
         command = agent_runner.build_codex_command(
             codex_bin="codex",
@@ -479,8 +486,7 @@ class CodexInvocationTests(unittest.TestCase):
             root = Path(temp)
             repo = root / "repo"
             repo.mkdir()
-            prompt = root / "prompt.md"
-            prompt.write_text("bounded task\n", encoding="utf-8", newline="\n")
+            prompt = self.private_prompt(root)
             run_dir = root / "run"
             run_dir.mkdir()
             agent_runner.atomic_write_json(run_dir / "activate.json", {"stale": True})
@@ -534,8 +540,7 @@ class CodexInvocationTests(unittest.TestCase):
             root = Path(temp)
             repo = root / "repo"
             repo.mkdir()
-            prompt = root / "prompt.md"
-            prompt.write_text("bounded task\n", encoding="utf-8", newline="\n")
+            prompt = self.private_prompt(root)
             run_dir = root / "run"
             process = mock.Mock(pid=123)
             profile = self.profile()._replace(
@@ -575,8 +580,7 @@ class CodexInvocationTests(unittest.TestCase):
             root = Path(temp)
             repo = root / "repo"
             repo.mkdir()
-            prompt = root / "prompt.md"
-            prompt.write_text("bounded task\n", encoding="utf-8", newline="\n")
+            prompt = self.private_prompt(root)
             run_dir = root / "run"
             process = mock.Mock(pid=123)
             profile = self.profile()._replace(
@@ -617,8 +621,7 @@ class CodexInvocationTests(unittest.TestCase):
             root = Path(temp)
             repo = root / "repo"
             repo.mkdir()
-            prompt = root / "prompt.md"
-            prompt.write_text("bounded task\n", encoding="utf-8", newline="\n")
+            prompt = self.private_prompt(root)
             run_dir = root / "run"
             process = mock.Mock(pid=123)
             profile = self.profile()._replace(
@@ -671,8 +674,7 @@ class CodexInvocationTests(unittest.TestCase):
             root = Path(temp)
             repo = root / "repo"
             repo.mkdir()
-            prompt = root / "prompt.md"
-            prompt.write_text("bounded task\n", encoding="utf-8", newline="\n")
+            prompt = self.private_prompt(root)
             run_dir = root / "run"
             process = mock.Mock(pid=123)
             profile = self.profile()._replace(
@@ -714,8 +716,7 @@ class CodexInvocationTests(unittest.TestCase):
             root = Path(temp)
             repo = root / "repo"
             repo.mkdir()
-            prompt = root / "prompt.md"
-            prompt.write_text("bounded task\n", encoding="utf-8", newline="\n")
+            prompt = self.private_prompt(root)
             run_dir = root / "run"
             process = mock.Mock(pid=123)
             profile = self.profile()._replace(
@@ -760,8 +761,7 @@ class CodexInvocationTests(unittest.TestCase):
             root = Path(temp)
             repo = root / "repo"
             repo.mkdir()
-            prompt = root / "prompt.md"
-            prompt.write_text("bounded task\n", encoding="utf-8", newline="\n")
+            prompt = self.private_prompt(root)
             run_dir = root / "run"
             process = mock.Mock(pid=123)
             profile = self.profile()._replace(
@@ -809,8 +809,7 @@ class CodexInvocationTests(unittest.TestCase):
             root = Path(temp)
             repo = root / "repo"
             repo.mkdir()
-            prompt = root / "prompt.md"
-            prompt.write_text("bounded task\n", encoding="utf-8", newline="\n")
+            prompt = self.private_prompt(root)
             run_dir = root / "run"
             process = mock.Mock(pid=123)
             process.poll.return_value = None
@@ -1976,6 +1975,449 @@ class CodexInvocationTests(unittest.TestCase):
                     ):
                         owner.revalidate_checkpoint(checkpoint)
 
+    def test_ac04_to_ac12_terminal_abandonment_reconciles_retained_lease_without_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "tests@example.invalid"],
+                cwd=repo,
+                check=True,
+            )
+            subprocess.run(["git", "config", "user.name", "Tests"], cwd=repo, check=True)
+            allowed = repo / "allowed.txt"
+            allowed.write_text("seed\n", encoding="utf-8", newline="\n")
+            subprocess.run(["git", "add", "allowed.txt"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "--quiet", "-m", "baseline"], cwd=repo, check=True)
+
+            run_dir = root / "outside-drift-run"
+            owner = agent_runner.RecoveryRegistry(repo, state_root=root / "state")
+            owner.initialize()
+            recovery_prompt = agent_runner.stage_owner_prompt_snapshot(
+                owner, b"bounded recovery attempt\n"
+            )
+            preflight = owner.prepare_source_checkpoint(
+                source_id=run_dir.name,
+                source_lease_id="lease-1",
+                source_milestone="M2-source",
+                target_milestone="M2-recovery",
+                allowed_paths=["allowed.txt"],
+                specification_revision="R-005",
+            )
+            owner.reserve_normal(
+                "lease-1",
+                allowed_set_digest=preflight["allowed_set_digest"],
+                recovery_capable=True,
+                source_state_id=preflight["source_state_id"],
+                run_id=run_dir.name,
+                prompt_sha256="a" * 64,
+                containment_plan=_containment_plan(),
+            )
+            owner.bind_reserved_source_snapshot("lease-1", preflight)
+            owner.claim_contained_launch("lease-1", "contained-token")
+            owner.bind_process_unactivated(
+                "lease-1",
+                allowed_set_digest=preflight["allowed_set_digest"],
+                provider_receipt=_provider_receipt(),
+                process_receipt=_process_receipt(),
+            )
+            owner.commit_activation("lease-1", preflight["allowed_set_digest"])
+
+            agent_runner.ensure_private_run_dir(run_dir)
+            agent_runner.atomic_write_json(
+                run_dir / "request.json",
+                {
+                    "profile": {"name": "openbuild_implementation_strong"},
+                    "task_name": "M2-source",
+                    "repo": str(repo),
+                    "lease_id": "lease-1",
+                    "lifecycle_allowed_set_digest": preflight["allowed_set_digest"],
+                    "recovery_preflight": preflight,
+                },
+            )
+            secret = bytes.fromhex("55" * 32)
+            agent_runner.atomic_write_bytes(run_dir / "guardian.key", secret)
+            agent_runner.write_guardian_message(
+                run_dir / "guardian-zero.json",
+                secret,
+                "guardian-zero",
+                _zero_proof(),
+            )
+            agent_runner.write_guardian_message(
+                run_dir / "guardian-closed.json",
+                secret,
+                "guardian-closed",
+                _guardian_close(),
+            )
+            receipt = {
+                "run_dir": str(run_dir),
+                "status": "completed",
+                "agent_name": "openbuild_implementation_strong",
+                "task_name": "M2-source",
+                "lease_id": "lease-1",
+                "activated": True,
+                "configured_model": "fixture",
+                "model_reasoning_effort": "xhigh",
+                "sandbox": "workspace-write",
+                "worker_pid": 123,
+                "worker_process_identity": "worker-1",
+                "codex_pid": 456,
+                "codex_process_identity": "codex-1",
+                "terminal_event": "turn.completed",
+                "codex_exit_evidence": "valid",
+                "codex_exit_code": 0,
+                "result_evidence": "valid",
+                "process_tree_stopped": True,
+            }
+            (repo / "orchestrator-artifact.txt").write_text(
+                "outside the allowed set\n", encoding="utf-8", newline="\n"
+            )
+            (run_dir / "result.md").write_text(
+                "NEEDS_ESCALATION: semantic result cannot accept the drifted checkpoint\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+
+            with mock.patch.object(
+                agent_runner, "recovery_registry_for_agent", return_value=owner
+            ), mock.patch.object(
+                agent_runner,
+                "garbage_collect_owner_prompt_snapshots",
+                wraps=agent_runner.garbage_collect_owner_prompt_snapshots,
+            ) as prompt_gc:
+                agent_runner.reconcile_implementation_registry(run_dir, receipt)
+                self.assertEqual(owner.state()["lease"]["state"], "stopped-terminal")
+                checkpoint = agent_runner.read_json(run_dir / "recovery-checkpoint.json")
+                self.assertEqual(checkpoint["reasons"], ["outside-set-drift"])
+                self.assertFalse((run_dir / "implementation-handoffs.jsonl").exists())
+                checkpoint_path = run_dir / "attempted-recovery-checkpoint.json"
+                agent_runner.atomic_write_json(checkpoint_path, checkpoint)
+                state_before_attempt = owner.path.read_bytes()
+                with self.assertRaisesRegex(agent_runner.RunnerError, "occupied"):
+                    agent_runner.authorize_recovery_run(
+                        Namespace(
+                            repo=str(repo),
+                            checkpoint_file=str(checkpoint_path),
+                            prompt_file=None,
+                            prompt_snapshot_id=recovery_prompt["prompt_snapshot_id"],
+                            prompt_sha256=recovery_prompt["prompt_sha256"],
+                            run_dir=str(root / "replacement-run"),
+                            lease_id="replacement-lease",
+                            user_action_digest="b" * 64,
+                            specification_revision="R-005",
+                        )
+                    )
+                self.assertEqual(owner.path.read_bytes(), state_before_attempt)
+                self.assertFalse((root / "replacement-run").exists())
+                with mock.patch.object(
+                    agent_runner, "audit_guardian_health"
+                ), mock.patch.object(
+                    agent_runner, "public_receipt", return_value=receipt
+                ), redirect_stdout(io.StringIO()):
+                    agent_runner.reconcile_terminal_abandonment_run(
+                        Namespace(run_dir=str(run_dir))
+                    )
+                self.assertGreaterEqual(prompt_gc.call_count, 1)
+
+            state = owner.state()
+            self.assertIsNone(state["lease"])
+            self.assertIsNone(state["outbox"])
+            self.assertEqual(state["history"][-1]["semantic_disposition"], "abandoned")
+            self.assertFalse(state["history"][-1]["terminal_success"])
+            self.assertFalse((run_dir / "implementation-handoffs.jsonl").exists())
+            self.assertTrue((run_dir / "guardian-close.json").is_file())
+            abandonment = agent_runner.read_json(run_dir / "terminal-abandonment.json")
+            self.assertEqual(abandonment["outcome"], "terminal-abandoned")
+            self.assertEqual(abandonment["cause"], "outside-set-drift")
+            self.assertFalse(abandonment["checkpoint_allowed"])
+            self.assertFalse(
+                (
+                    agent_runner._prompt_snapshot_paths(owner)[1]
+                    / f"{recovery_prompt['prompt_snapshot_id']}.blob"
+                ).exists()
+            )
+            audit_output = io.StringIO()
+            with mock.patch.object(
+                agent_runner, "recovery_registry_for_agent", return_value=owner
+            ), redirect_stdout(audit_output):
+                self.assertEqual(
+                    agent_runner.record_root_completion_authorization_run(
+                        Namespace(
+                            run_dir=str(run_dir),
+                            specification_revision="R-005",
+                            milestone="M2-source",
+                            allowed_set_digest=preflight["allowed_set_digest"],
+                            diff_attribution_digest="d" * 64,
+                        )
+                    ),
+                    0,
+                )
+            audit = json.loads(audit_output.getvalue())
+            self.assertEqual(audit["event"], "root-completion-authorized")
+            self.assertTrue((run_dir / "root-completion-authorized.json").is_file())
+            reloaded_owner = agent_runner.RecoveryRegistry(
+                repo, state_root=root / "state"
+            )
+            with mock.patch.object(
+                agent_runner,
+                "recovery_registry_for_agent",
+                return_value=reloaded_owner,
+            ), redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    agent_runner.record_root_completion_authorization_run(
+                        Namespace(
+                            run_dir=str(run_dir),
+                            specification_revision="R-005",
+                            milestone="M2-source",
+                            allowed_set_digest=preflight["allowed_set_digest"],
+                            diff_attribution_digest="d" * 64,
+                        )
+                    ),
+                    0,
+                )
+            allowed.write_text("root completion after audit\n", encoding="utf-8", newline="\n")
+
+    def test_ac09_ac13_root_completion_audit_is_durable_before_authorization(self) -> None:
+        fault_stages = (
+            "before-write",
+            "after-file-fsync",
+            "after-replace",
+            "before-metadata-barrier",
+            "after-metadata-barrier",
+        )
+        for fault_stage in fault_stages:
+            with self.subTest(fault_stage=fault_stage), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                run_dir = root / "run"
+                agent_runner.ensure_private_run_dir(run_dir)
+                repo = root / "repo"
+                repo.mkdir()
+                request = {
+                    "profile": {"name": "openbuild_implementation_fast"},
+                    "repo": str(repo),
+                    "lease_id": "lease-root-audit",
+                    "task_name": "M2-source",
+                    "recovery_preflight": {"specification_revision": "R-005"},
+                }
+                agent_runner.atomic_write_json(run_dir / "request.json", request)
+                registry = mock.Mock()
+                registry.state.return_value = {
+                    "lease": None,
+                    "outbox": None,
+                    "quarantine": None,
+                    "history": [
+                        {
+                            "event": "contained-terminal-released",
+                            "lease_id": "lease-root-audit",
+                            "terminal_success": False,
+                            "handoff_digest": None,
+                            "outbox_digest": None,
+                            "allowed_set_digest": "a" * 64,
+                        }
+                    ],
+                }
+                arguments = Namespace(
+                    run_dir=str(run_dir),
+                    specification_revision="R-005",
+                    milestone="M2-source",
+                    allowed_set_digest="a" * 64,
+                    diff_attribution_digest="d" * 64,
+                    durability_fault=fault_stage,
+                )
+                with mock.patch.object(
+                    agent_runner, "recovery_registry_for_agent", return_value=registry
+                ), redirect_stdout(io.StringIO()), self.assertRaisesRegex(
+                    agent_runner.RunnerError, "durable root completion audit"
+                ):
+                    agent_runner.record_root_completion_authorization_run(arguments)
+
+                path = run_dir / "root-completion-authorized.json"
+                if path.is_file():
+                    persisted = agent_runner.read_json(path)
+                    self.assertEqual(
+                        persisted,
+                        agent_runner.root_completion_authorization_record(
+                            specification_revision="R-005",
+                            milestone="M2-source",
+                            allowed_set_digest="a" * 64,
+                            diff_attribution_digest="d" * 64,
+                        ),
+                    )
+                arguments.durability_fault = None
+                with mock.patch.object(
+                    agent_runner, "recovery_registry_for_agent", return_value=registry
+                ), redirect_stdout(io.StringIO()):
+                    self.assertEqual(
+                        agent_runner.record_root_completion_authorization_run(arguments),
+                        0,
+                    )
+                self.assertEqual(
+                    agent_runner.read_json(path),
+                    agent_runner.root_completion_authorization_record(
+                        specification_revision="R-005",
+                        milestone="M2-source",
+                        allowed_set_digest="a" * 64,
+                        diff_attribution_digest="d" * 64,
+                    ),
+                )
+
+    def test_ac04_ac05_ac13_terminal_reconcile_rejects_normal_and_recovery_run_mismatch(self) -> None:
+        for lease_kind in ("normal-contained", "recovery-target"):
+            with self.subTest(lease_kind=lease_kind), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                repo = root / "repo"
+                repo.mkdir()
+                subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+                subprocess.run(
+                    ["git", "config", "user.email", "tests@example.invalid"],
+                    cwd=repo,
+                    check=True,
+                )
+                subprocess.run(
+                    ["git", "config", "user.name", "Tests"], cwd=repo, check=True
+                )
+                (repo / "allowed.txt").write_text(
+                    "seed\n", encoding="utf-8", newline="\n"
+                )
+                subprocess.run(["git", "add", "allowed.txt"], cwd=repo, check=True)
+                subprocess.run(
+                    ["git", "commit", "--quiet", "-m", "baseline"],
+                    cwd=repo,
+                    check=True,
+                )
+                owner = agent_runner.RecoveryRegistry(repo, state_root=root / "state")
+                owner.initialize()
+                expected_run_id = f"expected-{lease_kind}"
+                lease_id = f"lease-{lease_kind}"
+
+                if lease_kind == "normal-contained":
+                    preflight = owner.prepare_source_checkpoint(
+                        source_id=expected_run_id,
+                        source_lease_id=lease_id,
+                        source_milestone="source",
+                        target_milestone="target",
+                        allowed_paths=["allowed.txt"],
+                        specification_revision="R-005",
+                    )
+                    owner.reserve_normal(
+                        lease_id,
+                        allowed_set_digest=preflight["allowed_set_digest"],
+                        recovery_capable=True,
+                        source_state_id=preflight["source_state_id"],
+                        run_id=expected_run_id,
+                        prompt_sha256="a" * 64,
+                        containment_plan=_containment_plan(),
+                    )
+                    owner.bind_reserved_source_snapshot(lease_id, preflight)
+                    owner.claim_contained_launch(lease_id, "contained-token")
+                    allowed_set_digest = preflight["allowed_set_digest"]
+                else:
+                    checkpoint = owner.capture_checkpoint(
+                        source_id="source-1",
+                        source_lease_id="source-lease",
+                        source_receipt_digest="a" * 64,
+                        source_milestone="source",
+                        target_milestone="target",
+                        allowed_paths=["allowed.txt"],
+                        specification_revision="R-005",
+                    )
+                    checkpoint = owner.revalidate_checkpoint(checkpoint)
+                    grant = owner.grant_authorization(
+                        checkpoint,
+                        user_action_digest="b" * 64,
+                        specification_revision="R-005",
+                    )
+                    owner.consume_grant_and_reserve(
+                        grant_id=grant["grant_id"],
+                        checkpoint=checkpoint,
+                        target_plan={
+                            "lease_id": lease_id,
+                            "run_id": expected_run_id,
+                            "prompt_sha256": "c" * 64,
+                            "launch_token": "d" * 64,
+                            "provider_plan_id": "provider-plan",
+                            "ipc_plan_id": "ipc-plan",
+                            "allowed_set_digest": checkpoint["allowed_set_digest"],
+                        },
+                    )
+                    owner.claim_launch(lease_id, "d" * 64)
+                    allowed_set_digest = checkpoint["allowed_set_digest"]
+
+                owner.bind_process_unactivated(
+                    lease_id,
+                    allowed_set_digest=allowed_set_digest,
+                    provider_receipt=_provider_receipt(),
+                    process_receipt=_process_receipt(),
+                )
+                owner.commit_activation(lease_id, allowed_set_digest)
+                mismatched_run = root / "different-run"
+                mismatched_run.mkdir()
+                agent_runner.atomic_write_json(
+                    mismatched_run / "request.json",
+                    {
+                        "profile": {"name": "openbuild_implementation_strong"},
+                        "repo": str(repo),
+                        "lease_id": lease_id,
+                    },
+                )
+                before = {
+                    path.relative_to(owner.state_root).as_posix(): path.read_bytes()
+                    for path in owner.state_root.rglob("*")
+                    if path.is_file()
+                }
+                with mock.patch.object(
+                    agent_runner, "recovery_registry_for_agent", return_value=owner
+                ), self.assertRaisesRegex(agent_runner.RunnerError, "run ID"):
+                    agent_runner.reconcile_implementation_registry(
+                        mismatched_run,
+                        {"status": "completed", "process_tree_stopped": True},
+                        terminal_abandonment=True,
+                    )
+                after = {
+                    path.relative_to(owner.state_root).as_posix(): path.read_bytes()
+                    for path in owner.state_root.rglob("*")
+                    if path.is_file()
+                }
+                self.assertEqual(after, before)
+
+    def test_ac09_ac11_ac18_closed_outcomes_and_root_completion_audit_are_executable(self) -> None:
+        decision = agent_runner.classify_recovery_outcome(decision_class="external-action")
+        blocked = agent_runner.classify_recovery_outcome(
+            missing_safety_evidence=("process-identity", "containment-zero")
+        )
+        exhausted = agent_runner.classify_recovery_outcome(
+            exhausted_capabilities=("configured-writer-route",)
+        )
+        abandoned = agent_runner.classify_recovery_outcome(
+            terminal_abandonment={
+                "outcome": "terminal-abandoned",
+                "schema": "terminal-abandonment-v1",
+                "cause": "outside-set-drift",
+                "checkpoint_invalidation": "completed",
+            }
+        )
+        audit = agent_runner.root_completion_authorization_record(
+            specification_revision="R-005",
+            milestone="M2",
+            allowed_set_digest="a" * 64,
+            diff_attribution_digest="b" * 64,
+        )
+
+        self.assertEqual(decision["required_action"], "provide-decision")
+        self.assertEqual(blocked["outcome"], "blocked")
+        self.assertEqual(exhausted["outcome"], "automation-exhausted")
+        self.assertEqual(abandoned["outcome"], "terminal-abandoned")
+        self.assertEqual(audit["event"], "root-completion-authorized")
+        self.assertEqual(audit["authority"], "original-build-request")
+        self.assertTrue(audit["automatic"])
+        for record in (decision, blocked, exhausted, abandoned, audit):
+            self.assertEqual(record["writer_action"], "none")
+            rendered = json.dumps(record)
+            self.assertNotIn(str(ROOT), rendered)
+            self.assertNotIn("authorize-recovery", rendered)
+
     def test_implementation_start_commits_containment_before_worker_release(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1990,10 +2432,11 @@ class CodexInvocationTests(unittest.TestCase):
             allowed.write_text("seed\n", encoding="utf-8", newline="\n")
             subprocess.run(["git", "add", "allowed.txt"], cwd=repo, check=True)
             subprocess.run(["git", "commit", "--quiet", "-m", "baseline"], cwd=repo, check=True)
-            prompt = root / "prompt.md"
-            prompt.write_text("bounded task\n", encoding="utf-8", newline="\n")
             run_dir = root / "run"
             owner = agent_runner.RecoveryRegistry(repo, state_root=root / "state")
+            prompt_binding = agent_runner.stage_owner_prompt_snapshot(
+                owner, b"bounded task\n"
+            )
             profile = self.profile()._replace(
                 name="openbuild_implementation_fast",
                 sandbox="workspace-write",
@@ -2020,6 +2463,27 @@ class CodexInvocationTests(unittest.TestCase):
                 "activated": False,
                 "codex_process_identity": "codex-created-1",
             }
+            durable_sequence: list[str] = []
+            durable_bytes = agent_runner.durable_write_private_bytes
+            durable_json = agent_runner.durable_write_private_json
+            release_snapshot = owner.mark_prompt_snapshot_released
+
+            def record_durable_bytes(path, value, *, fault=None):
+                durable_bytes(path, value, fault=fault)
+                durable_sequence.append(path.name)
+
+            def record_durable_json(path, value, *, fault=None):
+                durable_json(path, value, fault=fault)
+                durable_sequence.append(path.name)
+
+            def record_release(snapshot_id, prompt_sha256):
+                self.assertEqual(durable_sequence, ["prompt.md", "request.json"])
+                self.assertEqual((run_dir / "prompt.md").read_bytes(), b"bounded task\n")
+                self.assertEqual(
+                    agent_runner.read_json(run_dir / "request.json")["prompt_sha256"],
+                    prompt_binding["prompt_sha256"],
+                )
+                return release_snapshot(snapshot_id, prompt_sha256)
 
             def guardian_launch(*_args: object, **_kwargs: object):
                 agent_runner.atomic_write_json(
@@ -2052,7 +2516,9 @@ class CodexInvocationTests(unittest.TestCase):
 
             args = Namespace(
                 repo=str(repo),
-                prompt_file=str(prompt),
+                prompt_file=None,
+                prompt_snapshot_id=prompt_binding["prompt_snapshot_id"],
+                prompt_sha256=prompt_binding["prompt_sha256"],
                 agent="openbuild_implementation_fast",
                 lease_id="lease-1",
                 allowed_file=["allowed.txt"],
@@ -2079,12 +2545,27 @@ class CodexInvocationTests(unittest.TestCase):
                 side_effect=guardian_precommit,
             ), mock.patch.object(
                 agent_runner, "public_receipt", return_value=public
+            ), mock.patch.object(
+                agent_runner,
+                "durable_write_private_bytes",
+                side_effect=record_durable_bytes,
+            ), mock.patch.object(
+                agent_runner,
+                "durable_write_private_json",
+                side_effect=record_durable_json,
+            ), mock.patch.object(
+                owner,
+                "mark_prompt_snapshot_released",
+                side_effect=record_release,
             ), redirect_stdout(io.StringIO()):
                 self.assertEqual(agent_runner.start_run(args), 0)
 
             state = owner.state()
             self.assertEqual(state["lease"]["state"], "process-bound-unactivated")
             self.assertTrue(state["lease"]["recovery_capable"])
+            request = agent_runner.read_json(run_dir / "request.json")
+            self.assertIsNone(request["prompt_source"])
+            self.assertEqual((run_dir / "prompt.md").read_bytes(), b"bounded task\n")
             secret = (run_dir / "guardian.key").read_bytes()
             boundary = agent_runner.read_guardian_message(
                 run_dir / "containment-bound.json",
@@ -2107,6 +2588,7 @@ class CodexInvocationTests(unittest.TestCase):
                 state["lease"]["provider_receipt"]["ipc_plan_id"],
                 request_plan["ipc_plan_id"],
             )
+            self.assertEqual(durable_sequence, ["prompt.md", "request.json"])
 
     def test_preboundary_provider_failure_uses_one_nonrecovery_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -2122,8 +2604,7 @@ class CodexInvocationTests(unittest.TestCase):
             allowed.write_text("seed\n", encoding="utf-8", newline="\n")
             subprocess.run(["git", "add", "allowed.txt"], cwd=repo, check=True)
             subprocess.run(["git", "commit", "--quiet", "-m", "baseline"], cwd=repo, check=True)
-            prompt = root / "prompt.md"
-            prompt.write_text("bounded task\n", encoding="utf-8", newline="\n")
+            prompt = self.private_prompt(root)
             run_dir = root / "run"
             owner = agent_runner.RecoveryRegistry(repo, state_root=root / "state")
             profile = self.profile()._replace(
@@ -2235,8 +2716,7 @@ class CodexInvocationTests(unittest.TestCase):
                 allowed.write_text("seed\n", encoding="utf-8", newline="\n")
                 subprocess.run(["git", "add", "allowed.txt"], cwd=repo, check=True)
                 subprocess.run(["git", "commit", "--quiet", "-m", "baseline"], cwd=repo, check=True)
-                prompt = root / "prompt.md"
-                prompt.write_text("bounded task\n", encoding="utf-8", newline="\n")
+                prompt = self.private_prompt(root)
                 run_dir = root / "run"
                 owner = agent_runner.RecoveryRegistry(repo, state_root=root / "state")
                 profile = self.profile()._replace(
@@ -2372,9 +2852,8 @@ class CodexInvocationTests(unittest.TestCase):
             allowed.write_text("seed\n", encoding="utf-8", newline="\n")
             subprocess.run(["git", "add", "allowed.txt"], cwd=repo, check=True)
             subprocess.run(["git", "commit", "--quiet", "-m", "baseline"], cwd=repo, check=True)
-            prompt = root / "prompt.md"
             prompt_bytes = b"bounded recovery task\n"
-            prompt.write_bytes(prompt_bytes)
+            prompt = self.private_prompt(root, prompt_bytes)
             run_dir = root / "target-run"
             owner = agent_runner.RecoveryRegistry(repo, state_root=root / "state")
             owner.initialize()
@@ -2388,10 +2867,13 @@ class CodexInvocationTests(unittest.TestCase):
                 specification_revision="R-029",
             )
             checkpoint = owner.revalidate_checkpoint(checkpoint)
+            prompt_binding = agent_runner.acquire_owner_prompt_snapshot(repo, prompt, owner)
             grant = owner.grant_authorization(
                 checkpoint,
                 user_action_digest="b" * 64,
                 specification_revision="R-029",
+                prompt_snapshot_id=prompt_binding["prompt_snapshot_id"],
+                prompt_sha256=prompt_binding["prompt_sha256"],
             )
             owner.consume_grant_and_reserve(
                 grant_id=grant["grant_id"],
@@ -2399,6 +2881,7 @@ class CodexInvocationTests(unittest.TestCase):
                 target_plan={
                     "lease_id": "target-lease",
                     "run_id": run_dir.name,
+                    "prompt_snapshot_id": prompt_binding["prompt_snapshot_id"],
                     "prompt_sha256": agent_runner.sha256_bytes(prompt_bytes),
                     "launch_token": "c" * 64,
                     "provider_plan_id": "provider-plan",
@@ -2532,8 +3015,7 @@ class CodexInvocationTests(unittest.TestCase):
             checkpoint = owner.revalidate_checkpoint(checkpoint)
             checkpoint_path = root / "checkpoint.json"
             agent_runner.atomic_write_json(checkpoint_path, checkpoint)
-            prompt = root / "prompt.md"
-            prompt.write_text("bounded recovery\n", encoding="utf-8", newline="\n")
+            prompt = self.private_prompt(root, b"bounded recovery\n")
             args = Namespace(
                 repo=str(repo),
                 checkpoint_file=str(checkpoint_path),
@@ -2564,7 +3046,27 @@ class CodexInvocationTests(unittest.TestCase):
             ), redirect_stdout(second_output):
                 self.assertEqual(agent_runner.authorize_recovery_run(args), 0)
             self.assertTrue(json.loads(second_output.getvalue())["reconstructed"])
-            self.assertEqual(len(owner.state()["consumed_grants"]), 1)
+            state = owner.state()
+            self.assertEqual(len(state["consumed_grants"]), 1)
+            plan = state["lease"]["plan"]
+            source = owner._read_source_locked(state["lease"]["source_state_id"])
+            authorization = source["authorization"]
+            consumed = state["consumed_grants"][0]
+            for field in ("prompt_snapshot_id", "prompt_sha256"):
+                self.assertEqual(authorization[field], plan[field])
+                self.assertEqual(consumed[field], plan[field])
+
+            prior_digest = state["digest"]
+            prompt.write_text("different prompt\n", encoding="utf-8", newline="\n")
+            with mock.patch.object(
+                agent_runner,
+                "recovery_registry_for_agent",
+                return_value=owner,
+            ), self.assertRaisesRegex(
+                agent_runner.RunnerError, "prompt replay binding drifted"
+            ):
+                agent_runner.authorize_recovery_run(args)
+            self.assertEqual(owner.state()["digest"], prior_digest)
 
     def test_recovery_target_terminal_success_verifies_parent_and_releases(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -2581,6 +3083,10 @@ class CodexInvocationTests(unittest.TestCase):
             subprocess.run(["git", "commit", "--quiet", "-m", "baseline"], cwd=repo, check=True)
             owner = agent_runner.RecoveryRegistry(repo, state_root=root / "state")
             owner.initialize()
+            prompt_bytes = b"terminal recovery prompt\n"
+            prompt_binding = agent_runner.stage_owner_prompt_snapshot(
+                owner, prompt_bytes
+            )
             parent = owner.capture_checkpoint(
                 source_id="source-1",
                 source_lease_id="source-lease",
@@ -2595,6 +3101,8 @@ class CodexInvocationTests(unittest.TestCase):
                 parent,
                 user_action_digest="b" * 64,
                 specification_revision="R-029",
+                prompt_snapshot_id=prompt_binding["prompt_snapshot_id"],
+                prompt_sha256=prompt_binding["prompt_sha256"],
             )
             owner.consume_grant_and_reserve(
                 grant_id=grant["grant_id"],
@@ -2602,7 +3110,8 @@ class CodexInvocationTests(unittest.TestCase):
                 target_plan={
                     "lease_id": "target-lease",
                     "run_id": "run",
-                    "prompt_sha256": "c" * 64,
+                    "prompt_snapshot_id": prompt_binding["prompt_snapshot_id"],
+                    "prompt_sha256": prompt_binding["prompt_sha256"],
                     "launch_token": "d" * 64,
                     "provider_plan_id": "provider-plan",
                     "ipc_plan_id": "ipc-plan",
@@ -2687,6 +3196,21 @@ class CodexInvocationTests(unittest.TestCase):
             self.assertIsNone(owner.state()["lease"])
             self.assertTrue((run_dir / "recovery-parent-verification.json").is_file())
             self.assertTrue((run_dir / "implementation-handoffs.jsonl").is_file())
+            source = owner.read_private_source(parent["source_state_id"])
+            self.assertIsNone(source["authorization"])
+            self.assertTrue(
+                any(
+                    event.get("event") == "authorization-retired"
+                    and event.get("grant_id") == grant["grant_id"]
+                    for event in owner.state()["history"]
+                )
+            )
+            self.assertFalse(
+                (
+                    agent_runner._prompt_snapshot_paths(owner)[1]
+                    / f"{prompt_binding['prompt_snapshot_id']}.blob"
+                ).exists()
+            )
 
     def test_prompt_is_not_sent_before_explicit_activation(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -2716,6 +3240,357 @@ class CodexInvocationTests(unittest.TestCase):
 
         self.assertEqual(value, "bounded prompt\n")
         path.read_bytes.assert_called_once_with()
+
+    def test_ac01_ac02_ac19_ac21_ac22_external_prompt_is_stably_imported_before_owner_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            repo.mkdir()
+            inside = repo / "prompt.md"
+            inside.write_text("inside\n", encoding="utf-8", newline="\n")
+            inside.chmod(0o600)
+            broad_directory = root / "broad-owner"
+            agent_runner.ensure_private_run_dir(broad_directory)
+            broad = broad_directory / "prompt.md"
+            broad.write_bytes(b"broad prompt\n")
+            if os.name != "nt":
+                broad.chmod(0o644)
+            external = self.private_prompt(root, b"private prompt\n")
+            owner = agent_runner.RecoveryRegistry(repo, state_root=root / "state")
+
+            with self.assertRaisesRegex(agent_runner.RunnerError, "prompt-inside-workspace"):
+                agent_runner.acquire_owner_prompt_snapshot(repo, inside, owner)
+            with self.assertRaisesRegex(
+                agent_runner.RunnerError,
+                "prompt-owner-untrusted|prompt-permissions-too-broad",
+            ):
+                agent_runner.acquire_owner_prompt_snapshot(repo, broad, owner)
+            self.assertFalse(owner.path.exists())
+
+            snapshot = agent_runner.acquire_owner_prompt_snapshot(repo, external, owner)
+            external.write_text("swapped\n", encoding="utf-8", newline="\n")
+            loaded = agent_runner.read_owner_prompt_snapshot(
+                owner, snapshot["prompt_snapshot_id"], snapshot["prompt_sha256"]
+            )
+
+            self.assertEqual(loaded, "private prompt\n")
+            self.assertRegex(snapshot["prompt_snapshot_id"], r"^[0-9a-f]{64}$")
+            self.assertNotIn(str(external), json.dumps(snapshot, sort_keys=True))
+            self.assertEqual(
+                agent_runner.collect_owner_prompt_snapshot_references(owner)["orphan-unreferenced"],
+                {snapshot["prompt_snapshot_id"]},
+            )
+
+    def test_ac20_ac22_staged_prompt_is_cross_bound_retired_and_collected_without_run_artifact_loss(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "tests@example.invalid"],
+                cwd=repo,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "Tests"], cwd=repo, check=True
+            )
+            (repo / "allowed.txt").write_text(
+                "seed\n", encoding="utf-8", newline="\n"
+            )
+            subprocess.run(["git", "add", "allowed.txt"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "--quiet", "-m", "baseline"],
+                cwd=repo,
+                check=True,
+            )
+            owner = agent_runner.RecoveryRegistry(repo, state_root=root / "state")
+            owner.initialize()
+            prompt_bytes = b"staged recovery prompt\n"
+            binding = agent_runner.stage_owner_prompt_snapshot(owner, prompt_bytes)
+            self.assertEqual(
+                agent_runner.stage_owner_prompt_snapshot(owner, prompt_bytes), binding
+            )
+            released = owner.mark_prompt_snapshot_released(
+                binding["prompt_snapshot_id"], binding["prompt_sha256"]
+            )
+            self.assertEqual(
+                owner.mark_prompt_snapshot_released(
+                    binding["prompt_snapshot_id"], binding["prompt_sha256"]
+                )["digest"],
+                released["digest"],
+            )
+            self.assertIn(
+                binding["prompt_snapshot_id"],
+                agent_runner.collect_owner_prompt_snapshot_references(owner)["released"],
+            )
+            checkpoint = owner.capture_checkpoint(
+                source_id="source-1",
+                source_lease_id="source-lease",
+                source_receipt_digest="a" * 64,
+                source_milestone="source",
+                target_milestone="target",
+                allowed_paths=["allowed.txt"],
+                specification_revision="R-029",
+            )
+            checkpoint = owner.revalidate_checkpoint(checkpoint)
+            grant = owner.grant_authorization(
+                checkpoint,
+                user_action_digest="b" * 64,
+                specification_revision="R-029",
+                prompt_snapshot_id=binding["prompt_snapshot_id"],
+                prompt_sha256=binding["prompt_sha256"],
+            )
+            grant_references = agent_runner.collect_owner_prompt_snapshot_references(owner)
+            self.assertIn(
+                binding["prompt_snapshot_id"], grant_references["grant-referenced"]
+            )
+            self.assertNotIn(binding["prompt_snapshot_id"], grant_references["released"])
+            self.assertEqual(agent_runner.garbage_collect_owner_prompt_snapshots(owner), set())
+            self.assertEqual(
+                agent_runner.read_owner_prompt_snapshot(
+                    owner, binding["prompt_snapshot_id"], binding["prompt_sha256"]
+                ),
+                prompt_bytes.decode("utf-8"),
+            )
+            owner.consume_grant_and_reserve(
+                grant_id=grant["grant_id"],
+                checkpoint=checkpoint,
+                target_plan={
+                    "lease_id": "target-lease",
+                    "run_id": "target-run",
+                    "prompt_snapshot_id": binding["prompt_snapshot_id"],
+                    "prompt_sha256": binding["prompt_sha256"],
+                    "launch_token": "c" * 64,
+                    "provider_plan_id": "provider-plan",
+                    "ipc_plan_id": "ipc-plan",
+                    "allowed_set_digest": checkpoint["allowed_set_digest"],
+                },
+            )
+            self.assertIn(
+                binding["prompt_snapshot_id"],
+                agent_runner.collect_owner_prompt_snapshot_references(owner)[
+                    "lease-referenced"
+                ],
+            )
+            self.assertEqual(agent_runner.garbage_collect_owner_prompt_snapshots(owner), set())
+
+            run_dir = root / "target-run"
+            agent_runner.ensure_private_run_dir(run_dir)
+            run_prompt = run_dir / "prompt.md"
+            agent_runner.atomic_write_bytes(run_prompt, prompt_bytes)
+            owner.claim_launch("target-lease", "c" * 64)
+            owner.fail_recovery_target_before_boundary(
+                "target-lease",
+                "fixture-stop",
+                {"tree_empty": True, "no_user_code": True},
+            )
+            retired = owner.retire_authorization(
+                source_state_id=checkpoint["source_state_id"],
+                grant_id=grant["grant_id"],
+            )
+            self.assertEqual(retired["history"][-1]["event"], "authorization-retired")
+            self.assertEqual(
+                owner.retire_authorization(
+                    source_state_id=checkpoint["source_state_id"],
+                    grant_id=grant["grant_id"],
+                )["digest"],
+                retired["digest"],
+            )
+            self.assertEqual(
+                agent_runner.garbage_collect_owner_prompt_snapshots(owner),
+                {binding["prompt_snapshot_id"]},
+            )
+            self.assertEqual(run_prompt.read_bytes(), prompt_bytes)
+
+    def test_ac14_ac22_prompt_gc_fails_closed_on_invalid_private_source(self) -> None:
+        mutations = {
+            "unknown-field": lambda value: value.__setitem__("unknown_private", True),
+            "malformed-authorization": lambda value: value.__setitem__(
+                "authorization", {"prompt_snapshot_id": "a" * 64}
+            ),
+            "digest-drift": lambda value: value.__setitem__("digest", "0" * 64),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                repo = root / "repo"
+                repo.mkdir()
+                subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+                subprocess.run(
+                    ["git", "config", "user.email", "tests@example.invalid"],
+                    cwd=repo,
+                    check=True,
+                )
+                subprocess.run(
+                    ["git", "config", "user.name", "Tests"], cwd=repo, check=True
+                )
+                (repo / "allowed.txt").write_text(
+                    "seed\n", encoding="utf-8", newline="\n"
+                )
+                subprocess.run(["git", "add", "allowed.txt"], cwd=repo, check=True)
+                subprocess.run(
+                    ["git", "commit", "--quiet", "-m", "baseline"],
+                    cwd=repo,
+                    check=True,
+                )
+                owner = agent_runner.RecoveryRegistry(repo, state_root=root / "state")
+                owner.initialize()
+                binding = agent_runner.stage_owner_prompt_snapshot(
+                    owner, b"private source GC prompt\n"
+                )
+                checkpoint = owner.capture_checkpoint(
+                    source_id=f"source-{label}",
+                    source_lease_id="source-lease",
+                    source_receipt_digest="a" * 64,
+                    source_milestone="source",
+                    target_milestone="target",
+                    allowed_paths=["allowed.txt"],
+                    specification_revision="R-005",
+                )
+                checkpoint = owner.revalidate_checkpoint(checkpoint)
+                owner.grant_authorization(
+                    checkpoint,
+                    user_action_digest="b" * 64,
+                    specification_revision="R-005",
+                    prompt_snapshot_id=binding["prompt_snapshot_id"],
+                    prompt_sha256=binding["prompt_sha256"],
+                )
+                source_path = owner.source_path(checkpoint["source_state_id"])
+                source = agent_runner.read_json(source_path)
+                mutate(source)
+                if label != "digest-drift":
+                    canonical = dict(source)
+                    canonical.pop("digest", None)
+                    source["digest"] = agent_runner.sha256_bytes(
+                        agent_runner._canonical_json_bytes(canonical)
+                    )
+                agent_runner.atomic_write_json(source_path, source)
+                blob = (
+                    agent_runner._prompt_snapshot_paths(owner)[1]
+                    / f"{binding['prompt_snapshot_id']}.blob"
+                )
+                with self.assertRaisesRegex(
+                    agent_runner.RunnerError, "reference state is unreadable"
+                ):
+                    agent_runner.garbage_collect_owner_prompt_snapshots(owner)
+                self.assertTrue(blob.is_file())
+
+    def test_ac20_blob_grant_and_reservation_faults_preserve_one_prompt_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "tests@example.invalid"],
+                cwd=repo,
+                check=True,
+            )
+            subprocess.run(["git", "config", "user.name", "Tests"], cwd=repo, check=True)
+            (repo / "allowed.txt").write_text("seed\n", encoding="utf-8", newline="\n")
+            subprocess.run(["git", "add", "allowed.txt"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "--quiet", "-m", "baseline"], cwd=repo, check=True)
+            state_root = root / "state"
+            owner = agent_runner.RecoveryRegistry(repo, state_root=state_root)
+            owner.initialize()
+            agent_runner._prompt_snapshot_key(owner)
+            prompt_bytes = b"fault-bound prompt\n"
+            for fault_stage in (
+                "before-write",
+                "after-file-fsync",
+                "after-replace",
+                "before-metadata-barrier",
+                "after-metadata-barrier",
+            ):
+                faulting_owner = agent_runner.RecoveryRegistry(
+                    repo, state_root=state_root, fault=fault_stage
+                )
+                with self.subTest(fault_stage=fault_stage), self.assertRaisesRegex(
+                    agent_runner.RunnerError, "durable prompt snapshot"
+                ):
+                    agent_runner.stage_owner_prompt_snapshot(
+                        faulting_owner, prompt_bytes
+                    )
+                binding = agent_runner.stage_owner_prompt_snapshot(owner, prompt_bytes)
+                self.assertEqual(
+                    agent_runner.read_owner_prompt_snapshot(
+                        owner,
+                        binding["prompt_snapshot_id"],
+                        binding["prompt_sha256"],
+                    ),
+                    prompt_bytes.decode("utf-8"),
+                )
+            binding = agent_runner.stage_owner_prompt_snapshot(owner, prompt_bytes)
+
+            checkpoint = owner.capture_checkpoint(
+                source_id="fault-source",
+                source_lease_id="source-lease",
+                source_receipt_digest="a" * 64,
+                source_milestone="source",
+                target_milestone="target",
+                allowed_paths=["allowed.txt"],
+                specification_revision="R-005",
+            )
+            checkpoint = owner.revalidate_checkpoint(checkpoint)
+            faulting_grant_owner = agent_runner.RecoveryRegistry(
+                repo, state_root=state_root, fault="after-replace"
+            )
+            with self.assertRaises(agent_runner.RecoveryStateError):
+                faulting_grant_owner.grant_authorization(
+                    checkpoint,
+                    user_action_digest="b" * 64,
+                    specification_revision="R-005",
+                    prompt_snapshot_id=binding["prompt_snapshot_id"],
+                    prompt_sha256=binding["prompt_sha256"],
+                )
+            owner = agent_runner.RecoveryRegistry(repo, state_root=state_root)
+            grant = owner.grant_authorization(
+                checkpoint,
+                user_action_digest="b" * 64,
+                specification_revision="R-005",
+                prompt_snapshot_id=binding["prompt_snapshot_id"],
+                prompt_sha256=binding["prompt_sha256"],
+            )
+            private_grant = owner.read_private_source(checkpoint["source_state_id"])[
+                "authorization"
+            ]
+            self.assertEqual(
+                private_grant["prompt_snapshot_id"], binding["prompt_snapshot_id"]
+            )
+            self.assertEqual(private_grant["prompt_sha256"], binding["prompt_sha256"])
+
+            plan = {
+                "lease_id": "target-lease",
+                "run_id": "target-run",
+                "prompt_snapshot_id": binding["prompt_snapshot_id"],
+                "prompt_sha256": binding["prompt_sha256"],
+                "launch_token": "c" * 64,
+                "provider_plan_id": "provider-plan",
+                "ipc_plan_id": "ipc-plan",
+                "allowed_set_digest": checkpoint["allowed_set_digest"],
+            }
+            faulting_reservation_owner = agent_runner.RecoveryRegistry(
+                repo, state_root=state_root, fault="after-replace"
+            )
+            with self.assertRaises(agent_runner.RecoveryStateError):
+                faulting_reservation_owner.consume_grant_and_reserve(
+                    grant_id=grant["grant_id"],
+                    checkpoint=checkpoint,
+                    target_plan=plan,
+                )
+            reserved = agent_runner.RecoveryRegistry(repo, state_root=state_root).state()
+            self.assertEqual(reserved["lease"]["plan"], plan)
+            self.assertEqual(
+                reserved["consumed_grants"][-1]["prompt_snapshot_id"],
+                binding["prompt_snapshot_id"],
+            )
+            self.assertEqual(
+                agent_runner.garbage_collect_owner_prompt_snapshots(
+                    agent_runner.RecoveryRegistry(repo, state_root=state_root)
+                ),
+                set(),
+            )
 
     def test_api_credentials_are_removed_for_subscription_auth(self) -> None:
         env = agent_runner.scrub_api_credentials(
@@ -2855,6 +3730,23 @@ class CodexInvocationTests(unittest.TestCase):
         start.assert_called_once_with(args)
         self.assertEqual(activate.call_args.args[0].run_dir, str(run_dir.resolve()))
 
+    def test_generated_run_handle_resolves_only_inside_private_run_root(self) -> None:
+        handle = "20260717T120000Z-0123456789"
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(
+            agent_runner,
+            "default_run_root",
+            return_value=Path(temp),
+        ):
+            self.assertEqual(
+                agent_runner.resolve_run_reference(handle),
+                (Path(temp) / handle).resolve(),
+            )
+            explicit = Path(temp) / "caller-owned-run"
+            self.assertEqual(
+                agent_runner.resolve_run_reference(str(explicit)),
+                explicit.resolve(),
+            )
+
     def test_activation_window_is_an_immutable_nine_hundred_second_budget(self) -> None:
         window = agent_runner.activation_window(
             datetime(2026, 7, 16, 12, 0, 0, 123456, tzinfo=timezone.utc)
@@ -2884,6 +3776,28 @@ class CodexInvocationTests(unittest.TestCase):
             agent_runner.dispatch_run,
         )
         self.assertIs(parser.parse_args(["start", "--agent", "openbuild_review_fast", "--task-name", "fixture", "--repo", ".", "--prompt-file", "prompt.md"]).handler, agent_runner.start_run)
+        self.assertIs(
+            parser.parse_args(
+                [
+                    "dispatch",
+                    "--agent",
+                    "openbuild_review_fast",
+                    "--task-name",
+                    "staged-fixture",
+                    "--repo",
+                    ".",
+                    "--prompt-snapshot-id",
+                    "a" * 64,
+                    "--prompt-sha256",
+                    "b" * 64,
+                ]
+            ).handler,
+            agent_runner.dispatch_run,
+        )
+        self.assertIs(
+            parser.parse_args(["stage-prompt", "--repo", "."]).handler,
+            agent_runner.stage_prompt_run,
+        )
         self.assertIs(
             parser.parse_args(["activate", "--run-dir", "."]).handler,
             agent_runner.activate_run,
@@ -3160,6 +4074,142 @@ class RunEvidenceTests(unittest.TestCase):
             self.assertEqual(receipt["status"], "running")
             self.assertIsNone(receipt["failure_message"])
 
+    def test_public_receipt_redacts_private_run_profile_and_artifact_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp) / "20260717T120000Z-0123456789"
+            run_dir.mkdir()
+            profile_source = run_dir / "private-profile.toml"
+            agent_runner.atomic_write_json(
+                run_dir / "request.json",
+                {
+                    "task_name": "privacy_boundary",
+                    "profile_source": str(profile_source),
+                    "auth_mode": "chatgpt",
+                    "prompt_sha256": "a" * 64,
+                    "profile": {
+                        "name": "openbuild_review_strong",
+                        "model": "selected-model",
+                        "reasoning_effort": "high",
+                        "sandbox": "read-only",
+                    },
+                },
+            )
+
+            with mock.patch.object(
+                agent_runner,
+                "default_run_root",
+                return_value=run_dir.parent,
+            ):
+                receipt = agent_runner.public_receipt(run_dir)
+
+            rendered = json.dumps(receipt)
+            self.assertEqual(receipt["run_handle"], run_dir.name)
+            self.assertEqual(receipt["prompt_source_classification"], "owner-private-snapshot")
+            self.assertEqual(receipt["prompt_sha256"], "a" * 64)
+            self.assertNotIn("run_dir", receipt)
+            self.assertNotIn("profile_source", receipt)
+            self.assertNotIn("artifacts", receipt)
+            self.assertNotIn(str(run_dir), rendered)
+            self.assertNotIn(str(profile_source), rendered)
+            self.assertNotIn("events.jsonl", rendered)
+
+    def test_public_failure_message_is_a_closed_classification_for_every_private_source(self) -> None:
+        sensitive = f"{ROOT} private-snapshot-{'a' * 64} raw prompt fragment"
+        cases = [
+            (
+                "agent-terminal-failure",
+                {"failure_message": sensitive, "event_error": None, "completed": False},
+                None,
+                {},
+                "failed",
+                "missing",
+            ),
+            (
+                "event-stream-invalid",
+                {"failure_message": None, "event_error": sensitive, "completed": False},
+                None,
+                {},
+                "failed",
+                "missing",
+            ),
+            (
+                "result-evidence-invalid",
+                {"failure_message": None, "event_error": None, "completed": True},
+                sensitive,
+                {},
+                "failed",
+                "valid",
+            ),
+            (
+                "runner-failure",
+                {"failure_message": None, "event_error": None, "completed": False},
+                None,
+                {"failure_message": sensitive},
+                "failed",
+                "missing",
+            ),
+            (
+                "codex-exit-evidence-invalid",
+                {"failure_message": None, "event_error": None, "completed": True},
+                None,
+                {},
+                "failed",
+                "identity-mismatch",
+            ),
+            (
+                "terminal-record-missing",
+                {"failure_message": None, "event_error": None, "completed": False},
+                None,
+                {},
+                "failed",
+                "missing",
+            ),
+        ]
+        for expected, evidence, result_error, exit_record, status, exit_status in cases:
+            with self.subTest(expected=expected):
+                value = agent_runner.classify_public_failure(
+                    evidence=evidence,
+                    result_error=result_error,
+                    exit_record=exit_record,
+                    status=status,
+                    codex_exit_status=exit_status,
+                )
+                self.assertEqual(value, expected)
+                self.assertNotIn(sensitive, json.dumps(value))
+
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            agent_runner.atomic_write_json(
+                run_dir / "request.json",
+                {
+                    "task_name": "failure-privacy",
+                    "profile_source": sensitive,
+                    "auth_mode": "chatgpt",
+                    "prompt_sha256": "a" * 64,
+                    "profile": {
+                        "name": "openbuild_review_strong",
+                        "model": "selected-model",
+                        "reasoning_effort": "high",
+                        "sandbox": "read-only",
+                    },
+                },
+            )
+            self.write_events(
+                run_dir / "events.jsonl",
+                {"type": "turn.failed", "error": {"message": sensitive}},
+            )
+            agent_runner.atomic_write_json(
+                run_dir / "exit.json",
+                {
+                    "success": False,
+                    "failure_message": sensitive,
+                    "startup_process_stopped": True,
+                },
+            )
+            receipt = agent_runner.public_receipt(run_dir)
+            self.assertEqual(receipt["failure_message"], "agent-terminal-failure")
+            self.assertNotIn(sensitive, json.dumps(receipt))
+
     def test_current_identity_checks_recover_from_a_historical_startup_cleanup_error(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             run_dir = Path(temp)
@@ -3237,7 +4287,7 @@ class RunEvidenceTests(unittest.TestCase):
                 receipt = agent_runner.public_receipt(run_dir)
 
             self.assertEqual(receipt["status"], "failed")
-            self.assertEqual(receipt["failure_message"], "missing final result artifact")
+            self.assertEqual(receipt["failure_message"], "result-evidence-invalid")
 
     def test_completed_receipt_requires_creation_bound_zero_exit_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -52,7 +52,7 @@ class RecoveryControlPlanePackageTests(unittest.TestCase):
         self.assertEqual(validate_recovery_control_plane(self.runner, self.recovery), [])
 
         mutations = [
-            ("recovery", 'READER_FLOOR = "2.2.0"', 'READER_FLOOR = "1"', "reader floor"),
+            ("recovery", 'READER_FLOOR = "2.2.2"', 'READER_FLOOR = "1"', "reader floor"),
             ("recovery", 'b"openbuild-workspace-v2\\0"', 'b"openbuild-workspace-v1\\0"', "workspace key"),
             ("recovery", '"--porcelain=v2"', '"--porcelain=v1"', "Git provenance"),
             ("recovery", '"ls-files", "--stage", "-v", "-z"', '"ls-files", "--stage", "-z"', "Git index flags"),
@@ -148,6 +148,124 @@ class RecoveryControlPlanePackageTests(unittest.TestCase):
             ("runner", "reconcile_implementation_registry", "reconcile_registry", "runner terminal lifecycle"),
             ("runner", '"--soft-timeout-exit-zero"', '"--strict-timeout-only"', "soft observation timeout"),
             ("runner", "return 0 if args.soft_timeout_exit_zero else 3", "return 3", "soft observation timeout"),
+            ("recovery", "terminal-abandonment-v1", "terminal-abandonment-v0", "terminal abandonment schema"),
+            ("recovery", "record_terminal_abandonment", "record_generic_abandonment", "terminal abandonment transition"),
+            ("recovery", "persist=False", "persist=True", "terminal abandonment no-mutation gate"),
+            ("recovery", "retire_authorization", "retain_authorization", "prompt authorization retirement"),
+            ("recovery", "mark_prompt_snapshot_released", "keep_prompt_snapshot", "prompt snapshot release"),
+            (
+                "recovery",
+                "expected_run_id = _lease_run_id(lease)",
+                'expected_run_id = lease.get("run_id")',
+                "shared lease run binding",
+            ),
+            (
+                "recovery",
+                '"terminal abandonment recovery authorization binding is incomplete"',
+                '"terminal abandonment authorization is trusted"',
+                "abandonment authorization retirement",
+            ),
+            ("runner", "acquire_owner_prompt_snapshot", "read_untrusted_prompt", "stable prompt import"),
+            ("runner", "stage_owner_prompt_snapshot", "stage_workspace_prompt", "owner-private prompt staging"),
+            ("runner", "windows_object_is_private", "trust_windows_object", "private Windows prompt DACL"),
+            ("runner", "prompt_owner.mark_prompt_snapshot_released", "prompt_owner.keep_prompt_snapshot", "normal prompt release"),
+            (
+                "runner",
+                "durable_write_private_bytes(prompt_snapshot, source_prompt)",
+                "atomic_write_bytes(prompt_snapshot, source_prompt)",
+                "durable prompt binding",
+            ),
+            (
+                "runner",
+                "garbage_collect_owner_prompt_snapshots(prompt_owner)",
+                "retain_owner_prompt_snapshots(prompt_owner)",
+                "prompt snapshot GC",
+            ),
+            (
+                "runner",
+                "registry._read_source_locked(path.stem, rebarrier=True)",
+                "json.loads(path.read_text(encoding=\"utf-8\"))",
+                "authoritative prompt GC scan",
+            ),
+            (
+                "recovery",
+                "recovery terminal release authorization binding",
+                "recovery terminal release authorization trusted",
+                "recovery terminal authorization retirement",
+            ),
+            (
+                "runner",
+                "_expected_lease_run_id(lease)",
+                "request.get(\"lease_id\")",
+                "terminal exact run binding",
+            ),
+            (
+                "runner",
+                "_terminal_binding(receipt, run_id=expected_run_id)",
+                "_terminal_binding(receipt)",
+                "terminal exact run receipt",
+            ),
+            (
+                "runner",
+                "def classify_recovery_outcome(",
+                "def describe_recovery_outcome(",
+                "closed recovery outcomes",
+            ),
+            (
+                "runner",
+                "def root_completion_authorization_record(",
+                "def root_completion_note(",
+                "root completion audit",
+            ),
+            (
+                "runner",
+                "def record_root_completion_authorization_run(",
+                "def print_root_completion_authorization_run(",
+                "durable root completion audit",
+            ),
+            (
+                "runner",
+                '"_record-root-completion"',
+                '"_describe-root-completion"',
+                "root completion audit command",
+            ),
+            (
+                "runner",
+                "states[\"released\"] -= states[\"grant-referenced\"] | states[\"lease-referenced\"]",
+                "states[\"grant-referenced\"] -= states[\"released\"]",
+                "active prompt reference precedence",
+            ),
+            (
+                "runner",
+                "def classify_public_failure(",
+                "def expose_private_failure(",
+                "public failure classification",
+            ),
+            (
+                "runner",
+                '"failure_message": classify_public_failure(',
+                '"failure_message": evidence["failure_message"]',
+                "public failure projection",
+            ),
+            (
+                "runner",
+                '"external-action",',
+                '"external",',
+                "external-action outcome class",
+            ),
+            (
+                "runner",
+                '"run_handle": public_run_handle(run_dir)',
+                '"run_dir": str(run_dir.resolve())',
+                "public receipt path redaction",
+            ),
+            (
+                "runner",
+                '"prompt_source_classification": "owner-private-snapshot"',
+                '"profile_source": request["profile_source"]',
+                "public receipt prompt classification",
+            ),
+            ("runner", "_reconcile-terminal-abandonment", "_force-unlock", "terminal abandonment command"),
         ]
         for field, token, replacement, expected in mutations:
             with self.subTest(expected=expected):
@@ -673,24 +791,55 @@ class ImplementationDelegationContractTests(unittest.TestCase):
             any("README.ru.md automatic orchestration" in error for error in self.validate(readme_ru=readme_ru))
         )
 
+    def test_recovery_autonomy_contract_cannot_regress_to_permission_prompts(self) -> None:
+        skill = self.skill_text.replace(
+            "_reconcile-terminal-abandonment --run-dir <path>",
+            "ask the user to authorize recovery",
+        )
+        self.assertTrue(
+            any("same-lifecycle abandonment" in error for error in self.validate(skill_text=skill))
+        )
 
+        protocol = self.protocol_text.replace(
+            "required_action=provide-decision",
+            "required_action=authorize-recovery",
+        )
+        self.assertTrue(
+            any("decision outcome" in error for error in self.validate(protocol_text=protocol))
+        )
+
+        routing = self.model_routing.replace(
+            "asks for permission that cannot change the evidence",
+            "asks for permission to continue",
+        )
+        self.assertTrue(
+            any("no-useless-permission" in error for error in self.validate(model_routing=routing))
+        )
+
+        tdd = self.tdd_workflow.replace(
+            "terminal-abandonment-v1",
+            "manual-recovery-v1",
+        )
+        self.assertTrue(
+            any("abandonment fixture" in error for error in self.validate(tdd_workflow=tdd))
+        )
 
 class ChangelogContractTests(unittest.TestCase):
     def test_release_manifest_version_and_latest_release_are_documented(self) -> None:
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-        self.assertEqual(validate_changelog_contract(changelog, "2.2.0"), [])
+        self.assertEqual(validate_changelog_contract(changelog, "2.2.2"), [])
         self.assertNotIn("## [2.1.1]", changelog)
 
-        mutated = changelog.replace("## [2.2.0]", "## [next]", 1)
-        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "2.2.0")))
+        mutated = changelog.replace("## [2.2.2]", "## [next]", 1)
+        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "2.2.2")))
 
     def test_released_version_is_pinned_in_both_install_channels(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         readme_ru = (ROOT / "README.ru.md").read_text(encoding="utf-8")
-        self.assertEqual(validate_release_docs_contract(readme, readme_ru, "2.2.1"), [])
+        self.assertEqual(validate_release_docs_contract(readme, readme_ru, "2.2.2"), [])
 
-        mutated = readme.replace("--ref v2.2.0", "--ref main")
-        self.assertTrue(any("README.md" in error for error in validate_release_docs_contract(mutated, readme_ru, "2.2.0")))
+        mutated = readme.replace("--ref v2.2.2", "--ref main")
+        self.assertTrue(any("README.md" in error for error in validate_release_docs_contract(mutated, readme_ru, "2.2.2")))
 
 
 class DecisionAuthorityTraceTests(unittest.TestCase):

@@ -224,7 +224,7 @@ class RegistryContractTests(unittest.TestCase):
             self.assertEqual(first.workspace_key, second.workspace_key)
             self.assertTrue(first.directory.is_relative_to(state_root))
             self.assertFalse(first.directory.is_relative_to(workspace))
-            self.assertEqual(state["reader_floor"], "2.2.0")
+            self.assertEqual(state["reader_floor"], "2.2.2")
             self.assertEqual(state["identity_version"], 2)
             self.assertEqual(state["workspace_key"], first.workspace_key)
             self.assertIn("git_common_dir_identity", state)
@@ -1510,6 +1510,88 @@ class RegistryContractTests(unittest.TestCase):
                 any(event["event"] == "semantic-handoff-rejected" for event in released["history"])
             )
 
+    def test_recovery_target_semantic_release_retires_consumed_prompt_authorization(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = self.make_git_workspace(root)
+            owner = self.owner(workspace, root / "state")
+            owner.initialize()
+            checkpoint = owner.revalidate_checkpoint(self.checkpoint(owner))
+            grant = owner.grant_authorization(
+                checkpoint,
+                user_action_digest="c" * 64,
+                specification_revision="R-029",
+                prompt_snapshot_id="1" * 64,
+                prompt_sha256="2" * 64,
+            )
+            owner.consume_grant_and_reserve(
+                grant_id=grant["grant_id"],
+                checkpoint=checkpoint,
+                target_plan={
+                    "lease_id": "target-lease",
+                    "run_id": "target-run",
+                    "prompt_snapshot_id": "1" * 64,
+                    "prompt_sha256": "2" * 64,
+                    "launch_token": "3" * 64,
+                    "provider_plan_id": "provider-plan-1",
+                    "ipc_plan_id": "ipc-plan-1",
+                    "allowed_set_digest": checkpoint["allowed_set_digest"],
+                },
+            )
+            owner.claim_launch("target-lease", "3" * 64)
+            owner.bind_process_unactivated(
+                "target-lease",
+                allowed_set_digest=checkpoint["allowed_set_digest"],
+                provider_receipt=self.provider_receipt(),
+                process_receipt=self.process_receipt(),
+            )
+            owner.commit_activation("target-lease", checkpoint["allowed_set_digest"])
+            owner.record_terminal_evidence(
+                "target-lease",
+                self.terminal_receipt(True),
+                checkpoint["allowed_set_digest"],
+            )
+            owner.prove_contained_tree_empty(
+                "target-lease",
+                self.zero_proof(),
+                checkpoint["allowed_set_digest"],
+            )
+            owner.reject_semantic_handoff(
+                "target-lease",
+                run_id="target-run",
+                disposition="blocked",
+                evidence_digest="4" * 64,
+                checkpoint_allowed=True,
+            )
+            owner.acknowledge_guardian_close("target-lease", self.guardian_close())
+            faulting_owner = self.owner(
+                workspace, root / "state", fault="after-replace"
+            )
+            with self.assertRaises(recovery_state.RecoveryStateError):
+                faulting_owner.release_contained_terminal("target-lease")
+            self.assertIsNone(
+                owner.read_private_source(checkpoint["source_state_id"])["authorization"]
+            )
+            self.assertIsNotNone(owner.state()["lease"])
+            recovered_owner = self.owner(workspace, root / "state")
+            released = recovered_owner.release_contained_terminal("target-lease")
+
+            self.assertIsNone(released["lease"])
+            self.assertIsNone(
+                recovered_owner.read_private_source(checkpoint["source_state_id"])["authorization"]
+            )
+            retirements = [
+                    event
+                    for event in released["history"]
+                    if event.get("event") == "authorization-retired"
+                    and event.get("grant_id") == grant["grant_id"]
+                ]
+            self.assertEqual(len(retirements), 1)
+            self.assertEqual(
+                retirements[0]["source_state_id"],
+                checkpoint["source_state_id"],
+            )
+
     def test_needs_escalation_invalidates_zero_write_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1833,6 +1915,406 @@ class RegistryContractTests(unittest.TestCase):
             owner.initialize()
             with self.assertRaisesRegex(recovery_state.RecoveryStateError, "alias"):
                 self.checkpoint(owner, allowed_paths=["Missing.txt", "missing.txt"])
+
+    def test_ac05_to_ac07_ac12_ac13_ac14_ac17_terminal_abandonment_is_exact_replay_safe_and_releases(self) -> None:
+        """Only an authenticated stopped lifecycle with exact outside drift may abandon."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = self.make_git_workspace(root)
+            owner = self.owner(workspace, root / "state")
+            preflight = self.reserve_source(owner, run_id="outside-drift-run")
+            owner.claim_contained_launch("normal-1", "contained-token")
+            owner.bind_process_unactivated(
+                "normal-1",
+                allowed_set_digest=preflight["allowed_set_digest"],
+                provider_receipt=self.provider_receipt(),
+                process_receipt=self.process_receipt(),
+            )
+            owner.commit_activation("normal-1", preflight["allowed_set_digest"])
+            checkpoint = owner.finalize_prepared_checkpoint(
+                preflight, source_receipt_digest="a" * 64
+            )
+            (workspace / "outside.txt").write_text(
+                "orchestrator artifact drift\n", encoding="utf-8", newline="\n"
+            )
+            self.assertEqual(
+                owner.revalidate_checkpoint(checkpoint)["reasons"], ["outside-set-drift"]
+            )
+            owner.record_terminal_evidence(
+                "normal-1", self.terminal_receipt(True), preflight["allowed_set_digest"]
+            )
+            owner.prove_contained_tree_empty(
+                "normal-1", self.zero_proof(), preflight["allowed_set_digest"]
+            )
+
+            pending = owner.record_terminal_abandonment("normal-1")
+            semantic = pending["lease"]["semantic_disposition"]
+            self.assertEqual(semantic["disposition"], "abandoned")
+            self.assertEqual(semantic["schema"], "terminal-abandonment-v1")
+            self.assertEqual(semantic["cause"], "outside-set-drift")
+            self.assertFalse(semantic["checkpoint_allowed"])
+            self.assertEqual(semantic["checkpoint_invalidation"], "pending")
+            self.assertNotIn("outside.txt", json.dumps(semantic, sort_keys=True))
+            self.assertNotIn("handoff_digest", pending["lease"])
+
+            pristine = json.loads(json.dumps(pending))
+
+            def abandonment_history(value):
+                return next(
+                    event
+                    for event in value["history"]
+                    if event["event"] == "terminal-abandonment-recorded"
+                )
+
+            def mutate_semantic_and_history(value, field, replacement):
+                value["lease"]["semantic_disposition"][field] = replacement
+                abandonment_history(value)[field] = replacement
+
+            mutations = {
+                "unknown disposition field": lambda value: value["lease"][
+                    "semantic_disposition"
+                ].__setitem__("force", True),
+                "unknown history field": lambda value: abandonment_history(value).__setitem__(
+                    "raw_path", "outside.txt"
+                ),
+                "wrong schema": lambda value: mutate_semantic_and_history(
+                    value, "schema", "terminal-abandonment-v0"
+                ),
+                "wrong cause": lambda value: mutate_semantic_and_history(
+                    value, "cause", "mixed-drift"
+                ),
+                "caller digest": lambda value: mutate_semantic_and_history(
+                    value, "evidence_digest", "9" * 64
+                ),
+            }
+            for name, mutate in mutations.items():
+                with self.subTest(name=name):
+                    malformed = json.loads(json.dumps(pristine))
+                    mutate(malformed)
+                    malformed["digest"] = recovery_state._digest(malformed)
+                    with self.assertRaises(recovery_state.RecoveryStateError):
+                        owner._validate_registry(malformed)
+
+            completed = owner.complete_terminal_abandonment("normal-1")
+            self.assertEqual(
+                completed["lease"]["semantic_disposition"]["checkpoint_invalidation"],
+                "completed",
+            )
+            owner.acknowledge_guardian_close("normal-1", self.guardian_close())
+            released = owner.release_contained_terminal("normal-1")
+            history = released["history"]
+            self.assertEqual(
+                len([event for event in history if event["event"] == "terminal-abandonment-recorded"]),
+                1,
+            )
+            self.assertEqual(history[-1]["semantic_disposition"], "abandoned")
+            self.assertFalse(history[-1]["terminal_success"])
+            self.assertIsNone(history[-1]["handoff_digest"])
+            self.assertIsNone(history[-1]["outbox_digest"])
+
+            replay = self.owner(workspace, root / "state").state()
+            self.assertEqual(replay["digest"], released["digest"])
+            self.assertEqual(replay["reader_floor"], "2.2.2")
+
+    def test_ac05_mixed_drift_rejects_terminal_abandonment_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = self.make_git_workspace(root)
+            owner = self.owner(workspace, root / "state")
+            preflight = self.reserve_source(owner, run_id="mixed-drift-run")
+            owner.claim_contained_launch("normal-1", "contained-token")
+            owner.bind_process_unactivated(
+                "normal-1",
+                allowed_set_digest=preflight["allowed_set_digest"],
+                provider_receipt=self.provider_receipt(),
+                process_receipt=self.process_receipt(),
+            )
+            owner.commit_activation("normal-1", preflight["allowed_set_digest"])
+            owner.finalize_prepared_checkpoint(preflight, source_receipt_digest="a" * 64)
+            (workspace / "outside.txt").write_text(
+                "outside and control-plane drift\n", encoding="utf-8", newline="\n"
+            )
+            run_git(workspace, "add", "outside.txt")
+            run_git(workspace, "commit", "--quiet", "-m", "mixed drift")
+            owner.record_terminal_evidence(
+                "normal-1", self.terminal_receipt(True), preflight["allowed_set_digest"]
+            )
+            owner.prove_contained_tree_empty(
+                "normal-1", self.zero_proof(), preflight["allowed_set_digest"]
+            )
+            source_path = owner.source_path(preflight["source_state_id"])
+            registry_before = owner.path.read_bytes()
+            source_before = source_path.read_bytes()
+
+            with self.assertRaisesRegex(
+                recovery_state.RecoveryStateError,
+                "exact outside-set-drift",
+            ):
+                owner.record_terminal_abandonment("normal-1")
+
+            self.assertEqual(owner.path.read_bytes(), registry_before)
+            self.assertEqual(source_path.read_bytes(), source_before)
+
+    def test_recovery_target_terminal_abandonment_uses_plan_run_id_and_replays_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = self.make_git_workspace(root)
+            owner = self.owner(workspace, root / "state")
+            owner.initialize()
+            checkpoint = owner.revalidate_checkpoint(self.checkpoint(owner))
+            grant = owner.grant_authorization(
+                checkpoint,
+                user_action_digest="b" * 64,
+                specification_revision="R-029",
+                prompt_snapshot_id="e" * 64,
+                prompt_sha256="f" * 64,
+            )
+            owner.consume_grant_and_reserve(
+                grant_id=grant["grant_id"],
+                checkpoint=checkpoint,
+                target_plan={
+                    "lease_id": "target-lease",
+                    "run_id": "target-run",
+                    "prompt_snapshot_id": "e" * 64,
+                    "prompt_sha256": "f" * 64,
+                    "launch_token": "d" * 64,
+                    "provider_plan_id": "provider-plan-1",
+                    "ipc_plan_id": "ipc-plan-1",
+                    "allowed_set_digest": checkpoint["allowed_set_digest"],
+                },
+            )
+            owner.claim_launch("target-lease", "d" * 64)
+            owner.bind_process_unactivated(
+                "target-lease",
+                allowed_set_digest=checkpoint["allowed_set_digest"],
+                provider_receipt=self.provider_receipt(),
+                process_receipt=self.process_receipt(),
+            )
+            owner.commit_activation("target-lease", checkpoint["allowed_set_digest"])
+            (workspace / "orchestrator-artifact.txt").write_text(
+                "outside drift\n", encoding="utf-8", newline="\n"
+            )
+            owner.record_terminal_evidence(
+                "target-lease",
+                self.terminal_receipt(True),
+                checkpoint["allowed_set_digest"],
+            )
+            owner.prove_contained_tree_empty(
+                "target-lease", self.zero_proof(), checkpoint["allowed_set_digest"]
+            )
+
+            pending = owner.record_terminal_abandonment("target-lease")
+            self.assertEqual(
+                pending["lease"]["semantic_disposition"]["run_id"], "target-run"
+            )
+            self.assertEqual(
+                owner.record_terminal_abandonment("target-lease")["digest"],
+                pending["digest"],
+            )
+            faulted_owner = self.owner(workspace, root / "state", fault="after-replace")
+            with self.assertRaises(recovery_state.RecoveryStateError):
+                faulted_owner.complete_terminal_abandonment("target-lease")
+            recovered_owner = self.owner(workspace, root / "state")
+            recovered_owner.complete_terminal_abandonment("target-lease")
+            recovered_owner.acknowledge_guardian_close(
+                "target-lease", self.guardian_close()
+            )
+            released = recovered_owner.release_contained_terminal("target-lease")
+            replay = self.owner(workspace, root / "state").state()
+            self.assertEqual(replay["digest"], released["digest"])
+            self.assertEqual(
+                len(
+                    [
+                        event
+                        for event in replay["history"]
+                        if event["event"] == "terminal-abandonment-recorded"
+                    ]
+                ),
+                1,
+            )
+
+    def test_ac13_terminal_abandonment_recovers_each_durable_phase_boundary(self) -> None:
+        def stopped_lifecycle(root: Path):
+            workspace = self.make_git_workspace(root)
+            state_root = root / "state"
+            owner = self.owner(workspace, state_root)
+            preflight = self.reserve_source(owner, run_id="faulted-abandonment-run")
+            owner.claim_contained_launch("normal-1", "contained-token")
+            owner.bind_process_unactivated(
+                "normal-1",
+                allowed_set_digest=preflight["allowed_set_digest"],
+                provider_receipt=self.provider_receipt(),
+                process_receipt=self.process_receipt(),
+            )
+            owner.commit_activation("normal-1", preflight["allowed_set_digest"])
+            owner.finalize_prepared_checkpoint(preflight, source_receipt_digest="a" * 64)
+            (workspace / "outside.txt").write_text(
+                "outside drift\n", encoding="utf-8", newline="\n"
+            )
+            owner.record_terminal_evidence(
+                "normal-1", self.terminal_receipt(True), preflight["allowed_set_digest"]
+            )
+            owner.prove_contained_tree_empty(
+                "normal-1", self.zero_proof(), preflight["allowed_set_digest"]
+            )
+            return workspace, state_root, owner, preflight
+
+        def finish(owner):
+            owner.record_terminal_abandonment("normal-1")
+            owner.complete_terminal_abandonment("normal-1")
+            owner.acknowledge_guardian_close("normal-1", self.guardian_close())
+            released = owner.release_contained_terminal("normal-1")
+            self.assertEqual(
+                len(
+                    [
+                        event
+                        for event in released["history"]
+                        if event["event"] == "terminal-abandonment-recorded"
+                    ]
+                ),
+                1,
+            )
+            self.assertEqual(
+                len(
+                    [
+                        event
+                        for event in released["history"]
+                        if event["event"] == "terminal-abandonment-completed"
+                    ]
+                ),
+                1,
+            )
+
+        for fault in ("before-write", "after-replace"):
+            with self.subTest(phase="pending", fault=fault), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                workspace, state_root, owner, preflight = stopped_lifecycle(root)
+                registry_before = owner.path.read_bytes()
+                source_path = owner.source_path(preflight["source_state_id"])
+                source_before = source_path.read_bytes()
+                faulting = self.owner(workspace, state_root, fault=fault)
+
+                with self.assertRaises(recovery_state.RecoveryStateError):
+                    faulting.record_terminal_abandonment("normal-1")
+
+                self.assertEqual(source_path.read_bytes(), source_before)
+                if fault == "before-write":
+                    self.assertEqual(owner.path.read_bytes(), registry_before)
+                else:
+                    self.assertEqual(
+                        self.owner(workspace, state_root)
+                        .state()["lease"]["semantic_disposition"]["checkpoint_invalidation"],
+                        "pending",
+                    )
+                finish(self.owner(workspace, state_root))
+
+        for fault in ("before-write", "after-replace"):
+            with self.subTest(phase="source-invalidation", fault=fault), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                workspace, state_root, owner, preflight = stopped_lifecycle(root)
+                pending = owner.record_terminal_abandonment("normal-1")
+                source_path = owner.source_path(preflight["source_state_id"])
+                source_before = source_path.read_bytes()
+                faulting = self.owner(workspace, state_root, fault=fault)
+
+                with self.assertRaises(recovery_state.RecoveryStateError):
+                    faulting.complete_terminal_abandonment("normal-1")
+
+                self.assertEqual(
+                    self.owner(workspace, state_root)
+                    .state()["lease"]["semantic_disposition"]["checkpoint_invalidation"],
+                    "pending",
+                )
+                if fault == "before-write":
+                    self.assertEqual(source_path.read_bytes(), source_before)
+                else:
+                    invalidated = self.owner(workspace, state_root).read_private_source(
+                        preflight["source_state_id"]
+                    )
+                    self.assertEqual(
+                        invalidated["public_checkpoint"]["reasons"],
+                        ["terminal-abandoned-outside-set-drift"],
+                    )
+                self.assertEqual(
+                    pending["lease"]["semantic_disposition"]["checkpoint_invalidation"],
+                    "pending",
+                )
+                finish(self.owner(workspace, state_root))
+
+    def test_ac14_ac17_legacy_reader_floor_loads_without_rewrite_until_abandonment_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = self.make_git_workspace(root)
+            owner = self.owner(workspace, root / "state")
+            preflight = self.reserve_source(owner, run_id="legacy-stopped-run")
+            owner.claim_contained_launch("normal-1", "contained-token")
+            owner.bind_process_unactivated(
+                "normal-1",
+                allowed_set_digest=preflight["allowed_set_digest"],
+                provider_receipt=self.provider_receipt(),
+                process_receipt=self.process_receipt(),
+            )
+            owner.commit_activation("normal-1", preflight["allowed_set_digest"])
+            checkpoint = owner.finalize_prepared_checkpoint(
+                preflight, source_receipt_digest="a" * 64
+            )
+            (workspace / "legacy-orchestrator-artifact.txt").write_text(
+                "outside drift\n", encoding="utf-8", newline="\n"
+            )
+            self.assertEqual(
+                owner.revalidate_checkpoint(checkpoint)["reasons"], ["outside-set-drift"]
+            )
+            owner.record_terminal_evidence(
+                "normal-1", self.terminal_receipt(True), preflight["allowed_set_digest"]
+            )
+            current = owner.prove_contained_tree_empty(
+                "normal-1", self.zero_proof(), preflight["allowed_set_digest"]
+            )
+            legacy = dict(current)
+            legacy["reader_floor"] = "2.2.1"
+            legacy["digest"] = recovery_state._digest(legacy)
+            owner.path.write_text(
+                json.dumps(legacy, sort_keys=True) + "\n", encoding="utf-8", newline="\n"
+            )
+            legacy_bytes = owner.path.read_bytes()
+
+            upgraded_owner = self.owner(workspace, root / "state")
+            loaded = upgraded_owner.state()
+
+            self.assertEqual(loaded["reader_floor"], "2.2.1")
+            self.assertEqual(loaded["generation"], legacy["generation"])
+            self.assertEqual(owner.path.read_bytes(), legacy_bytes)
+
+            pending = upgraded_owner.record_terminal_abandonment("normal-1")
+            self.assertEqual(pending["reader_floor"], "2.2.2")
+            upgraded_owner.complete_terminal_abandonment("normal-1")
+            upgraded_owner.acknowledge_guardian_close("normal-1", self.guardian_close())
+            released = upgraded_owner.release_contained_terminal("normal-1")
+            replay = self.owner(workspace, root / "state").state()
+
+            self.assertEqual(replay["digest"], released["digest"])
+            self.assertEqual(replay["reader_floor"], "2.2.2")
+            self.assertEqual(
+                len(
+                    [
+                        event
+                        for event in replay["history"]
+                        if event["event"] == "terminal-abandonment-recorded"
+                    ]
+                ),
+                1,
+            )
+            self.assertEqual(
+                len(
+                    [
+                        event
+                        for event in replay["history"]
+                        if event["event"] == "contained-terminal-released"
+                        and event.get("semantic_disposition") == "abandoned"
+                    ]
+                ),
+                1,
+            )
 
 
 if __name__ == "__main__":

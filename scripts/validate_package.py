@@ -3193,6 +3193,26 @@ def validate_implementation_delegation_contract(
         (skill_text, "runner-owned `dispatch`", "SKILL.md automatic orchestration: missing runner-owned dispatch"),
         (
             skill_text,
+            "stage-prompt --repo <workspace-root>",
+            "SKILL.md recovery autonomy: missing owner-private prompt staging",
+        ),
+        (
+            skill_text,
+            "root performs no workspace write at all",
+            "SKILL.md recovery autonomy: missing non-vacant root-write boundary",
+        ),
+        (
+            skill_text,
+            "_reconcile-terminal-abandonment --run-dir <path>",
+            "SKILL.md recovery autonomy: missing same-lifecycle abandonment",
+        ),
+        (
+            skill_text,
+            "required_action=provide-decision",
+            "SKILL.md recovery autonomy: missing closed decision outcome",
+        ),
+        (
+            skill_text,
             "Only a new recovery target writer requires explicit user opt-in",
             "SKILL.md automatic orchestration: missing recovery target authority boundary",
         ),
@@ -3237,6 +3257,41 @@ def validate_implementation_delegation_contract(
             "implementation-delegation.md automatic orchestration: missing root-completion authority boundary",
         ),
         (
+            protocol_text,
+            "Never place prompt, recovery prompt, receipt, helper, ignored artifact, specification update, version, or changelog write",
+            "implementation-delegation.md recovery autonomy: missing non-vacant workspace-write boundary",
+        ),
+        (
+            protocol_text,
+            "exact `[outside-set-drift]`",
+            "implementation-delegation.md recovery autonomy: missing exact abandonment cause",
+        ),
+        (
+            protocol_text,
+            "required_action=provide-decision",
+            "implementation-delegation.md recovery autonomy: missing decision outcome boundary",
+        ),
+        (
+            protocol_text,
+            "automation-exhausted` only when safe executor/route capabilities",
+            "implementation-delegation.md recovery autonomy: missing capability-exhaustion boundary",
+        ),
+        (
+            model_routing,
+            "Exact `[outside-set-drift]` is terminally abandoned through the current owner lifecycle",
+            "model-routing.md recovery autonomy: missing same-lifecycle routing boundary",
+        ),
+        (
+            model_routing,
+            "asks for permission that cannot change the evidence",
+            "model-routing.md recovery autonomy: missing no-useless-permission boundary",
+        ),
+        (
+            tdd_workflow,
+            "terminal-abandonment-v1",
+            "tdd-workflow.md recovery autonomy: missing abandonment fixture contract",
+        ),
+        (
             readme,
             "continues observing automatically within one immutable 15-minute budget",
             "README.md automatic orchestration: missing immutable 15-minute continuation",
@@ -3277,6 +3332,8 @@ def validate_implementation_delegation_contract(
         ("dispatch-activated-receipt.json", "durable activated receipt"),
         ("activated = activate_run(argparse.Namespace(run_dir=run_dir))", "same-run activation"),
         ('dispatch = subparsers.add_parser(', "dispatch CLI command"),
+        ('"stage-prompt"', "owner-private prompt staging command"),
+        ("prompt_owner.mark_prompt_snapshot_released", "normal prompt release marker"),
     ]:
         if token not in runner_text:
             errors.append(f"agent_runner.py automatic orchestration: missing {label}")
@@ -3714,6 +3771,10 @@ def validate_usage_routing_contract(
             errors.append(f"review-protocol.md exact reviewer routing: missing {token}")
     if "call `activate`" in review_dispatch:
         errors.append("review-protocol.md exact reviewer routing: ordinary orchestration must not require manual activation")
+    if "recovery-autonomy diffs prove owner-private prompt staging" not in review_protocol:
+        errors.append(
+            "review-protocol.md recovery autonomy: missing prompt/lease/abandonment/outcome audit"
+        )
     review_tier_vocabulary = (
         "Requested tier: fast | luna_xhigh | balanced | strong | sol_high | strongest | unknown"
     )
@@ -4194,7 +4255,8 @@ def public_text_files() -> list[Path]:
 def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> list[str]:
     errors: list[str] = []
     recovery_contract = [
-        ('READER_FLOOR = "2.2.0"', "reader floor"),
+        ('READER_FLOOR = "2.2.2"', "reader floor"),
+        ('_LEGACY_READER_FLOORS = {"2.2.0", "2.2.1"}', "legacy reader compatibility"),
         ('b"openbuild-workspace-v2\\0"', "workspace key"),
         ("_default_state_root", "owner-private state root"),
         ("state_root / \"workspaces\"", "owner-private state root"),
@@ -4241,6 +4303,11 @@ def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> lis
         ("record_terminal_evidence", "contained terminalization"),
         ("prove_contained_tree_empty", "contained zero proof"),
         ("reject_semantic_handoff", "semantic handoff rejection"),
+        ("record_terminal_abandonment", "terminal abandonment transition"),
+        ("complete_terminal_abandonment", "terminal abandonment completion"),
+        ('"terminal-abandonment-v1"', "terminal abandonment schema"),
+        ('"outside-set-drift"', "terminal abandonment cause"),
+        ('"terminal-abandoned-outside-set-drift"', "terminal abandonment invalidation"),
         ("invalidate_source_checkpoint", "semantic checkpoint invalidation"),
         (
             "complete_source_checkpoint_invalidation",
@@ -4255,6 +4322,20 @@ def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> lis
         ('"terminal_receipt_digest"', "contained terminal archive"),
         ("quarantine_containment_loss", "post-boundary containment quarantine"),
         ("retire_for_downgrade", "reader floor retirement"),
+        ("retire_authorization", "prompt authorization retirement"),
+        ('"authorization-retired"', "prompt authorization retirement"),
+        ("mark_prompt_snapshot_released", "prompt snapshot release"),
+        ("expected_run_id = _lease_run_id(lease)", "shared lease run binding"),
+        (
+            '"terminal abandonment recovery authorization binding is incomplete"',
+            "abandonment authorization retirement",
+        ),
+        (
+            "recovery terminal release authorization binding",
+            "recovery terminal authorization retirement",
+        ),
+        ('"prompt-snapshot-released"', "prompt snapshot release"),
+        ('"prompt_snapshot_id"', "immutable prompt snapshot binding"),
         ('"--porcelain=v2"', "Git provenance"),
         ('"ls-files", "--stage", "-v", "-z"', "Git index flags"),
         ("_lstat_snapshot_path(relative)", "Windows reparse ancestors"),
@@ -4306,6 +4387,34 @@ def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> lis
     if recovery_text.count("_require_zero_write_source_locked") != 2:
         errors.append(
             "recovery_state.py semantic zero-write proof: the validator must be defined and applied exactly once"
+        )
+    abandon_owner = recovery_text.find("def record_terminal_abandonment")
+    abandon_end = recovery_text.find("def complete_terminal_abandonment", abandon_owner)
+    abandon_dry_revalidation = recovery_text.find("persist=False", abandon_owner, abandon_end)
+    abandon_exact_reason = recovery_text.find(
+        'candidate_checkpoint.get("reasons") != ["outside-set-drift"]',
+        abandon_owner,
+        abandon_end,
+    )
+    abandon_registry_commit = recovery_text.find(
+        "return self._commit_registry_locked(state)", abandon_owner, abandon_end
+    )
+    if (
+        abandon_owner < 0
+        or abandon_end < 0
+        or abandon_dry_revalidation < 0
+        or abandon_exact_reason < 0
+        or abandon_registry_commit < 0
+        or not abandon_owner
+        < abandon_dry_revalidation
+        < abandon_exact_reason
+        < abandon_registry_commit
+        < abandon_end
+        or "self._commit_source_locked(source)"
+        in recovery_text[abandon_owner:abandon_end]
+    ):
+        errors.append(
+            "recovery_state.py terminal abandonment no-mutation gate: exact reason validation and pending registry commit must precede source mutation"
         )
     if 'self.workspace / ".openbuild"' in recovery_text:
         errors.append("recovery_state.py owner-private state root: registry must not live in the checkout")
@@ -4388,12 +4497,39 @@ def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> lis
 
     runner_contract = [
         ("recovery_registry_for_agent", "implementation-only registry owner"),
+        ("acquire_owner_prompt_snapshot", "stable prompt import"),
+        ("_windows_read_stable_external_prompt", "stable Windows prompt import"),
+        ("_posix_read_stable_external_prompt", "stable POSIX prompt import"),
+        ("windows_object_is_private", "private Windows prompt DACL"),
+        ("protect_windows_private_file", "private Windows prompt DACL"),
+        ("MAX_PROMPT_BYTES", "bounded prompt staging"),
+        ("stage_owner_prompt_snapshot", "owner-private prompt staging"),
+        ("stage_prompt_run", "owner-private prompt staging"),
+        ('"stage-prompt"', "owner-private prompt staging command"),
+        ("read_owner_prompt_snapshot", "immutable prompt snapshot read"),
+        ("collect_owner_prompt_snapshot_references", "prompt retention classification"),
+        ("garbage_collect_owner_prompt_snapshots", "prompt retention garbage collection"),
+        ("prompt_owner.mark_prompt_snapshot_released", "normal prompt release"),
+        ("resolve_run_reference", "opaque run handle resolution"),
+        ('"run_handle": public_run_handle(run_dir)', "public receipt path redaction"),
+        (
+            '"prompt_source_classification": "owner-private-snapshot"',
+            "public receipt prompt classification",
+        ),
+        ('"prompt_sha256": request.get("prompt_sha256")', "public receipt prompt digest"),
         ('if not agent_name.startswith("openbuild_implementation_"):', "implementation-only"),
         ("validate_recovery_start_options", "structured recovery preflight"),
         ('--allowed-file', "structured recovery preflight"),
         ('--specification-revision', "structured recovery preflight"),
         ('--recovery-target-milestone', "structured recovery preflight"),
         ("registry.prepare_source_checkpoint", "pre-snapshot dispatch"),
+        ("durable_write_private_bytes", "durable prompt binding"),
+        ("durable_write_private_json", "durable prompt binding"),
+        ("garbage_collect_owner_prompt_snapshots", "prompt snapshot GC"),
+        (
+            "registry._read_source_locked(path.stem, rebarrier=True)",
+            "authoritative prompt GC scan",
+        ),
         ("registry.reserve_normal", "normal lease arbitration"),
         ("registry.bind_reserved_source_snapshot", "reserved source provenance boundary"),
         ("guardian_run", "outside-worker containment guardian"),
@@ -4437,11 +4573,19 @@ def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> lis
         ("audit_guardian_health", "post-boundary guardian loss quarantine"),
         ("reconcile_implementation_registry", "runner terminal lifecycle"),
         ("registry.record_terminal_evidence", "runner terminal receipt binding"),
+        ("_expected_lease_run_id(lease)", "terminal exact run binding"),
+        (
+            "_terminal_binding(receipt, run_id=expected_run_id)",
+            "terminal exact run receipt",
+        ),
+        ("registry.record_terminal_abandonment", "runner terminal abandonment binding"),
+        ("registry.complete_terminal_abandonment", "runner terminal abandonment completion"),
         ("registry.materialize_handoff", "runner handoff materialization"),
         ("registry.release_contained_terminal", "runner contained release"),
         ("success_verification_digest", "root-verified success gate"),
         ('"_finalize-success"', "root-verified success gate"),
         ('"_reject-handoff"', "root semantic rejection gate"),
+        ('"_reconcile-terminal-abandonment"', "terminal abandonment command"),
         ("reject_semantic_handoff_run", "root semantic rejection gate"),
         ("registry.reject_semantic_handoff", "root semantic rejection transition"),
         (
@@ -4450,6 +4594,20 @@ def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> lis
         ),
         ('"_authorize-recovery"', "explicit recovery authorization gate"),
         ("authorize_recovery_run", "explicit recovery authorization gate"),
+        ("def classify_recovery_outcome(", "closed recovery outcomes"),
+        ("def root_completion_authorization_record(", "root completion audit"),
+        (
+            "def record_root_completion_authorization_run(",
+            "durable root completion audit",
+        ),
+        ('"_record-root-completion"', "root completion audit command"),
+        (
+            'states["released"] -= states["grant-referenced"] | states["lease-referenced"]',
+            "active prompt reference precedence",
+        ),
+        ("def classify_public_failure(", "public failure classification"),
+        ('"failure_message": classify_public_failure(', "public failure projection"),
+        ('"external-action",', "external-action outcome class"),
         ('"root_verification_digest"', "root-verified handoff binding"),
         ("registry.bind_fallback_process_unactivated", "runner fallback process boundary"),
         (
@@ -4464,22 +4622,64 @@ def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> lis
     for token, category in runner_contract:
         if token not in runner_text:
             errors.append(f"agent_runner.py recovery {category}: missing {token}")
+    public_receipt_start = runner_text.find("def public_receipt")
+    public_receipt_end = runner_text.find("\ndef apply_preboundary_guardian_failure", public_receipt_start)
+    public_receipt_text = (
+        runner_text[public_receipt_start:public_receipt_end]
+        if public_receipt_start >= 0 and public_receipt_end > public_receipt_start
+        else ""
+    )
+    for private_field in ('"run_dir":', '"profile_source":', '"artifacts":'):
+        if private_field in public_receipt_text:
+            errors.append(
+                "agent_runner.py recovery public receipt path redaction: "
+                f"forbidden private field {private_field}"
+            )
     pre_snapshot = runner_text.find("registry.prepare_source_checkpoint")
-    request_write = runner_text.find('atomic_write_json(run_dir / "request.json", request)', pre_snapshot)
+    prompt_write = runner_text.find(
+        "durable_write_private_bytes(prompt_snapshot, source_prompt)", pre_snapshot
+    )
+    request_write = runner_text.find(
+        'durable_write_private_json(run_dir / "request.json", request)', prompt_write
+    )
     reserve = runner_text.find("registry.reserve_normal", pre_snapshot)
     snapshot_boundary = runner_text.find("registry.bind_reserved_source_snapshot", reserve)
+    prompt_release = runner_text.find(
+        "prompt_owner.mark_prompt_snapshot_released", snapshot_boundary
+    )
+    prompt_gc = runner_text.find(
+        "garbage_collect_owner_prompt_snapshots(prompt_owner)", prompt_release
+    )
     contained_claim = runner_text.find("registry.claim_contained_launch", snapshot_boundary)
     if (
         pre_snapshot < 0
+        or prompt_write < 0
         or request_write < 0
         or reserve < 0
         or snapshot_boundary < 0
+        or prompt_release < 0
+        or prompt_gc < 0
         or contained_claim < 0
-        or not pre_snapshot < request_write < reserve < snapshot_boundary < contained_claim
+        or not pre_snapshot
+        < prompt_write
+        < request_write
+        < reserve
+        < snapshot_boundary
+        < prompt_release
+        < prompt_gc
+        < contained_claim
     ):
         errors.append(
-            "agent_runner.py recovery pre-snapshot dispatch: preliminary snapshot, private request, "
-            "lease reservation, reserved-source binding and contained claim are out of order"
+            "agent_runner.py durable prompt binding and prompt snapshot GC: preliminary snapshot, durable prompt/request, "
+            "lease reservation, release/GC and contained claim are out of order"
+        )
+    terminal_release = runner_text.find("registry.release_contained_terminal(lease_id)")
+    terminal_prompt_gc = runner_text.find(
+        "garbage_collect_owner_prompt_snapshots(registry)", terminal_release
+    )
+    if terminal_release < 0 or terminal_prompt_gc < terminal_release:
+        errors.append(
+            "agent_runner.py prompt snapshot GC: terminal release has no production cleanup hook"
         )
     suspended_spawn = runner_text.find("start_suspended=True")
     windows_assign = runner_text.find("assign_windows_process_to_job(provider_handle, worker)", suspended_spawn)
@@ -4862,6 +5062,8 @@ def main() -> int:
         "minor",
         "major",
         "immutable",
+        "runtime reader floor",
+        "without rewrite-on-read",
     ]:
         if token not in versioning_text:
             fail(errors, f"references/versioning.md: missing contract {token}")

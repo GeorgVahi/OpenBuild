@@ -24,7 +24,8 @@ from typing import Any, Iterator, Mapping, Sequence
 
 REGISTRY_SCHEMA = 1
 IDENTITY_VERSION = 2
-READER_FLOOR = "2.2.0"
+READER_FLOOR = "2.2.2"
+_LEGACY_READER_FLOORS = {"2.2.0", "2.2.1"}
 DEFAULT_MAX_RECORDS = 100_000
 DEFAULT_MAX_BYTES = 2 * 1024 * 1024 * 1024
 
@@ -44,6 +45,7 @@ _DOMAIN_SOURCE = b"openbuild-source-v1\0"
 _DOMAIN_GRANT = b"openbuild-authorization-v1\0"
 _DOMAIN_NONCE = b"openbuild-authorization-nonce-v1\0"
 _DOMAIN_TERMINAL_ARCHIVE = b"openbuild-terminal-archive-v1\0"
+_DOMAIN_TERMINAL_ABANDONMENT = b"openbuild-terminal-abandonment-v1\0"
 
 
 class RecoveryStateError(RuntimeError):
@@ -416,6 +418,7 @@ def _validate_public_checkpoint(value: Any) -> None:
         "outside-set-drift",
         "preexisting-dirty-overlap",
         "semantic-needs-escalation",
+        "terminal-abandoned-outside-set-drift",
     }
     if any(reason not in allowed_reasons for reason in reasons):
         raise RecoveryStateError("public recovery checkpoint reason is unsupported")
@@ -440,6 +443,7 @@ def _validate_private_authorization(value: Any) -> None:
             "allowed_set_digest",
             "target_milestone",
         },
+        {"prompt_snapshot_id", "prompt_sha256"},
     )
     for field in (
         "grant_id",
@@ -450,6 +454,11 @@ def _validate_private_authorization(value: Any) -> None:
         "allowed_set_digest",
     ):
         _require_hex(authorization[field], f"private recovery authorization {field}")
+    if ("prompt_snapshot_id" in authorization) != ("prompt_sha256" in authorization):
+        raise RecoveryStateError("private recovery authorization prompt binding is incomplete")
+    for field in ("prompt_snapshot_id", "prompt_sha256"):
+        if field in authorization:
+            _require_hex(authorization[field], f"private recovery authorization {field}")
     _require_integer(authorization["authorization_epoch"], "private recovery authorization epoch")
     _require_string(
         authorization["specification_revision"], "private recovery authorization specification"
@@ -503,7 +512,7 @@ def _validate_terminal_archive(value: Mapping[str, Any]) -> None:
         if value.get(field) is not None:
             _require_hex(value.get(field), f"contained terminal archive {field}")
     semantic = value.get("semantic_disposition")
-    if semantic not in {None, "blocked", "needs-escalation"}:
+    if semantic not in {None, "blocked", "needs-escalation", "abandoned"}:
         raise RecoveryStateError("contained terminal archive semantic disposition is malformed")
     if (semantic is None) != (value.get("semantic_disposition_digest") is None):
         raise RecoveryStateError("contained terminal archive semantic digest is malformed")
@@ -733,11 +742,14 @@ def _validate_target_plan(value: Any) -> None:
             "ipc_plan_id",
             "allowed_set_digest",
         },
+        {"prompt_snapshot_id"},
     )
     for field in ("lease_id", "run_id", "provider_plan_id", "ipc_plan_id"):
         _require_string(plan[field], f"recovery target plan {field}")
     for field in ("prompt_sha256", "launch_token", "allowed_set_digest"):
         _require_hex(plan[field], f"recovery target plan {field}")
+    if "prompt_snapshot_id" in plan:
+        _require_hex(plan["prompt_snapshot_id"], "recovery target plan prompt snapshot ID")
 
 
 def _validate_terminal_receipt(value: Any) -> None:
@@ -784,6 +796,52 @@ def _validate_zero_proof(value: Any) -> None:
 
 
 def _validate_semantic_disposition(value: Any) -> None:
+    if isinstance(value, dict) and value.get("disposition") == "abandoned":
+        semantic = _require_exact_object(
+            value,
+            "terminal abandonment disposition",
+            {
+                "disposition",
+                "schema",
+                "cause",
+                "evidence_digest",
+                "checkpoint_allowed",
+                "checkpoint_invalidation",
+                "run_id",
+                "lease_id",
+                "source_state_id",
+                "source_checkpoint_digest",
+                "allowed_set_digest",
+                "terminal_binding_digest",
+                "zero_proof_digest",
+                "candidate_snapshot_digest",
+            },
+            {"checkpoint_digest"},
+        )
+        if (
+            semantic["schema"] != "terminal-abandonment-v1"
+            or semantic["cause"] != "outside-set-drift"
+            or semantic["checkpoint_allowed"] is not False
+            or semantic["checkpoint_invalidation"] not in {"pending", "completed"}
+        ):
+            raise RecoveryStateError("terminal abandonment disposition is malformed")
+        for field in (
+            "evidence_digest",
+            "source_state_id",
+            "source_checkpoint_digest",
+            "allowed_set_digest",
+            "terminal_binding_digest",
+            "zero_proof_digest",
+            "candidate_snapshot_digest",
+        ):
+            _require_hex(semantic[field], f"terminal abandonment {field}")
+        for field in ("run_id", "lease_id"):
+            _require_string(semantic[field], f"terminal abandonment {field}")
+        if semantic["checkpoint_invalidation"] == "completed":
+            _require_hex(semantic.get("checkpoint_digest"), "terminal abandonment checkpoint digest")
+        elif "checkpoint_digest" in semantic:
+            raise RecoveryStateError("terminal abandonment checkpoint digest preceded completion")
+        return
     semantic = _require_exact_object(
         value,
         "semantic disposition",
@@ -882,6 +940,7 @@ _LEASE_EXTRAS = {
     "semantic_disposition",
     "handoff_digest",
     "guardian_close",
+    "prompt_snapshot_id",
 }
 
 
@@ -947,6 +1006,8 @@ def _validate_lease(value: Any) -> None:
     else:
         if lease["run_id"] is not None:
             _require_string(lease["run_id"], "recovery registry run ID")
+        if lease.get("prompt_snapshot_id") is not None:
+            _require_hex(lease["prompt_snapshot_id"], "recovery registry prompt snapshot ID")
         if lease["prompt_sha256"] is not None:
             _require_hex(lease["prompt_sha256"], "recovery registry prompt SHA-256")
         _validate_containment_plan(lease["containment_plan"])
@@ -996,6 +1057,8 @@ def _validate_lease(value: Any) -> None:
         raise RecoveryStateError("recovery registry lease lacks state-specific evidence")
 
     allowed_extras = set(progression)
+    if "prompt_snapshot_id" in lease:
+        allowed_extras.add("prompt_snapshot_id")
     if state == "process-bound-unactivated":
         allowed_extras.add("activation_abort")
     if state in {"stopped-terminal", "handoff-committed"}:
@@ -1149,6 +1212,47 @@ def _validate_history_event(value: Any) -> None:
             },
             set(),
         ),
+        "terminal-abandonment-recorded": (
+            {
+                "event",
+                "disposition",
+                "schema",
+                "cause",
+                "evidence_digest",
+                "checkpoint_allowed",
+                "checkpoint_invalidation",
+                "run_id",
+                "lease_id",
+                "source_state_id",
+                "source_checkpoint_digest",
+                "allowed_set_digest",
+                "terminal_binding_digest",
+                "zero_proof_digest",
+                "candidate_snapshot_digest",
+            },
+            set(),
+        ),
+        "terminal-abandonment-completed": (
+            {
+                "event",
+                "lease_id",
+                "run_id",
+                "source_state_id",
+                "checkpoint_digest",
+                "evidence_digest",
+            },
+            set(),
+        ),
+        "authorization-retired": (
+            {
+                "event",
+                "source_state_id",
+                "grant_id",
+                "prompt_snapshot_id",
+                "prompt_sha256",
+            },
+            set(),
+        ),
     }
     if event == "contained-terminal-released":
         _validate_terminal_archive(value)
@@ -1156,7 +1260,8 @@ def _validate_history_event(value: Any) -> None:
     if event not in schemas:
         raise RecoveryStateError("recovery registry history event is unsupported")
     history = _require_exact_object(value, "recovery registry history event", *schemas[event])
-    _require_string(history["lease_id"], "recovery registry history lease ID")
+    if event != "authorization-retired":
+        _require_string(history["lease_id"], "recovery registry history lease ID")
     if event in {"reserved-source-snapshot-bound", "source-checkpoint-invalidated"}:
         _require_hex(history["source_state_id"], "recovery registry history source state ID")
     if event == "reserved-source-snapshot-bound":
@@ -1187,6 +1292,25 @@ def _validate_history_event(value: Any) -> None:
         _require_string(history["run_id"], "history invalidation run ID")
         _require_hex(history["checkpoint_digest"], "history invalidated checkpoint digest")
         _require_hex(history["evidence_digest"], "history invalidation evidence digest")
+    elif event == "terminal-abandonment-recorded":
+        semantic = dict(history)
+        semantic.pop("event")
+        _validate_semantic_disposition(semantic)
+        if semantic["checkpoint_invalidation"] != "pending":
+            raise RecoveryStateError("terminal abandonment record must begin pending")
+    elif event == "terminal-abandonment-completed":
+        _require_string(history["run_id"], "terminal abandonment completion run ID")
+        _require_hex(history["source_state_id"], "terminal abandonment completion source state ID")
+        _require_hex(history["checkpoint_digest"], "terminal abandonment completion checkpoint digest")
+        _require_hex(history["evidence_digest"], "terminal abandonment completion evidence digest")
+    elif event == "authorization-retired":
+        for field in (
+            "source_state_id",
+            "grant_id",
+            "prompt_snapshot_id",
+            "prompt_sha256",
+        ):
+            _require_hex(history[field], f"retired recovery authorization {field}")
 
 
 def _version_tuple(value: str) -> tuple[int, int, int]:
@@ -1641,6 +1765,26 @@ def _durable_replace(path: Path, payload: bytes, *, fault: str | None = None) ->
             temporary.unlink()
 
 
+def durable_write_private_json(
+    path: Path,
+    value: Mapping[str, Any],
+    *,
+    fault: str | None = None,
+) -> None:
+    """Durably replace an owner-private JSON record before authority is exposed."""
+    _durable_replace(path, _canonical(value) + b"\n", fault=fault)
+
+
+def durable_write_private_bytes(
+    path: Path,
+    value: bytes,
+    *,
+    fault: str | None = None,
+) -> None:
+    """Durably replace owner-private bytes before a durable reference is written."""
+    _durable_replace(path, value, fault=fault)
+
+
 def _rebarrier(path: Path, expected_digest: str, *, fault: str | None = None) -> None:
     if fault == "reload-before-barrier":
         raise RecoveryStateError("injected failure before reload barrier")
@@ -1689,6 +1833,15 @@ def _exclusive_file_lock(path: Path) -> Iterator[None]:
 
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         handle.close()
+
+
+def _lease_run_id(lease: Mapping[str, Any]) -> str | None:
+    plan = lease.get("plan")
+    if lease.get("lease_kind") == "recovery-target" and isinstance(plan, Mapping):
+        value = plan.get("run_id")
+    else:
+        value = lease.get("run_id")
+    return value if isinstance(value, str) and value else None
 
 
 class RecoveryRegistry:
@@ -1792,16 +1945,89 @@ class RecoveryRegistry:
         if not isinstance(lease, Mapping) or not isinstance(semantic, Mapping):
             return
 
-        expected_run_id = (
-            lease.get("plan", {}).get("run_id")
-            if lease.get("lease_kind") == "recovery-target"
-            and isinstance(lease.get("plan"), Mapping)
-            else lease.get("run_id")
-        )
+        expected_run_id = _lease_run_id(lease)
         if semantic.get("run_id") != expected_run_id:
             raise RecoveryStateError("semantic disposition run binding drifted")
         if semantic.get("source_state_id") != lease.get("source_state_id"):
             raise RecoveryStateError("semantic disposition source binding drifted")
+
+        if semantic.get("disposition") == "abandoned":
+            if semantic.get("lease_id") != lease.get("lease_id"):
+                raise RecoveryStateError("terminal abandonment lease binding drifted")
+            recorded = [
+                event
+                for event in state.get("history", [])
+                if event.get("event") == "terminal-abandonment-recorded"
+                and event.get("lease_id") == lease.get("lease_id")
+                and event.get("run_id") == expected_run_id
+            ]
+            if len(recorded) != 1:
+                raise RecoveryStateError("terminal abandonment requires one recorded history event")
+            immutable_recorded_fields = set(recorded[0]) - {
+                "event",
+                "checkpoint_invalidation",
+            }
+            if (
+                recorded[0].get("checkpoint_invalidation") != "pending"
+                or any(
+                    recorded[0].get(field) != semantic.get(field)
+                    for field in immutable_recorded_fields
+                )
+            ):
+                raise RecoveryStateError("terminal abandonment history binding drifted")
+            source = self._read_source_locked(str(semantic["source_state_id"]), rebarrier=True)
+            checkpoint = source.get("public_checkpoint")
+            candidate = checkpoint.get("candidate_snapshot") if isinstance(checkpoint, Mapping) else None
+            candidate_digest = semantic.get("candidate_snapshot_digest")
+            if semantic.get("checkpoint_invalidation") == "completed":
+                if (
+                    not isinstance(candidate, Mapping)
+                    or _domain_digest(_DOMAIN_CHECKPOINT, candidate) != candidate_digest
+                ):
+                    raise RecoveryStateError(
+                        "terminal abandonment candidate snapshot binding drifted"
+                    )
+            expected_evidence = _domain_digest(
+                _DOMAIN_TERMINAL_ABANDONMENT,
+                {
+                    "schema": semantic.get("schema"),
+                    "cause": semantic.get("cause"),
+                    "run_id": expected_run_id,
+                    "lease_id": lease.get("lease_id"),
+                    "source_state_id": lease.get("source_state_id"),
+                    "source_checkpoint_digest": semantic.get("source_checkpoint_digest"),
+                    "allowed_set_digest": lease.get("allowed_set_digest"),
+                    "terminal_binding_digest": lease.get("terminal_receipt", {}).get("binding_digest"),
+                    "zero_proof_digest": _terminal_part_digest("zero", lease.get("zero_proof", {})),
+                    "candidate_snapshot_digest": candidate_digest,
+                },
+            )
+            if semantic.get("evidence_digest") != expected_evidence:
+                raise RecoveryStateError("terminal abandonment evidence digest drifted")
+            if semantic.get("checkpoint_invalidation") == "completed":
+                completed = [
+                    event
+                    for event in state.get("history", [])
+                    if event.get("event") == "terminal-abandonment-completed"
+                    and event.get("lease_id") == lease.get("lease_id")
+                    and event.get("run_id") == expected_run_id
+                ]
+                if len(completed) != 1 or any(
+                    completed[0].get(field) != semantic.get(field)
+                    for field in ("source_state_id", "checkpoint_digest", "evidence_digest")
+                ):
+                    raise RecoveryStateError("terminal abandonment completion binding drifted")
+                invalidation = source.get("checkpoint_invalidation")
+                if (
+                    not isinstance(checkpoint, Mapping)
+                    or checkpoint.get("disposition") != "recovery-ineligible"
+                    or checkpoint.get("checkpoint_digest") != semantic.get("checkpoint_digest")
+                    or not isinstance(invalidation, Mapping)
+                    or invalidation.get("reason") != "terminal-abandoned-outside-set-drift"
+                    or invalidation.get("evidence_digest") != semantic.get("evidence_digest")
+                ):
+                    raise RecoveryStateError("terminal abandonment source invalidation is not authoritative")
+            return
 
         lease_id = lease.get("lease_id")
         run_id = semantic.get("run_id")
@@ -1901,7 +2127,7 @@ class RecoveryRegistry:
         )
         if state.get("schema_version") != REGISTRY_SCHEMA or state.get("identity_version") != IDENTITY_VERSION:
             raise RecoveryStateError("unsupported recovery registry schema or identity version")
-        if state.get("reader_floor") != READER_FLOOR:
+        if state.get("reader_floor") not in _LEGACY_READER_FLOORS | {READER_FLOOR}:
             raise RecoveryStateError("recovery registry reader floor is incompatible")
         if state.get("workspace_key") != self.workspace_key:
             raise RecoveryStateError("workspace key collision or root identity drift")
@@ -1945,14 +2171,23 @@ class RecoveryRegistry:
         if not isinstance(state["tombstones"], list):
             raise RecoveryStateError("recovery registry tombstones must be a list")
         for tombstone in state["tombstones"]:
-            item = _require_exact_object(
-                tombstone,
-                "recovery registry tombstone",
-                {"event", "target_version"},
-            )
-            if item["event"] != "registry-retired":
+            if tombstone.get("event") == "registry-retired":
+                item = _require_exact_object(
+                    tombstone,
+                    "recovery registry tombstone",
+                    {"event", "target_version"},
+                )
+                _version_tuple(_require_string(item["target_version"], "registry retirement target"))
+            elif tombstone.get("event") == "prompt-snapshot-released":
+                item = _require_exact_object(
+                    tombstone,
+                    "prompt snapshot release tombstone",
+                    {"event", "prompt_snapshot_id", "prompt_sha256"},
+                )
+                _require_hex(item["prompt_snapshot_id"], "released prompt snapshot ID")
+                _require_hex(item["prompt_sha256"], "released prompt SHA-256")
+            else:
                 raise RecoveryStateError("recovery registry tombstone event is unsupported")
-            _version_tuple(_require_string(item["target_version"], "registry retirement target"))
         if not isinstance(state["consumed_grants"], list):
             raise RecoveryStateError("recovery registry consumed grants must be a list")
         seen_grants: set[str] = set()
@@ -1967,6 +2202,7 @@ class RecoveryRegistry:
                     "checkpoint_digest",
                     "allowed_set_digest",
                 },
+                {"prompt_snapshot_id", "prompt_sha256"},
             )
             for field in (
                 "grant_id",
@@ -1976,9 +2212,50 @@ class RecoveryRegistry:
             ):
                 _require_hex(item[field], f"consumed recovery grant {field}")
             _require_integer(item["authorization_epoch"], "consumed recovery grant epoch")
+            if ("prompt_snapshot_id" in item) != ("prompt_sha256" in item):
+                raise RecoveryStateError("consumed recovery grant prompt binding is incomplete")
+            for field in ("prompt_snapshot_id", "prompt_sha256"):
+                if field in item:
+                    _require_hex(item[field], f"consumed recovery grant {field}")
             if item["grant_id"] in seen_grants:
                 raise RecoveryStateError("consumed recovery grant is duplicated")
             seen_grants.add(item["grant_id"])
+        lease = state.get("lease")
+        if isinstance(lease, Mapping) and lease.get("lease_kind") == "recovery-target":
+            plan = lease.get("plan")
+            if isinstance(plan, Mapping) and "prompt_snapshot_id" in plan:
+                source = self._read_source_locked(str(lease.get("source_state_id")), rebarrier=True)
+                authorization = source.get("authorization")
+                consumed = next(
+                    (item for item in state["consumed_grants"] if item.get("grant_id") == lease.get("grant_id")),
+                    None,
+                )
+                retired_authorization = next(
+                    (
+                        event
+                        for event in state["history"]
+                        if event.get("event") == "authorization-retired"
+                        and event.get("source_state_id") == lease.get("source_state_id")
+                        and event.get("grant_id") == lease.get("grant_id")
+                    ),
+                    None,
+                )
+                authority = (
+                    authorization
+                    if isinstance(authorization, Mapping)
+                    else (
+                        retired_authorization
+                        if isinstance(retired_authorization, Mapping)
+                        else consumed
+                    )
+                )
+                if not isinstance(authority, Mapping) or not isinstance(consumed, Mapping):
+                    raise RecoveryStateError("recovery prompt binding lacks authorization evidence")
+                if any(
+                    authority.get(field) != plan.get(field) or consumed.get(field) != plan.get(field)
+                    for field in ("prompt_snapshot_id", "prompt_sha256")
+                ):
+                    raise RecoveryStateError("recovery prompt binding drifted")
         _require_boolean(state["retired"], "recovery registry retirement state")
         if state["retired"] and (
             state["lease"] is not None
@@ -2030,6 +2307,9 @@ class RecoveryRegistry:
     ) -> dict[str, Any]:
         previous = state.get("digest")
         state = dict(state)
+        # Reading a 2.2.0/2.2.1 generation never rewrites it.  Any durable
+        # transition made by this reader raises the floor atomically.
+        state["reader_floor"] = READER_FLOOR
         state["previous_generation_digest"] = previous
         state["generation"] = int(state.get("generation", 0)) + 1
         if rotate_epoch:
@@ -2099,6 +2379,32 @@ class RecoveryRegistry:
             state["tombstones"].append({"event": "registry-retired", "target_version": target_version})
             return self._commit_registry_locked(state, rotate_epoch=True)
 
+    def mark_prompt_snapshot_released(
+        self,
+        prompt_snapshot_id: str,
+        prompt_sha256: str,
+    ) -> dict[str, Any]:
+        """Mark a snapshot collectable after the private run copy is durable."""
+        _require_hex(prompt_snapshot_id, "released prompt snapshot ID")
+        _require_hex(prompt_sha256, "released prompt SHA-256")
+        tombstone = {
+            "event": "prompt-snapshot-released",
+            "prompt_snapshot_id": prompt_snapshot_id,
+            "prompt_sha256": prompt_sha256,
+        }
+        with self._lock():
+            state = self._read_registry_locked(rebarrier=self.path.exists())
+            for existing in state["tombstones"]:
+                if (
+                    existing.get("event") == "prompt-snapshot-released"
+                    and existing.get("prompt_snapshot_id") == prompt_snapshot_id
+                ):
+                    if existing != tombstone:
+                        raise RecoveryStateError("released prompt snapshot binding drifted")
+                    return state
+            state["tombstones"].append(tombstone)
+            return self._commit_registry_locked(state, resolve_visible_commit=True)
+
     def reserve_normal(
         self,
         lease_id: str,
@@ -2107,6 +2413,7 @@ class RecoveryRegistry:
         recovery_capable: bool,
         source_state_id: str | None = None,
         run_id: str | None = None,
+        prompt_snapshot_id: str | None = None,
         prompt_sha256: str | None = None,
         containment_plan: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -2118,6 +2425,11 @@ class RecoveryRegistry:
                 _require_hex(allowed_set_digest, "allowed_set_digest")
             if recovery_capable and not allowed_set_digest:
                 raise RecoveryStateError("a recovery-capable normal lease requires an allowed-set digest")
+            if prompt_snapshot_id is not None:
+                _require_hex(prompt_snapshot_id, "normal prompt snapshot ID")
+                if prompt_sha256 is None:
+                    raise RecoveryStateError("normal prompt snapshot binding is incomplete")
+                _require_hex(prompt_sha256, "normal prompt SHA-256")
             state["lease"] = {
                 "lease_id": lease_id,
                 "lease_kind": "normal-contained" if recovery_capable else "normal-legacy",
@@ -2126,6 +2438,7 @@ class RecoveryRegistry:
                 "allowed_set_digest": allowed_set_digest,
                 "source_state_id": source_state_id,
                 "run_id": run_id,
+                "prompt_snapshot_id": prompt_snapshot_id,
                 "prompt_sha256": prompt_sha256,
                 "containment_plan": dict(containment_plan or {}),
             }
@@ -2351,7 +2664,10 @@ class RecoveryRegistry:
                 "private checkpoint invalidation",
                 {"reason", "evidence_digest"},
             )
-            if invalidation["reason"] != "semantic-needs-escalation":
+            if invalidation["reason"] not in {
+                "semantic-needs-escalation",
+                "terminal-abandoned-outside-set-drift",
+            }:
                 raise RecoveryStateError("private checkpoint invalidation reason is unsupported")
             _require_hex(invalidation["evidence_digest"], "checkpoint invalidation evidence")
             if (
@@ -2382,7 +2698,7 @@ class RecoveryRegistry:
         state["digest"] = _digest(state)
         self._validate_source(state, state["source_state_id"])
         path = self.source_path(state["source_state_id"])
-        _durable_replace(path, _canonical(state) + b"\n")
+        _durable_replace(path, _canonical(state) + b"\n", fault=self.fault)
         return self._validate_source(json.loads(path.read_text(encoding="utf-8")), state["source_state_id"])
 
     def read_private_source(self, source_state_id: str) -> dict[str, Any]:
@@ -3173,8 +3489,15 @@ class RecoveryRegistry:
         *,
         user_action_digest: str,
         specification_revision: str,
+        prompt_snapshot_id: str | None = None,
+        prompt_sha256: str | None = None,
     ) -> dict[str, Any]:
         _require_hex(user_action_digest, "user_action_digest")
+        if (prompt_snapshot_id is None) != (prompt_sha256 is None):
+            raise RecoveryStateError("recovery authorization prompt binding is incomplete")
+        if prompt_snapshot_id is not None:
+            _require_hex(prompt_snapshot_id, "prompt_snapshot_id")
+            _require_hex(prompt_sha256, "prompt_sha256")
         source_state_id = checkpoint.get("source_state_id")
         if not isinstance(source_state_id, str):
             raise RecoveryStateError("checkpoint source state ID is missing")
@@ -3190,6 +3513,10 @@ class RecoveryRegistry:
                 raise RecoveryStateError("specification revision drifted before authorization")
             existing = source.get("authorization")
             if isinstance(existing, dict):
+                if ("prompt_snapshot_id" in existing) != (prompt_snapshot_id is not None):
+                    raise RecoveryStateError(
+                        "an immutable recovery authorization already exists with different prompt bindings"
+                    )
                 expected_existing = {
                     "authorization_epoch": registry["epoch"],
                     "user_action_digest": user_action_digest,
@@ -3199,6 +3526,11 @@ class RecoveryRegistry:
                     "allowed_set_digest": checkpoint["allowed_set_digest"],
                     "target_milestone": checkpoint["target_milestone"],
                 }
+                if prompt_snapshot_id is not None:
+                    expected_existing |= {
+                        "prompt_snapshot_id": prompt_snapshot_id,
+                        "prompt_sha256": prompt_sha256,
+                    }
                 if any(existing.get(key) != value for key, value in expected_existing.items()):
                     raise RecoveryStateError("an immutable recovery authorization already exists with different bindings")
                 return {
@@ -3222,6 +3554,9 @@ class RecoveryRegistry:
                 "allowed_set_digest": checkpoint["allowed_set_digest"],
                 "target_milestone": checkpoint["target_milestone"],
             }
+            if prompt_snapshot_id is not None:
+                private_grant["prompt_snapshot_id"] = prompt_snapshot_id
+                private_grant["prompt_sha256"] = prompt_sha256
             source["authorization"] = private_grant
             self._commit_source_locked(source)
             return {
@@ -3233,6 +3568,71 @@ class RecoveryRegistry:
                 "target_milestone": private_grant["target_milestone"],
                 "specification_revision": specification_revision,
             }
+
+    def retire_authorization(
+        self,
+        *,
+        source_state_id: str,
+        grant_id: str,
+    ) -> dict[str, Any]:
+        """Retire one non-consumable prompt-bound grant while exactly vacant."""
+        _require_hex(source_state_id, "authorization retirement source state ID")
+        _require_hex(grant_id, "authorization retirement grant ID")
+        with self._lock():
+            registry = self._read_registry_locked(rebarrier=True)
+            if not self._is_vacant(registry):
+                raise RecoveryStateError(
+                    "authorization retirement requires an exactly vacant registry"
+                )
+            prior = next(
+                (
+                    event
+                    for event in registry["history"]
+                    if event.get("event") == "authorization-retired"
+                    and event.get("source_state_id") == source_state_id
+                    and event.get("grant_id") == grant_id
+                ),
+                None,
+            )
+            source = self._read_source_locked(source_state_id)
+            authorization = source.get("authorization")
+            if authorization is None and isinstance(prior, Mapping):
+                return registry
+            if (
+                not isinstance(authorization, Mapping)
+                or authorization.get("grant_id") != grant_id
+                or not isinstance(authorization.get("prompt_snapshot_id"), str)
+                or not isinstance(authorization.get("prompt_sha256"), str)
+            ):
+                raise RecoveryStateError(
+                    "authorization retirement requires a prompt-bound grant"
+                )
+            checkpoint = source.get("public_checkpoint")
+            consumed = any(
+                item.get("grant_id") == grant_id
+                for item in registry["consumed_grants"]
+            )
+            stale = authorization.get("authorization_epoch") != registry.get("epoch")
+            ineligible = (
+                isinstance(checkpoint, Mapping)
+                and checkpoint.get("disposition") == "recovery-ineligible"
+            )
+            if not (consumed or stale or ineligible):
+                raise RecoveryStateError(
+                    "an eligible current authorization cannot be retired"
+                )
+            source["authorization"] = None
+            self._commit_source_locked(source)
+            registry["history"].append(
+                {
+                    "event": "authorization-retired",
+                    "source_state_id": source_state_id,
+                    "grant_id": grant_id,
+                    "prompt_snapshot_id": authorization["prompt_snapshot_id"],
+                    "prompt_sha256": authorization["prompt_sha256"],
+                }
+            )
+            return self._commit_registry_locked(registry)
 
     def consume_grant_and_reserve(
         self,
@@ -3253,9 +3653,12 @@ class RecoveryRegistry:
             "ipc_plan_id",
             "allowed_set_digest",
         }
-        if set(target_plan) != required_plan:
+        plan_fields = set(target_plan)
+        if plan_fields != required_plan and plan_fields != required_plan | {"prompt_snapshot_id"}:
             raise RecoveryStateError("target reservation plan fields are incomplete or unknown")
         _require_hex(target_plan["prompt_sha256"], "prompt_sha256")
+        if "prompt_snapshot_id" in target_plan:
+            _require_hex(target_plan["prompt_snapshot_id"], "prompt_snapshot_id")
         _require_hex(target_plan["launch_token"], "launch_token")
         with self._lock():
             registry = self._read_registry_locked(rebarrier=True)
@@ -3272,6 +3675,15 @@ class RecoveryRegistry:
             for field in ("checkpoint_digest", "allowed_set_digest", "target_milestone"):
                 if private_grant.get(field) != checkpoint.get(field):
                     raise RecoveryStateError(f"authorization {field} binding drifted")
+            grant_has_prompt = "prompt_snapshot_id" in private_grant
+            plan_has_prompt = "prompt_snapshot_id" in target_plan
+            if grant_has_prompt != plan_has_prompt:
+                raise RecoveryStateError("authorization prompt binding drifted")
+            if grant_has_prompt and any(
+                private_grant.get(field) != target_plan.get(field)
+                for field in ("prompt_snapshot_id", "prompt_sha256")
+            ):
+                raise RecoveryStateError("authorization prompt binding drifted")
             if target_plan.get("allowed_set_digest") != checkpoint.get("allowed_set_digest"):
                 raise RecoveryStateError("target allowed-set binding drifted")
             source, current = self._revalidate_source_locked(source, checkpoint, persist=False)
@@ -3285,6 +3697,9 @@ class RecoveryRegistry:
                 "checkpoint_digest": checkpoint["checkpoint_digest"],
                 "allowed_set_digest": checkpoint["allowed_set_digest"],
             }
+            if grant_has_prompt:
+                consumed["prompt_snapshot_id"] = private_grant["prompt_snapshot_id"]
+                consumed["prompt_sha256"] = private_grant["prompt_sha256"]
             registry["consumed_grants"].append(consumed)
             registry["lease"] = {
                 "lease_id": target_plan["lease_id"],
@@ -3677,6 +4092,203 @@ class RecoveryRegistry:
             lease["state"] = "stopped-terminal"
             return self._commit_registry_locked(state)
 
+    def record_terminal_abandonment(self, lease_id: str) -> dict[str, Any]:
+        """Record the one exact no-handoff terminal outcome for outside-set drift.
+
+        The caller has no cause, digest, checkpoint, or force input.  This is
+        deliberately a continuation of the contained producer lifecycle, not
+        a replacement-writer or generic unlock API.
+        """
+        with self._lock():
+            state = self._read_registry_locked(rebarrier=True)
+            lease = state.get("lease")
+            semantic = lease.get("semantic_disposition") if isinstance(lease, dict) else None
+            if isinstance(semantic, dict):
+                if semantic.get("disposition") != "abandoned":
+                    raise RecoveryStateError("terminal lease already has a different semantic disposition")
+                return state
+            if (
+                not isinstance(lease, dict)
+                or lease.get("lease_id") != lease_id
+                or lease.get("state") != "stopped-terminal"
+                or lease.get("terminal_receipt", {}).get("success") is not True
+                or lease.get("terminal_receipt", {}).get("terminal_event") != "turn.completed"
+                or not isinstance(lease.get("zero_proof"), Mapping)
+                or state.get("outbox") is not None
+            ):
+                raise RecoveryStateError("terminal abandonment requires stopped transport-success containment")
+            source_state_id = lease.get("source_state_id")
+            run_id = _lease_run_id(lease)
+            if not isinstance(source_state_id, str) or not isinstance(run_id, str):
+                raise RecoveryStateError("terminal abandonment lacks exact source or run binding")
+            source = self._read_source_locked(source_state_id)
+            checkpoint = source.get("public_checkpoint")
+            if not isinstance(checkpoint, Mapping):
+                raise RecoveryStateError("terminal abandonment lacks a materialized source checkpoint")
+            source_checkpoint_digest = checkpoint.get("checkpoint_digest")
+            if not isinstance(source_checkpoint_digest, str):
+                raise RecoveryStateError("terminal abandonment source checkpoint is malformed")
+            source, candidate_checkpoint = self._revalidate_source_locked(
+                source, checkpoint, persist=False
+            )
+            if candidate_checkpoint.get("reasons") != ["outside-set-drift"]:
+                raise RecoveryStateError("terminal abandonment requires exact outside-set-drift")
+            candidate_snapshot = candidate_checkpoint.get("candidate_snapshot")
+            if not isinstance(candidate_snapshot, Mapping):
+                raise RecoveryStateError("terminal abandonment lacks a candidate snapshot")
+            terminal_binding = lease["terminal_receipt"].get("binding_digest")
+            if not isinstance(terminal_binding, str):
+                raise RecoveryStateError("terminal abandonment terminal binding is missing")
+            zero_digest = _terminal_part_digest("zero", lease["zero_proof"])
+            candidate_digest = _domain_digest(_DOMAIN_CHECKPOINT, candidate_snapshot)
+            evidence_basis = {
+                "schema": "terminal-abandonment-v1",
+                "cause": "outside-set-drift",
+                "run_id": run_id,
+                "lease_id": lease_id,
+                "source_state_id": source_state_id,
+                "source_checkpoint_digest": source_checkpoint_digest,
+                "allowed_set_digest": lease.get("allowed_set_digest"),
+                "terminal_binding_digest": terminal_binding,
+                "zero_proof_digest": zero_digest,
+                "candidate_snapshot_digest": candidate_digest,
+            }
+            evidence_digest = _domain_digest(_DOMAIN_TERMINAL_ABANDONMENT, evidence_basis)
+            semantic = {
+                "disposition": "abandoned",
+                **evidence_basis,
+                "evidence_digest": evidence_digest,
+                "checkpoint_allowed": False,
+                "checkpoint_invalidation": "pending",
+            }
+            lease["semantic_disposition"] = semantic
+            lease["terminal_receipt"]["success"] = False
+            lease["terminal_receipt"]["semantic_rejected"] = True
+            lease["terminal_receipt"]["semantic_evidence_digest"] = evidence_digest
+            state["history"].append({"event": "terminal-abandonment-recorded", **semantic})
+            return self._commit_registry_locked(state)
+
+    def complete_terminal_abandonment(self, lease_id: str) -> dict[str, Any]:
+        """Complete the source invalidation bound by a recorded abandonment."""
+        with self._lock():
+            state = self._read_registry_locked(rebarrier=True)
+            lease = state.get("lease")
+            semantic = lease.get("semantic_disposition") if isinstance(lease, dict) else None
+            if (
+                not isinstance(lease, dict)
+                or lease.get("lease_id") != lease_id
+                or lease.get("state") != "stopped-terminal"
+                or not isinstance(semantic, dict)
+                or semantic.get("disposition") != "abandoned"
+            ):
+                raise RecoveryStateError("terminal abandonment is not bound to the stopped lease")
+            if semantic.get("checkpoint_invalidation") == "completed":
+                return state
+            if semantic.get("checkpoint_invalidation") != "pending":
+                raise RecoveryStateError("terminal abandonment invalidation is not pending")
+            source_state_id = semantic.get("source_state_id")
+            evidence_digest = semantic.get("evidence_digest")
+            if not isinstance(source_state_id, str) or not isinstance(evidence_digest, str):
+                raise RecoveryStateError("terminal abandonment binding is incomplete")
+            source = self._read_source_locked(source_state_id)
+            checkpoint = source.get("public_checkpoint")
+            if not isinstance(checkpoint, Mapping):
+                raise RecoveryStateError("terminal abandonment source checkpoint drifted")
+            retirement_event = None
+            if lease.get("lease_kind") == "recovery-target":
+                plan = lease.get("plan")
+                grant_id = lease.get("grant_id")
+                if (
+                    not isinstance(plan, Mapping)
+                    or not isinstance(grant_id, str)
+                    or not isinstance(plan.get("prompt_snapshot_id"), str)
+                    or not isinstance(plan.get("prompt_sha256"), str)
+                ):
+                    raise RecoveryStateError(
+                        "terminal abandonment recovery authorization binding is incomplete"
+                    )
+                retirement_event = {
+                    "event": "authorization-retired",
+                    "source_state_id": source_state_id,
+                    "grant_id": grant_id,
+                    "prompt_snapshot_id": plan["prompt_snapshot_id"],
+                    "prompt_sha256": plan["prompt_sha256"],
+                }
+                authorization = source.get("authorization")
+                if authorization is not None and (
+                    not isinstance(authorization, Mapping)
+                    or authorization.get("grant_id") != grant_id
+                    or authorization.get("prompt_snapshot_id")
+                    != plan["prompt_snapshot_id"]
+                    or authorization.get("prompt_sha256") != plan["prompt_sha256"]
+                ):
+                    raise RecoveryStateError(
+                        "terminal abandonment recovery authorization binding drifted"
+                    )
+            invalidation = source.get("checkpoint_invalidation")
+            if (
+                checkpoint.get("reasons") == ["terminal-abandoned-outside-set-drift"]
+                and invalidation
+                == {
+                    "reason": "terminal-abandoned-outside-set-drift",
+                    "evidence_digest": evidence_digest,
+                }
+            ):
+                candidate_snapshot = checkpoint.get("candidate_snapshot")
+                if (
+                    not isinstance(candidate_snapshot, Mapping)
+                    or _domain_digest(_DOMAIN_CHECKPOINT, candidate_snapshot)
+                    != semantic.get("candidate_snapshot_digest")
+                ):
+                    raise RecoveryStateError("terminal abandonment invalidated checkpoint drifted")
+                invalidated = dict(checkpoint)
+                if retirement_event is not None and source.get("authorization") is not None:
+                    source["authorization"] = None
+                    self._commit_source_locked(source)
+            else:
+                if checkpoint.get("checkpoint_digest") != semantic.get(
+                    "source_checkpoint_digest"
+                ):
+                    raise RecoveryStateError("terminal abandonment source checkpoint drifted")
+                source, candidate_checkpoint = self._revalidate_source_locked(
+                    source, checkpoint, persist=False
+                )
+                candidate_snapshot = candidate_checkpoint.get("candidate_snapshot")
+                if (
+                    candidate_checkpoint.get("reasons") != ["outside-set-drift"]
+                    or not isinstance(candidate_snapshot, Mapping)
+                    or _domain_digest(_DOMAIN_CHECKPOINT, candidate_snapshot)
+                    != semantic.get("candidate_snapshot_digest")
+                ):
+                    raise RecoveryStateError("terminal abandonment source checkpoint drifted")
+                invalidated = dict(candidate_checkpoint)
+                invalidated["disposition"] = "recovery-ineligible"
+                invalidated["reasons"] = ["terminal-abandoned-outside-set-drift"]
+                invalidated["checkpoint_digest"] = self._checkpoint_digest(invalidated)
+                source["public_checkpoint"] = invalidated
+                source["checkpoint_invalidation"] = {
+                    "reason": "terminal-abandoned-outside-set-drift",
+                    "evidence_digest": evidence_digest,
+                }
+                if retirement_event is not None:
+                    source["authorization"] = None
+                self._commit_source_locked(source)
+            semantic["checkpoint_invalidation"] = "completed"
+            semantic["checkpoint_digest"] = invalidated["checkpoint_digest"]
+            if retirement_event is not None and retirement_event not in state["history"]:
+                state["history"].append(retirement_event)
+            state["history"].append(
+                {
+                    "event": "terminal-abandonment-completed",
+                    "lease_id": lease_id,
+                    "run_id": semantic["run_id"],
+                    "source_state_id": source_state_id,
+                    "checkpoint_digest": semantic["checkpoint_digest"],
+                    "evidence_digest": evidence_digest,
+                }
+            )
+            return self._commit_registry_locked(state)
+
     def reject_semantic_handoff(
         self,
         lease_id: str,
@@ -3707,12 +4319,7 @@ class RecoveryRegistry:
                 or state.get("outbox") is not None
             ):
                 raise RecoveryStateError("semantic rejection requires stopped transport-success containment")
-            expected_run_id = (
-                lease.get("plan", {}).get("run_id")
-                if lease.get("lease_kind") == "recovery-target"
-                and isinstance(lease.get("plan"), Mapping)
-                else lease.get("run_id")
-            )
+            expected_run_id = _lease_run_id(lease)
             if run_id != expected_run_id:
                 raise RecoveryStateError("semantic rejection run binding drifted")
             if checkpoint_allowed is not (disposition == "blocked"):
@@ -3750,6 +4357,8 @@ class RecoveryRegistry:
         evidence_digest: str,
     ) -> dict[str, Any]:
         """Invalidate a previously materialized checkpoint after zero-write escalation."""
+        if reason not in {"semantic-needs-escalation", "terminal-abandoned-outside-set-drift"}:
+            raise RecoveryStateError("checkpoint invalidation reason is unsupported")
         _require_hex(evidence_digest, "checkpoint invalidation evidence digest")
         with self._lock():
             source = self._read_source_locked(source_state_id)
@@ -3919,7 +4528,7 @@ class RecoveryRegistry:
             semantic = lease.get("semantic_disposition")
             if (
                 isinstance(semantic, dict)
-                and semantic.get("disposition") == "needs-escalation"
+                and semantic.get("disposition") in {"needs-escalation", "abandoned"}
                 and semantic.get("checkpoint_invalidation") != "completed"
             ):
                 raise RecoveryStateError("guardian close requires completed checkpoint invalidation")
@@ -3939,7 +4548,7 @@ class RecoveryRegistry:
             semantic = lease.get("semantic_disposition")
             if (
                 isinstance(semantic, dict)
-                and semantic.get("disposition") == "needs-escalation"
+                and semantic.get("disposition") in {"needs-escalation", "abandoned"}
                 and semantic.get("checkpoint_invalidation") != "completed"
             ):
                 raise RecoveryStateError("contained release requires completed checkpoint invalidation")
@@ -3983,7 +4592,84 @@ class RecoveryRegistry:
             }
             archive["archive_digest"] = _domain_digest(_DOMAIN_TERMINAL_ARCHIVE, archive)
             _validate_terminal_archive(archive)
+            if lease.get("lease_kind") == "recovery-target":
+                source_state_id = lease.get("source_state_id")
+                grant_id = lease.get("grant_id")
+                plan = lease.get("plan")
+                if not isinstance(plan, Mapping):
+                    raise RecoveryStateError(
+                        "recovery terminal release lacks its target plan"
+                    )
+                prompt_snapshot_id = plan.get("prompt_snapshot_id")
+                prompt_sha256 = plan.get("prompt_sha256")
+                if isinstance(prompt_snapshot_id, str):
+                    if (
+                        not isinstance(source_state_id, str)
+                        or not isinstance(grant_id, str)
+                        or not isinstance(prompt_sha256, str)
+                    ):
+                        raise RecoveryStateError(
+                            "recovery terminal release authorization binding is incomplete"
+                        )
+                    consumed = next(
+                        (
+                            item
+                            for item in state["consumed_grants"]
+                            if item.get("grant_id") == grant_id
+                        ),
+                        None,
+                    )
+                    if not isinstance(consumed, Mapping) or any(
+                        consumed.get(field) != plan.get(field)
+                        for field in ("prompt_snapshot_id", "prompt_sha256")
+                    ):
+                        raise RecoveryStateError(
+                            "recovery terminal release consumed binding drifted"
+                        )
+                    source = self._read_source_locked(source_state_id)
+                    authorization = source.get("authorization")
+                    if authorization is not None and (
+                        not isinstance(authorization, Mapping)
+                        or authorization.get("grant_id") != grant_id
+                        or any(
+                            authorization.get(field) != plan.get(field)
+                            for field in ("prompt_snapshot_id", "prompt_sha256")
+                        )
+                    ):
+                        raise RecoveryStateError(
+                            "recovery terminal release authorization binding drifted"
+                        )
+                    retirement = {
+                        "event": "authorization-retired",
+                        "source_state_id": source_state_id,
+                        "grant_id": grant_id,
+                        "prompt_snapshot_id": prompt_snapshot_id,
+                        "prompt_sha256": prompt_sha256,
+                    }
+                    if authorization is not None:
+                        source["authorization"] = None
+                        self._commit_source_locked(source)
+                    if retirement not in state["history"]:
+                        state["history"].append(retirement)
             state["history"].append(archive)
+            prompt_snapshot_id = (
+                lease.get("plan", {}).get("prompt_snapshot_id")
+                if lease.get("lease_kind") == "recovery-target"
+                else lease.get("prompt_snapshot_id")
+            )
+            prompt_sha256 = (
+                lease.get("plan", {}).get("prompt_sha256")
+                if lease.get("lease_kind") == "recovery-target"
+                else lease.get("prompt_sha256")
+            )
+            if isinstance(prompt_snapshot_id, str) and isinstance(prompt_sha256, str):
+                tombstone = {
+                    "event": "prompt-snapshot-released",
+                    "prompt_snapshot_id": prompt_snapshot_id,
+                    "prompt_sha256": prompt_sha256,
+                }
+                if tombstone not in state["tombstones"]:
+                    state["tombstones"].append(tombstone)
             state["lease"] = None
             state["outbox"] = None
             return self._commit_registry_locked(state, rotate_epoch=True)

@@ -179,5 +179,6 @@ Accept a milestone only when all are true:
 - no confirmed actionable finding remains;
 - reviewer confidence and tier satisfy the complexity floor;
 - the current diff, not a stale earlier diff, was reviewed.
+- recovery-autonomy diffs prove owner-private prompt staging, no root workspace write during a non-vacant implementation lease, exact same-lifecycle abandonment with no handoff/new writer, reader-floor/legacy replay, and the closed decision/blocker/exhaustion boundary without a useless permission prompt.
 
 For every risk, an evidence-backed `ACCEPT` at the current configured step may close the gate when coverage is complete, validation is green, confidence is sufficient, and no configured trigger remains. Critical work uses only a map with `critical_confirmed = true`. If exact profile selection fails, keep the gate incomplete and report the terminal reason.

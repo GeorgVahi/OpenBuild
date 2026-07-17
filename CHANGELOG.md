@@ -4,6 +4,29 @@ OpenBuild follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.2.2] - 2026-07-17
+
+### Added
+
+- Added owner-private bounded UTF-8 prompt staging, stable external-file import, immutable prompt ID/SHA cross-binding, authorization retirement, and lifecycle-invoked reference-aware snapshot garbage collection. Blob, run prompt, and request bindings now cross the file/replace/metadata durability barriers before authority or release; POSIX owner/mode and Windows protected-DACL checks guard both normal and recovery prompt paths.
+- Added the exact replay-safe `terminal-abandonment-v1` outcome for stopped transport-success lifecycles whose only semantic failure is `outside-set-drift`; it permanently invalidates the source checkpoint, accepts no handoff, closes the existing guardian, archives the terminal evidence, and releases the same lease.
+
+### Changed
+
+- Same-scope recovery now reconciles the current lifecycle automatically before considering root completion. The root does not write any workspace path while the implementation registry is non-vacant, and it asks the user only for a material product, architecture, scope, permissions, privacy, security, destructive, external, or publication decision—not for permission that cannot change retained evidence.
+- New recovery writers remain explicit one-shot opt-in operations with an eligible immutable checkpoint and exact vacancy. Missing process/containment/ownership evidence remains `blocked`; exhausted safe executor capability is reported as `automation-exhausted` without starting another writer.
+- The recovery reader floor is now `2.2.2` after the first new durable transition. Exact 2.2.0/2.2.1 state remains readable without rewrite-on-read, and downgrade still requires explicit vacant retirement.
+- The packaged defaults, `codex-exec-explicit-model`, project → user → packaged precedence, and the ban on unknown-model agent routes remain unchanged; both README files now pin and describe 2.2.2.
+
+### Fixed
+
+- Prevented orchestrator prompt/spec/version artifacts from manufacturing `outside-set-drift`, and prevented repeated manual recovery authorization from being suggested when it cannot make an ineligible checkpoint or occupied registry usable.
+- Public runner receipts now return an opaque owner-allocated run handle plus prompt digest/classification instead of absolute run, profile, and artifact paths; legacy explicit paths remain controller-private.
+- Terminal reconciliation now rejects a normal or recovery-target directory whose owner-derived run ID differs from the current lease before any state mutation, and executable closed-outcome/root-completion audit records cover the user-decision boundary.
+- Recovery-target abandonment now reads its run ID from the shared lease/plan owner, and every recovery-target terminal outcome retires consumed authorization through a replay-safe source/registry boundary before GC. Prompt GC rebarriers and validates each authoritative private source before classification; malformed state fails closed, and grant/lease references outrank release tombstones.
+- Public receipt failures now use closed classifications rather than raw CLI, event, artifact, or filesystem error text; `external-action` matches the selected decision class exactly, and `_record-root-completion` durably records the audited automatic action before root edits.
+- Added end-to-end, legacy-forward, exact-schema, mutation, stable-object, prompt-retention, and platform privacy coverage for autonomous terminal reconciliation.
+
 ## [2.2.1] - 2026-07-16
 
 ### Changed

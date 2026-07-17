@@ -45,6 +45,8 @@ Reviewers read this protocol when the implementation mode is TDD-first, but rema
 - whether focused green and wider validation were actually run and interpreted correctly;
 - whether regression, edge, security, data, and concurrency coverage matches the task risk.
 
+For recovery-autonomy changes, the red/green evidence must include the owner-level sequence `outside-set-drift` -> retained stopped lease -> private same-lifecycle `terminal-abandonment-v1` -> checkpoint invalidation -> guardian close/archive/release, with no handoff, writer, or user prompt. Include mixed-reason no-mutation, legacy reader-floor forward replay, prompt stable-object/privacy/binding/retention boundaries, and the distinct `decision-required`, `blocked`, and `automation-exhausted` outcome contracts when those surfaces change.
+
 A reviewer must not edit tests or implementation, commit, push, or run write-capable remediation. It returns evidence-backed findings to the root. The root verifies each finding and routes confirmed behavioral remediation back through the red → green workflow before requesting another review.
 
 ## Completion record
