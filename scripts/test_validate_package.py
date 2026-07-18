@@ -52,7 +52,14 @@ class RecoveryControlPlanePackageTests(unittest.TestCase):
         self.assertEqual(validate_recovery_control_plane(self.runner, self.recovery), [])
 
         mutations = [
-            ("recovery", 'READER_FLOOR = "2.2.2"', 'READER_FLOOR = "1"', "reader floor"),
+            ("recovery", 'READER_FLOOR = "2.2.3"', 'READER_FLOOR = "1"', "reader floor"),
+            ("runner", '"run-dir-v1"', '"run-dir-v0"', "legacy terminal binding compatibility"),
+            ("recovery", '"terminal-root-completion-v1"', '"terminal-root-completion-v0"', "post-commit terminal schema"),
+            ("recovery", '"remediation-scope-v1"', '"remediation-scope-v0"', "post-commit remediation scope"),
+            ("recovery", "finalize_post_commit_root_completion", "trust_post_commit_root_completion", "atomic post-commit finalization"),
+            ("recovery", "complete_post_commit_root_completion", "trust_post_commit_completion", "post-commit checkpoint invalidation"),
+            ("recovery", "post_commit_root_completion_replay_binding", "trust_post_commit_replay", "full-tuple completed replay"),
+            ("recovery", '"authorization_consumption": "consumed"', '"authorization_consumption": "issued"', "intent-authoritative capability consumption"),
             ("recovery", 'b"openbuild-workspace-v2\\0"', 'b"openbuild-workspace-v1\\0"', "workspace key"),
             ("recovery", '"--porcelain=v2"', '"--porcelain=v1"', "Git provenance"),
             ("recovery", '"ls-files", "--stage", "-v", "-z"', '"ls-files", "--stage", "-z"', "Git index flags"),
@@ -207,6 +214,12 @@ class RecoveryControlPlanePackageTests(unittest.TestCase):
             ),
             (
                 "runner",
+                "_match_terminal_binding",
+                "_trust_terminal_binding",
+                "terminal binding compatibility match",
+            ),
+            (
+                "runner",
                 "def classify_recovery_outcome(",
                 "def describe_recovery_outcome(",
                 "closed recovery outcomes",
@@ -266,6 +279,12 @@ class RecoveryControlPlanePackageTests(unittest.TestCase):
                 "public receipt prompt classification",
             ),
             ("runner", "_reconcile-terminal-abandonment", "_force-unlock", "terminal abandonment command"),
+            ("runner", "_stage-post-commit-root-completion-action", "_stage-force-unlock", "hidden post-commit action snapshot command"),
+            ("runner", "_authorize-post-commit-root-completion", "_authorize-force-unlock", "hidden post-commit authorization command"),
+            ("runner", "_finalize-post-commit-root-completion", "_finalize-force-unlock", "hidden post-commit finalization command"),
+            ("runner", "_post_commit_root_completion_blocked", "_post_commit_root_completion_raw", "privacy-safe post-commit blocked output"),
+            ("runner", "_post_commit_root_completion_result", "_post_commit_root_completion_raw", "privacy-safe post-commit completed output"),
+            ("runner", "registry.post_commit_root_completion_replay_binding", "registry.trust_post_commit_root_completion", "full-tuple completed replay"),
         ]
         for field, token, replacement, expected in mutations:
             with self.subTest(expected=expected):
@@ -827,19 +846,19 @@ class ImplementationDelegationContractTests(unittest.TestCase):
 class ChangelogContractTests(unittest.TestCase):
     def test_release_manifest_version_and_latest_release_are_documented(self) -> None:
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-        self.assertEqual(validate_changelog_contract(changelog, "2.2.2"), [])
+        self.assertEqual(validate_changelog_contract(changelog, "2.2.3"), [])
         self.assertNotIn("## [2.1.1]", changelog)
 
-        mutated = changelog.replace("## [2.2.2]", "## [next]", 1)
-        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "2.2.2")))
+        mutated = changelog.replace("## [2.2.3]", "## [next]", 1)
+        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "2.2.3")))
 
     def test_released_version_is_pinned_in_both_install_channels(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         readme_ru = (ROOT / "README.ru.md").read_text(encoding="utf-8")
-        self.assertEqual(validate_release_docs_contract(readme, readme_ru, "2.2.2"), [])
+        self.assertEqual(validate_release_docs_contract(readme, readme_ru, "2.2.3"), [])
 
-        mutated = readme.replace("--ref v2.2.2", "--ref main")
-        self.assertTrue(any("README.md" in error for error in validate_release_docs_contract(mutated, readme_ru, "2.2.2")))
+        mutated = readme.replace("--ref v2.2.3", "--ref main")
+        self.assertTrue(any("README.md" in error for error in validate_release_docs_contract(mutated, readme_ru, "2.2.3")))
 
 
 class DecisionAuthorityTraceTests(unittest.TestCase):

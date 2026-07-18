@@ -53,6 +53,509 @@ def run_git(workspace: Path, *arguments: str) -> str:
 
 
 class RegistryContractTests(unittest.TestCase):
+    def test_m1_post_commit_root_completion_keeps_root_scope_outside_producer_allowlist(self) -> None:
+        """A published task commit may include a separately authorized root artifact."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = self.make_git_workspace(root)
+            owner = self.owner(workspace, root / "state")
+            preflight = self.reserve_source(owner, run_id="post-commit-run")
+            owner.claim_contained_launch("normal-1", "contained-token")
+            owner.bind_process_unactivated(
+                "normal-1",
+                allowed_set_digest=preflight["allowed_set_digest"],
+                provider_receipt=self.provider_receipt(),
+                process_receipt=self.process_receipt(),
+            )
+            owner.commit_activation("normal-1", preflight["allowed_set_digest"])
+            owner.finalize_prepared_checkpoint(preflight, source_receipt_digest="a" * 64)
+            parent = run_git(workspace, "rev-parse", "HEAD")
+            (workspace / "allowed" / "seed.txt").write_text("producer\n", encoding="utf-8", newline="\n")
+            (workspace / "root-completion.txt").write_text("root\n", encoding="utf-8", newline="\n")
+            run_git(workspace, "add", "allowed/seed.txt", "root-completion.txt")
+            run_git(workspace, "commit", "--quiet", "-m", "task completion")
+            task_commit = run_git(workspace, "rev-parse", "HEAD")
+            self.assertEqual(run_git(workspace, "rev-parse", f"{task_commit}^"), parent)
+            owner.record_terminal_evidence(
+                "normal-1", self.terminal_receipt(True), preflight["allowed_set_digest"]
+            )
+            owner.prove_contained_tree_empty(
+                "normal-1", self.zero_proof(), preflight["allowed_set_digest"]
+            )
+            checkpoint = owner.revalidate_checkpoint(
+                owner.read_private_source(preflight["source_state_id"])["public_checkpoint"]
+            )
+            self.assertEqual(checkpoint["reasons"], ["git-control-plane-drift", "outside-set-drift"])
+            manifest = owner.remediation_scope_manifest(
+                task_commit=task_commit,
+                parent_commit=parent,
+                source_checkpoint_digest=checkpoint["checkpoint_digest"],
+                specification_revision="R-029",
+                milestone="M2c-source",
+                producer_allowed_set_digest=preflight["allowed_set_digest"],
+                root_verification_digest="f" * 64,
+                entries=[
+                    {"path": "allowed/seed.txt", "role": "producer"},
+                    {"path": "root-completion.txt", "role": "root-completion"},
+                ],
+            )
+            for entries in (
+                [{"path": "allowed/seed.txt", "role": "producer"}],
+                [
+                    {"path": "allowed/seed.txt", "role": "producer"},
+                    {"path": "root-completion.txt", "role": "root-completion"},
+                    {"path": "extra.txt", "role": "root-completion"},
+                ],
+            ):
+                candidate = owner.remediation_scope_manifest(
+                    task_commit=task_commit,
+                    parent_commit=parent,
+                    source_checkpoint_digest=checkpoint["checkpoint_digest"],
+                    specification_revision="R-029",
+                    milestone="M2c-source",
+                    producer_allowed_set_digest=preflight["allowed_set_digest"],
+                    root_verification_digest="f" * 64,
+                    entries=entries,
+                )
+                self.assertNotEqual(
+                    {item["path"] for item in candidate["entries"]},
+                    {"allowed/seed.txt", "root-completion.txt"},
+                )
+            action_snapshot = owner.build_post_commit_root_completion_action_snapshot(
+                run_id="post-commit-run",
+                task_commit=task_commit,
+                root_verification_digest="f" * 64,
+                source_checkpoint_digest=checkpoint["checkpoint_digest"],
+                remediation_scope=manifest,
+            )
+            action_snapshot_bytes = json.dumps(
+                action_snapshot,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            source_before_snapshot_binding = owner.source_path(
+                preflight["source_state_id"]
+            ).read_bytes()
+            mismatched_snapshot = dict(action_snapshot)
+            mismatched_snapshot["run_id"] = "different-run"
+            mismatched_snapshot_bytes = json.dumps(
+                mismatched_snapshot,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            with self.assertRaisesRegex(
+                recovery_state.RecoveryStateError, "snapshot tuple drifted"
+            ):
+                owner.stage_post_commit_root_completion_action(
+                    run_id="post-commit-run",
+                    task_commit=task_commit,
+                    root_verification_digest="f" * 64,
+                    source_checkpoint_digest=checkpoint["checkpoint_digest"],
+                    remediation_scope=manifest,
+                    action_snapshot=mismatched_snapshot,
+                    action_snapshot_id="8" * 64,
+                    action_snapshot_sha256=hashlib.sha256(
+                        mismatched_snapshot_bytes
+                    ).hexdigest(),
+                )
+            self.assertEqual(
+                owner.source_path(preflight["source_state_id"]).read_bytes(),
+                source_before_snapshot_binding,
+            )
+            legacy_floor = owner.state()
+            legacy_floor["reader_floor"] = "2.2.2"
+            legacy_floor["digest"] = recovery_state._digest(legacy_floor)
+            owner.path.write_text(
+                json.dumps(legacy_floor, sort_keys=True) + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            with mock.patch.object(
+                owner,
+                "_commit_registry_locked",
+                side_effect=recovery_state.RecoveryStateError(
+                    "fault after first 2.2.3 source shape"
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    recovery_state.RecoveryStateError,
+                    "fault after first 2.2.3 source shape",
+                ):
+                    owner.stage_post_commit_root_completion_action(
+                        run_id="post-commit-run",
+                        task_commit=task_commit,
+                        root_verification_digest="f" * 64,
+                        source_checkpoint_digest=checkpoint["checkpoint_digest"],
+                        remediation_scope=manifest,
+                        action_snapshot=action_snapshot,
+                        action_snapshot_id="9" * 64,
+                        action_snapshot_sha256=hashlib.sha256(
+                            action_snapshot_bytes
+                        ).hexdigest(),
+                    )
+            self.assertEqual(owner.state()["reader_floor"], "2.2.2")
+            action = owner.stage_post_commit_root_completion_action(
+                run_id="post-commit-run",
+                task_commit=task_commit,
+                root_verification_digest="f" * 64,
+                source_checkpoint_digest=checkpoint["checkpoint_digest"],
+                remediation_scope=manifest,
+                action_snapshot=action_snapshot,
+                action_snapshot_id="9" * 64,
+                action_snapshot_sha256=hashlib.sha256(action_snapshot_bytes).hexdigest(),
+            )
+            self.assertEqual(owner.state()["reader_floor"], "2.2.3")
+            authorization = owner.issue_post_commit_root_completion_authorization(action)
+            issued_source = owner.read_private_source(preflight["source_state_id"])
+            issued_action = issued_source["post_commit_root_completion"]["action"]
+            self.assertEqual(issued_action["status"], "issued")
+            self.assertEqual(issued_action["action_snapshot_id"], "9" * 64)
+            self.assertEqual(
+                issued_action["action_snapshot_sha256"],
+                hashlib.sha256(action_snapshot_bytes).hexdigest(),
+            )
+            with self.assertRaisesRegex(
+                recovery_state.RecoveryStateError, "already issued"
+            ):
+                owner.issue_post_commit_root_completion_authorization(action)
+            with self.assertRaisesRegex(
+                recovery_state.RecoveryStateError, "already issued"
+            ):
+                owner.stage_post_commit_root_completion_action(
+                    run_id="post-commit-run",
+                    task_commit=task_commit,
+                    root_verification_digest="f" * 64,
+                    source_checkpoint_digest=checkpoint["checkpoint_digest"],
+                    remediation_scope=manifest,
+                    action_snapshot=action_snapshot,
+                    action_snapshot_id="9" * 64,
+                    action_snapshot_sha256=hashlib.sha256(
+                        action_snapshot_bytes
+                    ).hexdigest(),
+                )
+            expired_authorization = issued_source["post_commit_root_completion"][
+                "authorization"
+            ]
+            with mock.patch.object(
+                recovery_state.time,
+                "time_ns",
+                return_value=expired_authorization["expires_at_ns"] + 1,
+            ):
+                with self.assertRaisesRegex(
+                    recovery_state.RecoveryStateError, "safety proof is incomplete"
+                ):
+                    owner.finalize_post_commit_root_completion(
+                        "normal-1",
+                        run_id="post-commit-run",
+                        task_commit=task_commit,
+                        root_verification_digest="f" * 64,
+                        authorization_handle=expired_authorization[
+                            "authorization_handle"
+                        ],
+                        remediation_scope=manifest,
+                        terminal_binding_format="run-dir-v1",
+                    )
+                replacement_snapshot = (
+                    owner.build_post_commit_root_completion_action_snapshot(
+                        run_id="post-commit-run",
+                        task_commit=task_commit,
+                        root_verification_digest="f" * 64,
+                        source_checkpoint_digest=checkpoint["checkpoint_digest"],
+                        remediation_scope=manifest,
+                    )
+                )
+                replacement_snapshot_bytes = json.dumps(
+                    replacement_snapshot,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                replacement_action = owner.stage_post_commit_root_completion_action(
+                    run_id="post-commit-run",
+                    task_commit=task_commit,
+                    root_verification_digest="f" * 64,
+                    source_checkpoint_digest=checkpoint["checkpoint_digest"],
+                    remediation_scope=manifest,
+                    action_snapshot=replacement_snapshot,
+                    action_snapshot_id="7" * 64,
+                    action_snapshot_sha256=hashlib.sha256(
+                        replacement_snapshot_bytes
+                    ).hexdigest(),
+                )
+                authorization = owner.issue_post_commit_root_completion_authorization(
+                    replacement_action
+                )
+            with self.assertRaisesRegex(
+                recovery_state.RecoveryStateError, "safety proof is incomplete"
+            ):
+                owner.finalize_post_commit_root_completion(
+                    "normal-1",
+                    run_id="post-commit-run",
+                    task_commit=task_commit,
+                    root_verification_digest="f" * 64,
+                    authorization_handle=expired_authorization["authorization_handle"],
+                    remediation_scope=manifest,
+                    terminal_binding_format="run-dir-v1",
+                )
+            (workspace / "later-user-change.txt").write_text(
+                "untouched\n", encoding="utf-8", newline="\n"
+            )
+            registry_before = owner.path.read_bytes()
+            source_before = owner.source_path(preflight["source_state_id"]).read_bytes()
+            malformed_scope = dict(manifest)
+            malformed_scope["entries"] = manifest["entries"][:-1]
+            with self.assertRaisesRegex(recovery_state.RecoveryStateError, "remediation scope"):
+                owner.finalize_post_commit_root_completion(
+                    "normal-1",
+                    run_id="post-commit-run",
+                    task_commit=task_commit,
+                    root_verification_digest="f" * 64,
+                    authorization_handle=authorization["authorization_handle"],
+                    remediation_scope=malformed_scope,
+                    terminal_binding_format="run-dir-v1",
+                )
+            self.assertEqual(owner.path.read_bytes(), registry_before)
+            self.assertEqual(
+                owner.source_path(preflight["source_state_id"]).read_bytes(), source_before
+            )
+            role_overlap = owner.remediation_scope_manifest(
+                task_commit=task_commit,
+                parent_commit=parent,
+                source_checkpoint_digest=checkpoint["checkpoint_digest"],
+                specification_revision="R-029",
+                milestone="M2c-source",
+                producer_allowed_set_digest=preflight["allowed_set_digest"],
+                root_verification_digest="f" * 64,
+                entries=[
+                    {"path": "allowed/seed.txt", "role": "root-completion"},
+                    {"path": "root-completion.txt", "role": "producer"},
+                ],
+            )
+            with self.assertRaisesRegex(recovery_state.RecoveryStateError, "scope"):
+                owner.finalize_post_commit_root_completion(
+                    "normal-1",
+                    run_id="post-commit-run",
+                    task_commit=task_commit,
+                    root_verification_digest="f" * 64,
+                    authorization_handle=authorization["authorization_handle"],
+                    remediation_scope=role_overlap,
+                    terminal_binding_format="run-dir-v1",
+                )
+            self.assertEqual(owner.path.read_bytes(), registry_before)
+            self.assertEqual(
+                owner.source_path(preflight["source_state_id"]).read_bytes(), source_before
+            )
+            with self.assertRaisesRegex(
+                recovery_state.RecoveryStateError, "legacy terminal binding"
+            ):
+                owner.finalize_post_commit_root_completion(
+                    "normal-1",
+                    run_id="post-commit-run",
+                    task_commit=task_commit,
+                    root_verification_digest="f" * 64,
+                    authorization_handle=authorization["authorization_handle"],
+                    remediation_scope=manifest,
+                    terminal_binding_format="run-id-v2",
+                )
+
+            race_source = owner.read_private_source(preflight["source_state_id"])
+            race_checkpoint = race_source["public_checkpoint"]
+            proof_source, candidate_checkpoint = owner._revalidate_source_locked(
+                json.loads(json.dumps(race_source)),
+                race_checkpoint,
+                persist=False,
+            )
+            drifted_checkpoint = json.loads(json.dumps(candidate_checkpoint))
+            drifted_checkpoint["checkpoint_digest"] = "0" * 64
+            registry_before_barrier = owner.path.read_bytes()
+            source_before_barrier = owner.source_path(
+                preflight["source_state_id"]
+            ).read_bytes()
+            with mock.patch.object(
+                owner,
+                "_revalidate_source_locked",
+                side_effect=[
+                    (proof_source, candidate_checkpoint),
+                    (proof_source, drifted_checkpoint),
+                ],
+            ):
+                with self.assertRaisesRegex(
+                    recovery_state.RecoveryStateError,
+                    "Git provenance drifted before durable intent",
+                ):
+                    owner.finalize_post_commit_root_completion(
+                        "normal-1",
+                        run_id="post-commit-run",
+                        task_commit=task_commit,
+                        root_verification_digest="f" * 64,
+                        authorization_handle=authorization["authorization_handle"],
+                        remediation_scope=manifest,
+                        terminal_binding_format="run-dir-v1",
+                    )
+            self.assertEqual(owner.path.read_bytes(), registry_before_barrier)
+            self.assertEqual(
+                owner.source_path(preflight["source_state_id"]).read_bytes(),
+                source_before_barrier,
+            )
+
+            with mock.patch.object(
+                owner,
+                "_commit_source_locked",
+                side_effect=recovery_state.RecoveryStateError("fault after durable intent"),
+            ):
+                with self.assertRaisesRegex(
+                    recovery_state.RecoveryStateError, "fault after durable intent"
+                ):
+                    owner.finalize_post_commit_root_completion(
+                        "normal-1",
+                        run_id="post-commit-run",
+                        task_commit=task_commit,
+                        root_verification_digest="f" * 64,
+                        authorization_handle=authorization["authorization_handle"],
+                        remediation_scope=manifest,
+                        terminal_binding_format="run-dir-v1",
+                    )
+
+            reloaded = self.owner(workspace, root / "state")
+            interrupted = reloaded.state()
+            interrupted_semantic = interrupted["lease"]["semantic_disposition"]
+            self.assertEqual(interrupted_semantic["authorization_consumption"], "consumed")
+            self.assertEqual(interrupted_semantic["terminal_binding_format"], "run-dir-v1")
+            interrupted_source = reloaded.read_private_source(preflight["source_state_id"])
+            self.assertEqual(
+                interrupted_source["post_commit_root_completion"]["authorization"]["status"],
+                "issued",
+            )
+            registry_before_scope_replay = reloaded.path.read_bytes()
+            source_before_scope_replay = reloaded.source_path(
+                preflight["source_state_id"]
+            ).read_bytes()
+            with self.assertRaisesRegex(
+                recovery_state.RecoveryStateError, "remediation scope drifted"
+            ):
+                reloaded.finalize_post_commit_root_completion(
+                    "normal-1",
+                    run_id="post-commit-run",
+                    task_commit=task_commit,
+                    root_verification_digest="f" * 64,
+                    authorization_handle=authorization["authorization_handle"],
+                    remediation_scope=role_overlap,
+                    terminal_binding_format="run-dir-v1",
+                )
+            self.assertEqual(reloaded.path.read_bytes(), registry_before_scope_replay)
+            self.assertEqual(
+                reloaded.source_path(preflight["source_state_id"]).read_bytes(),
+                source_before_scope_replay,
+            )
+            completed = reloaded.finalize_post_commit_root_completion(
+                "normal-1",
+                run_id="post-commit-run",
+                task_commit=task_commit,
+                root_verification_digest="f" * 64,
+                authorization_handle=authorization["authorization_handle"],
+                remediation_scope=manifest,
+                terminal_binding_format="run-dir-v1",
+            )
+
+            self.assertEqual(completed["lease"]["semantic_disposition"]["schema"], "terminal-root-completion-v1")
+            consumed_source = reloaded.read_private_source(preflight["source_state_id"])
+            self.assertEqual(
+                consumed_source["post_commit_root_completion"]["authorization"]["status"],
+                "consumed",
+            )
+            self.assertEqual(
+                len(
+                    [
+                        event
+                        for event in completed["history"]
+                        if event.get("event") == "terminal-root-completion-recorded"
+                    ]
+                ),
+                1,
+            )
+            self.assertFalse(completed["lease"]["terminal_receipt"]["success"])
+            with mock.patch.object(
+                reloaded,
+                "_commit_registry_locked",
+                side_effect=recovery_state.RecoveryStateError(
+                    "fault after durable source invalidation"
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    recovery_state.RecoveryStateError,
+                    "fault after durable source invalidation",
+                ):
+                    reloaded.complete_post_commit_root_completion("normal-1")
+            pending_after_invalidation = reloaded.state()
+            self.assertEqual(
+                pending_after_invalidation["lease"]["semantic_disposition"][
+                    "checkpoint_invalidation"
+                ],
+                "pending",
+            )
+            invalidated_source = reloaded.read_private_source(preflight["source_state_id"])
+            self.assertEqual(
+                invalidated_source["checkpoint_invalidation"],
+                {
+                    "reason": "post-commit-root-completed",
+                    "evidence_digest": authorization["authorization_digest"],
+                },
+            )
+            replay_owner = self.owner(workspace, root / "state")
+            replayed_completion = replay_owner.complete_post_commit_root_completion("normal-1")
+            self.assertEqual(
+                replayed_completion["lease"]["semantic_disposition"][
+                    "checkpoint_invalidation"
+                ],
+                "completed",
+            )
+            self.assertEqual(
+                len(
+                    [
+                        event
+                        for event in replayed_completion["history"]
+                        if event.get("event") == "terminal-root-completion-completed"
+                    ]
+                ),
+                1,
+            )
+            replay_owner.acknowledge_guardian_close("normal-1", self.guardian_close())
+            replay_owner.release_contained_terminal("normal-1")
+            replay_binding = replay_owner.post_commit_root_completion_replay_binding(
+                lease_id="normal-1",
+                run_id="post-commit-run",
+                task_commit=task_commit,
+                root_verification_digest="f" * 64,
+                authorization_handle=authorization["authorization_handle"],
+                remediation_scope_digest=manifest["digest"],
+            )
+            self.assertEqual(replay_binding["schema"], "terminal-root-completion-artifact-v1")
+            self.assertEqual(replay_binding["task_commit"], task_commit)
+            self.assertEqual(replay_binding["terminal_binding_format"], "run-dir-v1")
+            for field, value in (
+                ("authorization_handle", "0" * 64),
+                ("root_verification_digest", "e" * 64),
+                ("remediation_scope_digest", "d" * 64),
+            ):
+                arguments = {
+                    "lease_id": "normal-1",
+                    "run_id": "post-commit-run",
+                    "task_commit": task_commit,
+                    "root_verification_digest": "f" * 64,
+                    "authorization_handle": authorization["authorization_handle"],
+                    "remediation_scope_digest": manifest["digest"],
+                }
+                arguments[field] = value
+                with self.assertRaisesRegex(
+                    recovery_state.RecoveryStateError, "replay binding drifted"
+                ):
+                    replay_owner.post_commit_root_completion_replay_binding(**arguments)
+            self.assertNotIn("root-completion.txt", json.dumps(completed, sort_keys=True))
+            self.assertEqual(
+                (workspace / "later-user-change.txt").read_text(encoding="utf-8"), "untouched\n"
+            )
     def make_git_workspace(self, root: Path) -> Path:
         workspace = root / "workspace"
         workspace.mkdir()
@@ -224,7 +727,7 @@ class RegistryContractTests(unittest.TestCase):
             self.assertEqual(first.workspace_key, second.workspace_key)
             self.assertTrue(first.directory.is_relative_to(state_root))
             self.assertFalse(first.directory.is_relative_to(workspace))
-            self.assertEqual(state["reader_floor"], "2.2.2")
+            self.assertEqual(state["reader_floor"], "2.2.3")
             self.assertEqual(state["identity_version"], 2)
             self.assertEqual(state["workspace_key"], first.workspace_key)
             self.assertIn("git_common_dir_identity", state)
@@ -2014,7 +2517,7 @@ class RegistryContractTests(unittest.TestCase):
 
             replay = self.owner(workspace, root / "state").state()
             self.assertEqual(replay["digest"], released["digest"])
-            self.assertEqual(replay["reader_floor"], "2.2.2")
+            self.assertEqual(replay["reader_floor"], "2.2.3")
 
     def test_ac05_mixed_drift_rejects_terminal_abandonment_without_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -2270,30 +2773,42 @@ class RegistryContractTests(unittest.TestCase):
             current = owner.prove_contained_tree_empty(
                 "normal-1", self.zero_proof(), preflight["allowed_set_digest"]
             )
-            legacy = dict(current)
+            legacy: dict[str, object] | None = None
+            for reader_floor in ("2.2.0", "2.2.1", "2.2.2"):
+                with self.subTest(reader_floor=reader_floor):
+                    legacy = dict(current)
+                    legacy["reader_floor"] = reader_floor
+                    legacy["digest"] = recovery_state._digest(legacy)
+                    owner.path.write_text(
+                        json.dumps(legacy, sort_keys=True) + "\n",
+                        encoding="utf-8",
+                        newline="\n",
+                    )
+                    legacy_bytes = owner.path.read_bytes()
+
+                    loaded = self.owner(workspace, root / "state").state()
+
+                    self.assertEqual(loaded["reader_floor"], reader_floor)
+                    self.assertEqual(loaded["generation"], legacy["generation"])
+                    self.assertEqual(owner.path.read_bytes(), legacy_bytes)
+
+            assert legacy is not None
             legacy["reader_floor"] = "2.2.1"
             legacy["digest"] = recovery_state._digest(legacy)
             owner.path.write_text(
                 json.dumps(legacy, sort_keys=True) + "\n", encoding="utf-8", newline="\n"
             )
-            legacy_bytes = owner.path.read_bytes()
-
             upgraded_owner = self.owner(workspace, root / "state")
-            loaded = upgraded_owner.state()
-
-            self.assertEqual(loaded["reader_floor"], "2.2.1")
-            self.assertEqual(loaded["generation"], legacy["generation"])
-            self.assertEqual(owner.path.read_bytes(), legacy_bytes)
 
             pending = upgraded_owner.record_terminal_abandonment("normal-1")
-            self.assertEqual(pending["reader_floor"], "2.2.2")
+            self.assertEqual(pending["reader_floor"], "2.2.3")
             upgraded_owner.complete_terminal_abandonment("normal-1")
             upgraded_owner.acknowledge_guardian_close("normal-1", self.guardian_close())
             released = upgraded_owner.release_contained_terminal("normal-1")
             replay = self.owner(workspace, root / "state").state()
 
             self.assertEqual(replay["digest"], released["digest"])
-            self.assertEqual(replay["reader_floor"], "2.2.2")
+            self.assertEqual(replay["reader_floor"], "2.2.3")
             self.assertEqual(
                 len(
                     [

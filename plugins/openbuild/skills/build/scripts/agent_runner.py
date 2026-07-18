@@ -3222,6 +3222,105 @@ def _terminal_binding(receipt: Mapping[str, Any], *, run_id: str) -> dict[str, A
     return {"run_id": run_id, **{field: receipt.get(field) for field in fields}}
 
 
+def _require_private_run_path_identity(run_dir: Path, run_id: str) -> Path:
+    """Bind a terminal run to the immutable private paths recorded at creation."""
+    try:
+        resolved = run_dir.resolve(strict=True)
+        request = read_json(resolved / "request.json")
+        prompt_value = request.get("prompt_file")
+        command = request.get("command")
+        if (
+            run_dir.name != run_id
+            or not isinstance(prompt_value, str)
+            or not isinstance(command, list)
+            or command.count("-o") != 1
+        ):
+            raise RunnerError("terminal receipt private run path identity drifted")
+        prompt = Path(prompt_value).expanduser().resolve(strict=True)
+        expected_prompt = resolved / "prompt.md"
+        result_index = command.index("-o") + 1
+        if result_index >= len(command) or not isinstance(command[result_index], str):
+            raise RunnerError("terminal receipt private run path identity drifted")
+        result = Path(command[result_index]).expanduser().resolve(strict=False)
+        if (
+            prompt.name != "prompt.md"
+            or not expected_prompt.is_file()
+            or not prompt.samefile(expected_prompt)
+            or not prompt.parent.samefile(resolved)
+            or result.name != "result.md"
+            or not result.parent.samefile(resolved)
+        ):
+            raise RunnerError("terminal receipt private run path identity drifted")
+    except (KeyError, OSError, ValueError) as exc:
+        raise RunnerError("terminal receipt private run path identity drifted") from exc
+    return resolved
+
+
+def _terminal_binding_candidate(
+    receipt: Mapping[str, Any],
+    *,
+    run_dir: Path,
+    run_id: str,
+    format: str,
+) -> dict[str, Any]:
+    """Reconstruct one immutable terminal digest candidate without publishing paths."""
+    resolved = _require_private_run_path_identity(run_dir, run_id)
+    fields = (
+        "status",
+        "agent_name",
+        "task_name",
+        "lease_id",
+        "activated",
+        "configured_model",
+        "model_reasoning_effort",
+        "sandbox",
+        "worker_pid",
+        "worker_process_identity",
+        "codex_pid",
+        "codex_process_identity",
+        "terminal_event",
+        "codex_exit_evidence",
+        "codex_exit_code",
+        "result_evidence",
+        "process_tree_stopped",
+    )
+    if format == "run-id-v2":
+        payload = _terminal_binding(receipt, run_id=run_id)
+    elif format == "run-dir-v1":
+        # This is the exact v2.2.0/v2.2.1 projection: the path field was
+        # first and was serialized with str(run_dir.resolve()).  The tag is
+        # deliberately outside the historical payload and therefore hash.
+        payload = {"run_dir": str(resolved), **{field: receipt.get(field) for field in fields}}
+    else:
+        raise RunnerError("terminal receipt binding format is unsupported")
+    return {"format": format, "payload": payload}
+
+
+def _terminal_binding_candidates(
+    receipt: Mapping[str, Any], *, run_dir: Path, run_id: str
+) -> tuple[dict[str, Any], ...]:
+    """Return the only two released private projections in stable order."""
+    return (
+        _terminal_binding_candidate(receipt, run_dir=run_dir, run_id=run_id, format="run-id-v2"),
+        _terminal_binding_candidate(receipt, run_dir=run_dir, run_id=run_id, format="run-dir-v1"),
+    )
+
+
+def _match_terminal_binding(
+    receipt: Mapping[str, Any], *, run_dir: Path, run_id: str, stored_digest: str
+) -> dict[str, Any]:
+    if not re.fullmatch(r"[0-9a-f]{64}", stored_digest):
+        raise RunnerError("terminal receipt binding digest is malformed")
+    matches = [
+        candidate
+        for candidate in _terminal_binding_candidates(receipt, run_dir=run_dir, run_id=run_id)
+        if sha256_bytes(_canonical_json_bytes(candidate["payload"])) == stored_digest
+    ]
+    if len(matches) != 1:
+        raise RunnerError("terminal receipt binding drifted during reload")
+    return matches[0]
+
+
 def _privacy_safe_classifications(values: tuple[str, ...], label: str) -> list[str]:
     normalized = sorted(set(values))
     if not normalized or any(
@@ -3446,6 +3545,9 @@ def reconcile_implementation_registry(
     expected_run_id = _expected_lease_run_id(lease)
     if run_dir.name != expected_run_id:
         raise RunnerError("terminal receipt run ID does not own the current workspace lease")
+    if receipt.get("lease_id") != lease_id:
+        raise RunnerError("terminal receipt lease does not own the current workspace lease")
+    _require_private_run_path_identity(run_dir, expected_run_id)
 
     try:
         secret = _guardian_secret(run_dir)
@@ -3479,14 +3581,24 @@ def reconcile_implementation_registry(
                 {
                     "success": receipt.get("status") == "completed",
                     "binding_digest": binding_digest,
+                    "binding_format": "run-id-v2",
                     "terminal_event": receipt.get("terminal_event"),
                 },
                 allowed_set_digest,
             )
             lease = state["lease"]
             state_name = lease["state"]
-        elif lease.get("terminal_receipt", {}).get("binding_digest") != binding_digest:
-            raise RecoveryStateError("terminal receipt binding drifted during reload")
+        else:
+            stored_binding = lease.get("terminal_receipt", {}).get("binding_digest")
+            if not isinstance(stored_binding, str):
+                raise RecoveryStateError("terminal receipt binding drifted during reload")
+            _match_terminal_binding(
+                receipt,
+                run_dir=run_dir,
+                run_id=expected_run_id,
+                stored_digest=stored_binding,
+            )
+            binding_digest = stored_binding
         if state_name == "terminal-pending-stop":
             state = registry.prove_contained_tree_empty(
                 lease_id,
@@ -3794,6 +3906,269 @@ def reconcile_terminal_abandonment_run(args: argparse.Namespace) -> int:
     except (OSError, RecoveryStateError) as exc:
         raise RunnerError(f"terminal abandonment failed closed: {exc}") from exc
     print(json.dumps(read_json(run_dir / "terminal-abandonment.json"), ensure_ascii=False, indent=2))
+    return 0
+
+
+def _post_commit_root_completion_blocked() -> dict[str, Any]:
+    return {
+        "outcome": "blocked",
+        "missing_evidence": ["missing-evidence"],
+        "required_action": "restore-safety-evidence",
+        "writer_action": "none",
+    }
+
+
+def _post_commit_root_completion_result(task_commit: str) -> dict[str, Any]:
+    return {
+        "outcome": "terminal-root-completed",
+        "schema": "terminal-root-completion-v1",
+        "task_commit": task_commit,
+        "registry_vacant": True,
+        "writer_action": "none",
+    }
+
+
+def _post_commit_root_completion_completed(binding: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate the private full-tuple artifact written only after release."""
+    required = {
+        "schema",
+        "lease_id",
+        "run_id",
+        "source_state_id",
+        "task_commit",
+        "parent_commit",
+        "root_verification_digest",
+        "producer_allowed_set_digest",
+        "remediation_scope_digest",
+        "action_snapshot_id",
+        "action_snapshot_sha256",
+        "user_action_digest",
+        "authorization_digest",
+        "authorization_consumption",
+        "terminal_binding_format",
+        "terminal_binding_digest",
+        "checkpoint_digest",
+        "archive_digest",
+    }
+    if (
+        not isinstance(binding, Mapping)
+        or set(binding) != required
+        or binding.get("schema") != "terminal-root-completion-artifact-v1"
+        or binding.get("authorization_consumption") != "consumed"
+        or binding.get("terminal_binding_format") != "run-dir-v1"
+    ):
+        raise RecoveryStateError("post-commit completed replay binding drifted")
+    return dict(binding)
+
+
+def _read_private_remediation_scope(repo: Path, path_value: str) -> dict[str, Any]:
+    path = Path(path_value).expanduser()
+    try:
+        value = json.loads(_read_stable_external_prompt(repo, path).decode("utf-8"))
+    except (OSError, UnicodeError, ValueError, RunnerError) as exc:
+        raise RecoveryStateError("post-commit remediation scope is unavailable") from exc
+    if not isinstance(value, dict):
+        raise RecoveryStateError("post-commit remediation scope is malformed")
+    return value
+
+
+def _require_legacy_post_commit_binding(
+    run_dir: Path, receipt: Mapping[str, Any], registry: RecoveryRegistry
+) -> str:
+    state = registry.state()
+    lease = state.get("lease")
+    if not isinstance(lease, Mapping):
+        raise RecoveryStateError("post-commit terminal lease is unavailable")
+    run_id = _expected_lease_run_id(lease)
+    stored_digest = lease.get("terminal_receipt", {}).get("binding_digest")
+    if not isinstance(stored_digest, str):
+        raise RecoveryStateError("post-commit terminal binding is unavailable")
+    matched = _match_terminal_binding(
+        receipt,
+        run_dir=run_dir,
+        run_id=run_id,
+        stored_digest=stored_digest,
+    )
+    if matched.get("format") != "run-dir-v1":
+        raise RecoveryStateError("post-commit remediation requires a legacy terminal binding")
+    return stored_digest
+
+
+def stage_post_commit_root_completion_action_run(args: argparse.Namespace) -> int:
+    """Create one canonical confirmed action snapshot without issuing capability."""
+    try:
+        run_dir = resolve_run_reference(args.run_dir)
+        request = read_json(run_dir / "request.json")
+        registry = recovery_registry_for_agent(request["profile"]["name"], Path(request["repo"]))
+        if registry is None:
+            raise RecoveryStateError("post-commit registry is unavailable")
+        audit_guardian_health(run_dir)
+        receipt = public_receipt(run_dir)
+        if receipt.get("status") != "completed" or receipt.get("process_tree_stopped") is not True:
+            raise RecoveryStateError("post-commit terminal transport evidence is unavailable")
+        _require_legacy_post_commit_binding(run_dir, receipt, registry)
+        scope = _read_private_remediation_scope(Path(request["repo"]), args.remediation_scope_file)
+        snapshot = registry.build_post_commit_root_completion_action_snapshot(
+            run_id=run_dir.name,
+            task_commit=args.task_commit,
+            root_verification_digest=args.root_verification_digest,
+            source_checkpoint_digest=scope["source_checkpoint_digest"],
+            remediation_scope=scope,
+        )
+        binding = stage_owner_prompt_snapshot(registry, _canonical_json_bytes(snapshot))
+    except (OSError, KeyError, RecoveryStateError, RunnerError):
+        print(json.dumps(_post_commit_root_completion_blocked(), ensure_ascii=False))
+        return 0
+    print(
+        json.dumps(
+            {
+                "outcome": "action-snapshot-confirmed",
+                "action_snapshot_id": binding["prompt_snapshot_id"],
+                "action_snapshot_sha256": binding["prompt_sha256"],
+                "writer_action": "none",
+            },
+            ensure_ascii=False,
+        )
+    )
+    return 0
+
+
+def authorize_post_commit_root_completion_run(args: argparse.Namespace) -> int:
+    """Hidden same-account issuance; stdout exposes only an opaque handle."""
+    try:
+        run_dir = resolve_run_reference(args.run_dir)
+        request = read_json(run_dir / "request.json")
+        registry = recovery_registry_for_agent(request["profile"]["name"], Path(request["repo"]))
+        if registry is None:
+            raise RecoveryStateError("post-commit registry is unavailable")
+        audit_guardian_health(run_dir)
+        receipt = public_receipt(run_dir)
+        if receipt.get("status") != "completed" or receipt.get("process_tree_stopped") is not True:
+            raise RecoveryStateError("post-commit terminal transport evidence is unavailable")
+        _require_legacy_post_commit_binding(run_dir, receipt, registry)
+        scope = _read_private_remediation_scope(Path(request["repo"]), args.remediation_scope_file)
+        snapshot = json.loads(
+            read_owner_prompt_snapshot(
+                registry,
+                args.action_snapshot_id,
+                args.action_snapshot_sha256,
+            )
+        )
+        if not isinstance(snapshot, dict):
+            raise RecoveryStateError("post-commit action snapshot is malformed")
+        action = registry.stage_post_commit_root_completion_action(
+            run_id=run_dir.name,
+            task_commit=args.task_commit,
+            root_verification_digest=args.root_verification_digest,
+            source_checkpoint_digest=scope["source_checkpoint_digest"],
+            remediation_scope=scope,
+            action_snapshot=snapshot,
+            action_snapshot_id=args.action_snapshot_id,
+            action_snapshot_sha256=args.action_snapshot_sha256,
+        )
+        authorization = registry.issue_post_commit_root_completion_authorization(action)
+    except (OSError, KeyError, ValueError, RecoveryStateError, RunnerError):
+        print(json.dumps(_post_commit_root_completion_blocked(), ensure_ascii=False))
+        return 0
+    print(
+        json.dumps(
+            {
+                "outcome": "authorization-issued",
+                "authorization_handle": authorization["authorization_handle"],
+                "writer_action": "none",
+            },
+            ensure_ascii=False,
+        )
+    )
+    return 0
+
+
+def finalize_post_commit_root_completion_run(args: argparse.Namespace) -> int:
+    """Consume an opaque private capability and close the retained terminal lease."""
+    task_commit = args.task_commit
+    completed_path: Path | None = None
+    try:
+        run_dir = resolve_run_reference(args.run_dir)
+        completed_path = run_dir / "terminal-root-completion.json"
+        audit_guardian_health(run_dir)
+        receipt = public_receipt(run_dir)
+        if receipt.get("status") != "completed" or receipt.get("process_tree_stopped") is not True:
+            raise RecoveryStateError("post-commit terminal transport evidence is unavailable")
+        request = read_json(run_dir / "request.json")
+        registry = recovery_registry_for_agent(request["profile"]["name"], Path(request["repo"]))
+        lease_id = request.get("lease_id")
+        if registry is None or not isinstance(lease_id, str):
+            raise RecoveryStateError("post-commit registry lease is unavailable")
+        scope = _read_private_remediation_scope(Path(request["repo"]), args.remediation_scope_file)
+        registry_state = registry.state()
+        prior_lease = registry_state.get("lease")
+        if prior_lease is None:
+            replay_binding = registry.post_commit_root_completion_replay_binding(
+                lease_id=lease_id,
+                run_id=run_dir.name,
+                task_commit=task_commit,
+                root_verification_digest=args.root_verification_digest,
+                authorization_handle=args.authorization_handle,
+                remediation_scope_digest=scope["digest"],
+            )
+            completed = _post_commit_root_completion_completed(replay_binding)
+            if completed_path.is_file():
+                if read_json(completed_path) != completed:
+                    raise RecoveryStateError("post-commit completed replay binding drifted")
+            else:
+                durable_write_private_json(completed_path, completed)
+            print(json.dumps(_post_commit_root_completion_result(task_commit), ensure_ascii=False))
+            return 0
+        if completed_path.is_file():
+            raise RecoveryStateError("post-commit completed artifact preceded terminal release")
+        _require_legacy_post_commit_binding(run_dir, receipt, registry)
+        # The post-commit transition owns exact stopped-terminal replay.
+        # Generic reconciliation would persist the mixed-drift candidate before
+        # the authorization-bound intent and must never pre-empt these phases.
+        registry.finalize_post_commit_root_completion(
+            lease_id,
+            run_id=run_dir.name,
+            task_commit=task_commit,
+            root_verification_digest=args.root_verification_digest,
+            authorization_handle=args.authorization_handle,
+            remediation_scope=scope,
+            terminal_binding_format="run-dir-v1",
+        )
+        registry.complete_post_commit_root_completion(lease_id)
+        secret = _guardian_secret(run_dir)
+        state = registry.state()
+        lease = state.get("lease")
+        if not isinstance(lease, Mapping):
+            raise RecoveryStateError("post-commit lease disappeared before guardian closure")
+        if not lease.get("guardian_close"):
+            guardian_id = lease.get("provider_receipt", {}).get("guardian_id")
+            write_guardian_message(
+                run_dir / "guardian-close.json",
+                secret,
+                "guardian-close",
+                {"guardian_id": guardian_id, "zero_digest": sha256_bytes(_canonical_json_bytes(lease["zero_proof"]))},
+            )
+            registry.acknowledge_guardian_close(
+                lease_id,
+                await_guardian_record(run_dir, secret, "guardian-closed.json", "guardian-closed"),
+            )
+        registry.release_contained_terminal(lease_id)
+        garbage_collect_owner_prompt_snapshots(registry)
+        replay_binding = registry.post_commit_root_completion_replay_binding(
+            lease_id=lease_id,
+            run_id=run_dir.name,
+            task_commit=task_commit,
+            root_verification_digest=args.root_verification_digest,
+            authorization_handle=args.authorization_handle,
+            remediation_scope_digest=scope["digest"],
+        )
+        completed = _post_commit_root_completion_completed(replay_binding)
+        assert completed_path is not None
+        durable_write_private_json(completed_path, completed)
+    except (OSError, KeyError, RecoveryStateError, RunnerError):
+        print(json.dumps(_post_commit_root_completion_blocked(), ensure_ascii=False))
+        return 0
+    print(json.dumps(_post_commit_root_completion_result(task_commit), ensure_ascii=False))
     return 0
 
 
@@ -5503,6 +5878,33 @@ def build_parser() -> argparse.ArgumentParser:
     abandon = subparsers.add_parser("_reconcile-terminal-abandonment", help=argparse.SUPPRESS)
     abandon.add_argument("--run-dir", required=True)
     abandon.set_defaults(handler=reconcile_terminal_abandonment_run)
+    post_commit_action = subparsers.add_parser(
+        "_stage-post-commit-root-completion-action", help=argparse.SUPPRESS
+    )
+    post_commit_action.add_argument("--run-dir", required=True)
+    post_commit_action.add_argument("--task-commit", required=True)
+    post_commit_action.add_argument("--root-verification-digest", required=True)
+    post_commit_action.add_argument("--remediation-scope-file", required=True)
+    post_commit_action.set_defaults(handler=stage_post_commit_root_completion_action_run)
+    post_commit_authorize = subparsers.add_parser(
+        "_authorize-post-commit-root-completion", help=argparse.SUPPRESS
+    )
+    post_commit_authorize.add_argument("--run-dir", required=True)
+    post_commit_authorize.add_argument("--task-commit", required=True)
+    post_commit_authorize.add_argument("--root-verification-digest", required=True)
+    post_commit_authorize.add_argument("--remediation-scope-file", required=True)
+    post_commit_authorize.add_argument("--action-snapshot-id", required=True)
+    post_commit_authorize.add_argument("--action-snapshot-sha256", required=True)
+    post_commit_authorize.set_defaults(handler=authorize_post_commit_root_completion_run)
+    post_commit_finalize = subparsers.add_parser(
+        "_finalize-post-commit-root-completion", help=argparse.SUPPRESS
+    )
+    post_commit_finalize.add_argument("--run-dir", required=True)
+    post_commit_finalize.add_argument("--task-commit", required=True)
+    post_commit_finalize.add_argument("--root-verification-digest", required=True)
+    post_commit_finalize.add_argument("--authorization-handle", required=True)
+    post_commit_finalize.add_argument("--remediation-scope-file", required=True)
+    post_commit_finalize.set_defaults(handler=finalize_post_commit_root_completion_run)
     root_completion = subparsers.add_parser(
         "_record-root-completion", help=argparse.SUPPRESS
     )

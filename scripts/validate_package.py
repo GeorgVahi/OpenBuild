@@ -4255,8 +4255,14 @@ def public_text_files() -> list[Path]:
 def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> list[str]:
     errors: list[str] = []
     recovery_contract = [
-        ('READER_FLOOR = "2.2.2"', "reader floor"),
-        ('_LEGACY_READER_FLOORS = {"2.2.0", "2.2.1"}', "legacy reader compatibility"),
+        ('READER_FLOOR = "2.2.3"', "reader floor"),
+        ('_LEGACY_READER_FLOORS = {"2.2.0", "2.2.1", "2.2.2"}', "legacy reader compatibility"),
+        ('"terminal-root-completion-v1"', "post-commit terminal schema"),
+        ('"remediation-scope-v1"', "post-commit remediation scope"),
+        ("finalize_post_commit_root_completion", "atomic post-commit finalization"),
+        ("complete_post_commit_root_completion", "post-commit checkpoint invalidation"),
+        ("post_commit_root_completion_replay_binding", "full-tuple completed replay"),
+        ('"authorization_consumption": "consumed"', "intent-authoritative capability consumption"),
         ('b"openbuild-workspace-v2\\0"', "workspace key"),
         ("_default_state_root", "owner-private state root"),
         ("state_root / \"workspaces\"", "owner-private state root"),
@@ -4578,6 +4584,8 @@ def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> lis
             "_terminal_binding(receipt, run_id=expected_run_id)",
             "terminal exact run receipt",
         ),
+        ('"run-dir-v1"', "legacy terminal binding compatibility"),
+        ("_match_terminal_binding", "terminal binding compatibility match"),
         ("registry.record_terminal_abandonment", "runner terminal abandonment binding"),
         ("registry.complete_terminal_abandonment", "runner terminal abandonment completion"),
         ("registry.materialize_handoff", "runner handoff materialization"),
@@ -4586,6 +4594,12 @@ def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> lis
         ('"_finalize-success"', "root-verified success gate"),
         ('"_reject-handoff"', "root semantic rejection gate"),
         ('"_reconcile-terminal-abandonment"', "terminal abandonment command"),
+        ('"_stage-post-commit-root-completion-action"', "hidden post-commit action snapshot command"),
+        ('"_authorize-post-commit-root-completion"', "hidden post-commit authorization command"),
+        ('"_finalize-post-commit-root-completion"', "hidden post-commit finalization command"),
+        ("_post_commit_root_completion_blocked", "privacy-safe post-commit blocked output"),
+        ("_post_commit_root_completion_result", "privacy-safe post-commit completed output"),
+        ("registry.post_commit_root_completion_replay_binding", "full-tuple completed replay"),
         ("reject_semantic_handoff_run", "root semantic rejection gate"),
         ("registry.reject_semantic_handoff", "root semantic rejection transition"),
         (

@@ -7,6 +7,7 @@ import inspect
 import io
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -365,6 +366,381 @@ class AgentProfileResolutionTests(unittest.TestCase):
 
 
 class CodexInvocationTests(unittest.TestCase):
+    def private_run_request_identity(self, run_dir: Path) -> dict[str, object]:
+        agent_runner.atomic_write_bytes(run_dir / "prompt.md", b"fixture\n")
+        return {
+            "prompt_file": str(run_dir / "prompt.md"),
+            "command": ["codex", "-o", str(run_dir / "result.md")],
+        }
+
+    def test_m1_legacy_run_dir_terminal_binding_reloads_without_path_leak(self) -> None:
+        """A 2.2.1 receipt hashed ``str(run_dir.resolve())``, not the run ID."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "tests@example.invalid"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Tests"], cwd=repo, check=True)
+            (repo / "allowed.txt").write_text("seed\n", encoding="utf-8", newline="\n")
+            subprocess.run(["git", "add", "allowed.txt"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "--quiet", "-m", "baseline"], cwd=repo, check=True)
+
+            run_dir = root / "legacy-run"
+            owner = agent_runner.RecoveryRegistry(repo, state_root=root / "state")
+            owner.initialize()
+            preflight = owner.prepare_source_checkpoint(
+                source_id=run_dir.name,
+                source_lease_id="legacy-lease",
+                source_milestone="M1",
+                target_milestone="M1-recovery",
+                allowed_paths=["allowed.txt"],
+                specification_revision="R-007",
+            )
+            owner.reserve_normal(
+                "legacy-lease",
+                allowed_set_digest=preflight["allowed_set_digest"],
+                recovery_capable=True,
+                source_state_id=preflight["source_state_id"],
+                run_id=run_dir.name,
+                prompt_sha256="a" * 64,
+                containment_plan=_containment_plan(),
+            )
+            owner.bind_reserved_source_snapshot("legacy-lease", preflight)
+            owner.claim_contained_launch("legacy-lease", "contained-token")
+            owner.bind_process_unactivated(
+                "legacy-lease",
+                allowed_set_digest=preflight["allowed_set_digest"],
+                provider_receipt=_provider_receipt(),
+                process_receipt=_process_receipt(),
+            )
+            owner.commit_activation("legacy-lease", preflight["allowed_set_digest"])
+            agent_runner.ensure_private_run_dir(run_dir)
+            agent_runner.atomic_write_bytes(run_dir / "prompt.md", b"fixture\n")
+            agent_runner.atomic_write_json(
+                run_dir / "request.json",
+                {
+                    "profile": {"name": "openbuild_implementation_strong"},
+                    "repo": str(repo),
+                    "lease_id": "legacy-lease",
+                    "prompt_file": str(run_dir / "prompt.md"),
+                    "command": ["codex", "-o", str(run_dir / "result.md")],
+                    "lifecycle_allowed_set_digest": preflight["allowed_set_digest"],
+                    "recovery_preflight": preflight,
+                },
+            )
+            secret = bytes.fromhex("55" * 32)
+            agent_runner.atomic_write_bytes(run_dir / "guardian.key", secret)
+            agent_runner.write_guardian_message(
+                run_dir / "guardian-zero.json", secret, "guardian-zero", _zero_proof()
+            )
+            receipt = {
+                "status": "completed",
+                "agent_name": "openbuild_implementation_strong",
+                "task_name": "M1",
+                "lease_id": "legacy-lease",
+                "activated": True,
+                "configured_model": "fixture",
+                "model_reasoning_effort": "high",
+                "sandbox": "workspace-write",
+                "worker_pid": 123,
+                "worker_process_identity": "worker-1",
+                "codex_pid": 456,
+                "codex_process_identity": "codex-1",
+                "terminal_event": "turn.completed",
+                "codex_exit_evidence": "valid",
+                "codex_exit_code": 0,
+                "result_evidence": "valid",
+                "process_tree_stopped": True,
+            }
+            legacy = agent_runner._terminal_binding_candidate(
+                receipt, run_dir=run_dir, run_id=run_dir.name, format="run-dir-v1"
+            )
+            owner.record_terminal_evidence(
+                "legacy-lease",
+                {
+                    "success": True,
+                    "binding_digest": agent_runner.sha256_bytes(
+                        agent_runner._canonical_json_bytes(legacy["payload"])
+                    ),
+                    "terminal_event": "turn.completed",
+                },
+                preflight["allowed_set_digest"],
+            )
+
+            with mock.patch.object(
+                agent_runner, "recovery_registry_for_agent", return_value=owner
+            ):
+                agent_runner.reconcile_implementation_registry(run_dir, receipt)
+
+            state = owner.state()
+            self.assertEqual(state["lease"]["state"], "stopped-terminal")
+            stored = state["lease"]["terminal_receipt"]
+            self.assertNotIn("binding_format", stored)  # no rewrite-on-read
+            self.assertNotIn(str(run_dir.resolve()), json.dumps(stored, sort_keys=True))
+            self.assertEqual(
+                agent_runner._require_legacy_post_commit_binding(run_dir, receipt, owner),
+                stored["binding_digest"],
+            )
+
+            current = agent_runner._terminal_binding_candidate(
+                receipt, run_dir=run_dir, run_id=run_dir.name, format="run-id-v2"
+            )
+            current_digest = agent_runner.sha256_bytes(
+                agent_runner._canonical_json_bytes(current["payload"])
+            )
+            self.assertEqual(
+                agent_runner._match_terminal_binding(
+                    receipt,
+                    run_dir=run_dir,
+                    run_id=run_dir.name,
+                    stored_digest=current_digest,
+                )["format"],
+                "run-id-v2",
+            )
+            copied_run_dir = root / "copied-parent" / run_dir.name
+            copied_run_dir.parent.mkdir()
+            shutil.copytree(run_dir, copied_run_dir)
+            with self.assertRaisesRegex(
+                agent_runner.RunnerError, "private run path identity drifted"
+            ):
+                agent_runner._match_terminal_binding(
+                    receipt,
+                    run_dir=copied_run_dir,
+                    run_id=run_dir.name,
+                    stored_digest=current_digest,
+                )
+            with self.assertRaisesRegex(agent_runner.RunnerError, "digest is malformed"):
+                agent_runner._match_terminal_binding(
+                    receipt,
+                    run_dir=run_dir,
+                    run_id=run_dir.name,
+                    stored_digest="not-a-digest",
+                )
+            with mock.patch.object(
+                agent_runner,
+                "_terminal_binding_candidates",
+                return_value=(current, current),
+            ):
+                with self.assertRaisesRegex(
+                    agent_runner.RunnerError, "binding drifted during reload"
+                ):
+                    agent_runner._match_terminal_binding(
+                        receipt,
+                        run_dir=run_dir,
+                        run_id=run_dir.name,
+                        stored_digest=current_digest,
+                    )
+            current_registry = mock.Mock()
+            current_registry.state.return_value = {
+                "lease": {
+                    "lease_kind": "normal",
+                    "run_id": run_dir.name,
+                    "terminal_receipt": {
+                        "binding_digest": current_digest
+                    },
+                }
+            }
+            with self.assertRaisesRegex(
+                agent_runner.RecoveryStateError, "legacy terminal binding"
+            ):
+                agent_runner._require_legacy_post_commit_binding(
+                    run_dir, receipt, current_registry
+                )
+
+    def test_m1_post_commit_scope_uses_stable_private_import_without_generic_reconcile(self) -> None:
+        repo = Path("repo").resolve()
+        scope_path = Path("private-scope.json")
+        expected = {"schema": "remediation-scope-v1", "digest": "a" * 64}
+        with mock.patch.object(
+            agent_runner,
+            "_read_stable_external_prompt",
+            return_value=json.dumps(expected).encode("utf-8"),
+        ) as stable_read:
+            self.assertEqual(
+                agent_runner._read_private_remediation_scope(repo, str(scope_path)),
+                expected,
+            )
+        stable_read.assert_called_once_with(repo, scope_path)
+
+        with mock.patch.object(
+            agent_runner, "_read_stable_external_prompt", return_value=b"[]"
+        ):
+            with self.assertRaisesRegex(
+                agent_runner.RecoveryStateError, "scope is malformed"
+            ):
+                agent_runner._read_private_remediation_scope(repo, str(scope_path))
+
+        finalize_source = inspect.getsource(
+            agent_runner.finalize_post_commit_root_completion_run
+        )
+        self.assertNotIn("reconcile_implementation_registry(", finalize_source)
+        replay_call = "post_commit_root_completion_replay_binding("
+        self.assertIn(replay_call, finalize_source)
+        self.assertLess(
+            finalize_source.index(replay_call),
+            finalize_source.index("if completed_path.is_file():"),
+        )
+        self.assertIn("terminal-root-completion-artifact-v1", inspect.getsource(
+            agent_runner._post_commit_root_completion_completed
+        ))
+
+        authorize_source = inspect.getsource(
+            agent_runner.authorize_post_commit_root_completion_run
+        )
+        self.assertIn("read_owner_prompt_snapshot(", authorize_source)
+        self.assertIn("args.action_snapshot_id", authorize_source)
+        self.assertIn("args.action_snapshot_sha256", authorize_source)
+
+        parser = agent_runner.build_parser()
+        parsed = parser.parse_args(
+            [
+                "_authorize-post-commit-root-completion",
+                "--run-dir",
+                "opaque-run",
+                "--task-commit",
+                "a" * 40,
+                "--root-verification-digest",
+                "b" * 64,
+                "--remediation-scope-file",
+                "private-scope.json",
+                "--action-snapshot-id",
+                "c" * 64,
+                "--action-snapshot-sha256",
+                "d" * 64,
+            ]
+        )
+        self.assertEqual(parsed.action_snapshot_id, "c" * 64)
+        self.assertEqual(parsed.action_snapshot_sha256, "d" * 64)
+
+    def test_post_commit_handler_chain_closes_artifact_fault_and_replays(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp) / "opaque-run"
+            run_dir.mkdir()
+            task_commit = "a" * 40
+            request = {
+                "repo": str(Path(temp) / "repo"),
+                "lease_id": "lease-1",
+                "profile": {"name": "openbuild_implementation_strong"},
+            }
+            scope = {
+                "schema": "remediation-scope-v1",
+                "source_checkpoint_digest": "b" * 64,
+                "digest": "c" * 64,
+            }
+            snapshot = {"schema": "post-commit-root-completion-user-action-v1"}
+            binding = {
+                "schema": "terminal-root-completion-artifact-v1",
+                "lease_id": "lease-1",
+                "run_id": run_dir.name,
+                "source_state_id": "source-1",
+                "task_commit": task_commit,
+                "parent_commit": "d" * 40,
+                "root_verification_digest": "e" * 64,
+                "producer_allowed_set_digest": "f" * 64,
+                "remediation_scope_digest": scope["digest"],
+                "action_snapshot_id": "1" * 64,
+                "action_snapshot_sha256": "2" * 64,
+                "user_action_digest": "3" * 64,
+                "authorization_digest": "4" * 64,
+                "authorization_consumption": "consumed",
+                "terminal_binding_format": "run-dir-v1",
+                "terminal_binding_digest": "5" * 64,
+                "checkpoint_digest": "6" * 64,
+                "archive_digest": "7" * 64,
+            }
+            registry = mock.Mock()
+            registry.build_post_commit_root_completion_action_snapshot.return_value = snapshot
+            registry.stage_post_commit_root_completion_action.return_value = {
+                "action_handle": "8" * 64,
+                "action_digest": "9" * 64,
+            }
+            registry.issue_post_commit_root_completion_authorization.return_value = {
+                "authorization_handle": "0" * 64,
+                "authorization_digest": "1" * 64,
+            }
+            retained = {"lease": {"guardian_close": True, "zero_proof": {}}}
+            registry.state.side_effect = [retained, retained, {"lease": None}]
+            registry.post_commit_root_completion_replay_binding.return_value = binding
+            stage_args = Namespace(
+                run_dir=run_dir.name,
+                task_commit=task_commit,
+                root_verification_digest="e" * 64,
+                remediation_scope_file="private-scope.json",
+            )
+            authorize_args = Namespace(
+                **vars(stage_args),
+                action_snapshot_id="1" * 64,
+                action_snapshot_sha256="2" * 64,
+            )
+            finalize_args = Namespace(
+                **vars(stage_args), authorization_handle="0" * 64
+            )
+
+            output = io.StringIO()
+            with (
+                mock.patch.object(agent_runner, "resolve_run_reference", return_value=run_dir),
+                mock.patch.object(agent_runner, "read_json", return_value=request),
+                mock.patch.object(agent_runner, "recovery_registry_for_agent", return_value=registry),
+                mock.patch.object(agent_runner, "audit_guardian_health"),
+                mock.patch.object(
+                    agent_runner,
+                    "public_receipt",
+                    return_value={"status": "completed", "process_tree_stopped": True},
+                ),
+                mock.patch.object(agent_runner, "_require_legacy_post_commit_binding"),
+                mock.patch.object(agent_runner, "_read_private_remediation_scope", return_value=scope),
+                mock.patch.object(
+                    agent_runner,
+                    "stage_owner_prompt_snapshot",
+                    return_value={
+                        "prompt_snapshot_id": "1" * 64,
+                        "prompt_sha256": "2" * 64,
+                    },
+                ),
+                mock.patch.object(
+                    agent_runner,
+                    "read_owner_prompt_snapshot",
+                    return_value=json.dumps(snapshot),
+                ),
+                mock.patch.object(agent_runner, "_guardian_secret", return_value=b"secret"),
+                mock.patch.object(agent_runner, "garbage_collect_owner_prompt_snapshots"),
+                mock.patch.object(
+                    agent_runner,
+                    "durable_write_private_json",
+                    side_effect=[
+                        agent_runner.RecoveryStateError("private artifact write fault"),
+                        None,
+                    ],
+                ) as durable_write,
+                redirect_stdout(output),
+            ):
+                self.assertEqual(
+                    agent_runner.stage_post_commit_root_completion_action_run(stage_args), 0
+                )
+                self.assertEqual(
+                    agent_runner.authorize_post_commit_root_completion_run(authorize_args), 0
+                )
+                self.assertEqual(
+                    agent_runner.finalize_post_commit_root_completion_run(finalize_args), 0
+                )
+                self.assertEqual(
+                    agent_runner.finalize_post_commit_root_completion_run(finalize_args), 0
+                )
+
+            outcomes = [json.loads(line)["outcome"] for line in output.getvalue().splitlines()]
+            self.assertEqual(
+                outcomes,
+                [
+                    "action-snapshot-confirmed",
+                    "authorization-issued",
+                    "blocked",
+                    "terminal-root-completed",
+                ],
+            )
+            registry.release_contained_terminal.assert_called_once_with("lease-1")
+            self.assertEqual(durable_write.call_count, 2)
+
     def profile(self) -> object:
         return agent_runner.AgentProfile(
             name="openbuild_implementation_balanced",
@@ -1717,6 +2093,7 @@ class CodexInvocationTests(unittest.TestCase):
                     "repo": str(repo),
                     "lease_id": "lease-1",
                     "recovery_preflight": preflight,
+                    **self.private_run_request_identity(run_dir),
                 },
             )
             secret = bytes.fromhex("44" * 32)
@@ -1845,6 +2222,7 @@ class CodexInvocationTests(unittest.TestCase):
                         "lease_id": "lease-1",
                         "lifecycle_allowed_set_digest": preflight["allowed_set_digest"],
                         "recovery_preflight": preflight,
+                        **self.private_run_request_identity(run_dir),
                     },
                 )
                 secret = bytes.fromhex("55" * 32)
@@ -2035,6 +2413,7 @@ class CodexInvocationTests(unittest.TestCase):
                     "lease_id": "lease-1",
                     "lifecycle_allowed_set_digest": preflight["allowed_set_digest"],
                     "recovery_preflight": preflight,
+                    **self.private_run_request_identity(run_dir),
                 },
             )
             secret = bytes.fromhex("55" * 32)
@@ -3145,6 +3524,7 @@ class CodexInvocationTests(unittest.TestCase):
                     "recovery_preflight": current,
                     "recovery_parent_checkpoint": parent,
                     "lifecycle_allowed_set_digest": parent["allowed_set_digest"],
+                    **self.private_run_request_identity(run_dir),
                 },
             )
             secret = bytes.fromhex("66" * 32)

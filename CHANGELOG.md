@@ -4,6 +4,28 @@ OpenBuild follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.2.3] - 2026-07-18
+
+### Added
+
+- Added exact backward-compatible terminal binding recognition for released 2.2.0/2.2.1 `run_dir` receipts alongside the current opaque `run_id` format. Legacy state is verified without rewrite-on-read and private run paths never enter public receipts.
+- Added a hidden, same-OS-account, one-time post-commit root-completion flow for an already published legacy task: owner-private remediation scope/capability issuance, exact task commit parent/ancestry/path attribution, repeated Git provenance checks, replay-safe checkpoint invalidation, guardian/archive close, and privacy-safe `terminal-root-completed` or `blocked` output.
+
+### Changed
+
+- The recovery reader floor is now `2.2.3` after the first new durable transition. Exact 2.2.0–2.2.2 state remains readable without rewrite-on-read; unsafe downgrade remains blocked until explicit vacant retirement.
+- Producer writer allowlists and full task remediation scope are now distinct immutable bindings, so separately authorized root-owned specification/version/documentation paths never broaden a future writer lease.
+- The packaged defaults, `codex-exec-explicit-model`, project → user → packaged precedence, and the ban on unknown-model agent routes remain unchanged; both README files now pin and describe 2.2.3.
+
+### Fixed
+
+- Prevented a 2.2.2 reader from retaining an otherwise completed 2.2.1 lease solely because the terminal binding projection changed from `run_dir` to `run_id`.
+- Prevented post-commit Git proof from mutating the authoritative source checkpoint before the durable root-completion intent, and bound the second Git barrier to the first verified candidate checkpoint.
+- Required remediation manifests to use the stable owner-private external-file importer and required the post-commit path to prove the legacy binding without generic reconciliation pre-empting its resumable phases.
+- Split same-account confirmation from capability issuance through a canonical owner-private action snapshot, persisted exact `run-dir-v1` format evidence, and made the first durable terminal intent authoritative for capability consumption across the registry/source crash window.
+- Made exact visible source invalidation replay complete the pending registry phase once, and replaced commit-only completed replay with a private full-tuple artifact that revalidates authorization, verification, scope and release evidence before returning success.
+- Added explicit unconsumed-capability rotation through a fresh confirmed snapshot, required pending-intent scope validation before any release, and made identical action staging repair a legacy reader floor after a source-first durability fault.
+
 ## [2.2.2] - 2026-07-17
 
 ### Added

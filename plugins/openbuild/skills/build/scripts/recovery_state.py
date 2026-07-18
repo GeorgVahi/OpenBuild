@@ -7,6 +7,7 @@ returned opaque checkpoint/grant records into Build traces.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import hmac
 import json
@@ -16,6 +17,7 @@ import secrets
 import stat
 import subprocess
 import sys
+import time
 import unicodedata
 from contextlib import contextmanager
 from pathlib import Path
@@ -24,8 +26,8 @@ from typing import Any, Iterator, Mapping, Sequence
 
 REGISTRY_SCHEMA = 1
 IDENTITY_VERSION = 2
-READER_FLOOR = "2.2.2"
-_LEGACY_READER_FLOORS = {"2.2.0", "2.2.1"}
+READER_FLOOR = "2.2.3"
+_LEGACY_READER_FLOORS = {"2.2.0", "2.2.1", "2.2.2"}
 DEFAULT_MAX_RECORDS = 100_000
 DEFAULT_MAX_BYTES = 2 * 1024 * 1024 * 1024
 
@@ -46,6 +48,9 @@ _DOMAIN_GRANT = b"openbuild-authorization-v1\0"
 _DOMAIN_NONCE = b"openbuild-authorization-nonce-v1\0"
 _DOMAIN_TERMINAL_ARCHIVE = b"openbuild-terminal-archive-v1\0"
 _DOMAIN_TERMINAL_ABANDONMENT = b"openbuild-terminal-abandonment-v1\0"
+_DOMAIN_REMEDIATION_SCOPE = b"openbuild-remediation-scope-v1\0"
+_DOMAIN_POST_COMMIT_ACTION = b"openbuild-post-commit-root-completion-action-v1\0"
+_DOMAIN_POST_COMMIT_AUTHORIZATION = b"openbuild-post-commit-root-completion-authorization-v1\0"
 
 
 class RecoveryStateError(RuntimeError):
@@ -90,6 +95,12 @@ def _require_hex(value: Any, name: str, *, length: int = 64) -> str:
         raise RecoveryStateError(f"{name} must be lowercase hex") from exc
     if value != value.lower():
         raise RecoveryStateError(f"{name} must be lowercase hex")
+    return value
+
+
+def _require_git_sha(value: Any, name: str) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", value):
+        raise RecoveryStateError(f"{name} must be a full lowercase Git SHA")
     return value
 
 
@@ -419,6 +430,7 @@ def _validate_public_checkpoint(value: Any) -> None:
         "preexisting-dirty-overlap",
         "semantic-needs-escalation",
         "terminal-abandoned-outside-set-drift",
+        "post-commit-root-completed",
     }
     if any(reason not in allowed_reasons for reason in reasons):
         raise RecoveryStateError("public recovery checkpoint reason is unsupported")
@@ -512,7 +524,7 @@ def _validate_terminal_archive(value: Mapping[str, Any]) -> None:
         if value.get(field) is not None:
             _require_hex(value.get(field), f"contained terminal archive {field}")
     semantic = value.get("semantic_disposition")
-    if semantic not in {None, "blocked", "needs-escalation", "abandoned"}:
+    if semantic not in {None, "blocked", "needs-escalation", "abandoned", "root-completed"}:
         raise RecoveryStateError("contained terminal archive semantic disposition is malformed")
     if (semantic is None) != (value.get("semantic_disposition_digest") is None):
         raise RecoveryStateError("contained terminal archive semantic digest is malformed")
@@ -757,12 +769,17 @@ def _validate_terminal_receipt(value: Any) -> None:
         value,
         "contained terminal receipt",
         {"success", "binding_digest", "terminal_event"},
-        {"semantic_rejected", "semantic_evidence_digest"},
+        {"semantic_rejected", "semantic_evidence_digest", "binding_format"},
     )
     _require_boolean(receipt["success"], "contained terminal success")
     _require_hex(receipt["binding_digest"], "contained terminal binding digest")
     if receipt["terminal_event"] is not None:
         _require_string(receipt["terminal_event"], "contained terminal event")
+    if "binding_format" in receipt and receipt["binding_format"] not in {
+        "run-id-v2",
+        "run-dir-v1",
+    }:
+        raise RecoveryStateError("contained terminal binding format is unsupported")
     if "semantic_rejected" in receipt:
         if receipt["semantic_rejected"] is not True:
             raise RecoveryStateError("contained terminal semantic rejection is malformed")
@@ -841,6 +858,64 @@ def _validate_semantic_disposition(value: Any) -> None:
             _require_hex(semantic.get("checkpoint_digest"), "terminal abandonment checkpoint digest")
         elif "checkpoint_digest" in semantic:
             raise RecoveryStateError("terminal abandonment checkpoint digest preceded completion")
+        return
+    if isinstance(value, dict) and value.get("disposition") == "root-completed":
+        semantic = _require_exact_object(
+            value,
+            "terminal root completion disposition",
+            {
+                "disposition",
+                "schema",
+                "run_id",
+                "lease_id",
+                "source_state_id",
+                "source_checkpoint_digest",
+                "allowed_set_digest",
+                "remediation_scope_digest",
+                "task_commit",
+                "parent_commit",
+                "root_verification_digest",
+                "user_action_digest",
+                "authorization_digest",
+                "authorization_consumption",
+                "terminal_binding_format",
+                "terminal_binding_digest",
+                "zero_proof_digest",
+                "candidate_snapshot_digest",
+                "git_provenance_digest",
+                "checkpoint_invalidation",
+            },
+            {"checkpoint_digest"},
+        )
+        if (
+            semantic["schema"] != "terminal-root-completion-v1"
+            or semantic["authorization_consumption"] != "consumed"
+            or semantic["terminal_binding_format"] != "run-dir-v1"
+            or semantic["checkpoint_invalidation"] not in {"pending", "completed"}
+        ):
+            raise RecoveryStateError("terminal root completion disposition is malformed")
+        for field in (
+            "source_state_id",
+            "source_checkpoint_digest",
+            "allowed_set_digest",
+            "remediation_scope_digest",
+            "root_verification_digest",
+            "user_action_digest",
+            "authorization_digest",
+            "terminal_binding_digest",
+            "zero_proof_digest",
+            "candidate_snapshot_digest",
+            "git_provenance_digest",
+        ):
+            _require_hex(semantic[field], f"terminal root completion {field}")
+        _require_git_sha(semantic["task_commit"], "terminal root completion task commit")
+        _require_git_sha(semantic["parent_commit"], "terminal root completion parent commit")
+        for field in ("run_id", "lease_id"):
+            _require_string(semantic[field], f"terminal root completion {field}")
+        if semantic["checkpoint_invalidation"] == "completed":
+            _require_hex(semantic.get("checkpoint_digest"), "terminal root completion checkpoint digest")
+        elif "checkpoint_digest" in semantic:
+            raise RecoveryStateError("terminal root completion checkpoint digest preceded completion")
         return
     semantic = _require_exact_object(
         value,
@@ -1243,6 +1318,43 @@ def _validate_history_event(value: Any) -> None:
             },
             set(),
         ),
+        "terminal-root-completion-recorded": (
+            {
+                "event",
+                "disposition",
+                "schema",
+                "run_id",
+                "lease_id",
+                "source_state_id",
+                "source_checkpoint_digest",
+                "allowed_set_digest",
+                "remediation_scope_digest",
+                "task_commit",
+                "parent_commit",
+                "root_verification_digest",
+                "user_action_digest",
+                "authorization_digest",
+                "authorization_consumption",
+                "terminal_binding_format",
+                "terminal_binding_digest",
+                "zero_proof_digest",
+                "candidate_snapshot_digest",
+                "git_provenance_digest",
+                "checkpoint_invalidation",
+            },
+            set(),
+        ),
+        "terminal-root-completion-completed": (
+            {
+                "event",
+                "lease_id",
+                "run_id",
+                "source_state_id",
+                "checkpoint_digest",
+                "authorization_digest",
+            },
+            set(),
+        ),
         "authorization-retired": (
             {
                 "event",
@@ -1303,6 +1415,17 @@ def _validate_history_event(value: Any) -> None:
         _require_hex(history["source_state_id"], "terminal abandonment completion source state ID")
         _require_hex(history["checkpoint_digest"], "terminal abandonment completion checkpoint digest")
         _require_hex(history["evidence_digest"], "terminal abandonment completion evidence digest")
+    elif event == "terminal-root-completion-recorded":
+        semantic = dict(history)
+        semantic.pop("event")
+        _validate_semantic_disposition(semantic)
+        if semantic["checkpoint_invalidation"] != "pending":
+            raise RecoveryStateError("terminal root completion record must begin pending")
+    elif event == "terminal-root-completion-completed":
+        _require_string(history["run_id"], "terminal root completion run ID")
+        _require_hex(history["source_state_id"], "terminal root completion source state ID")
+        _require_hex(history["checkpoint_digest"], "terminal root completion checkpoint digest")
+        _require_hex(history["authorization_digest"], "terminal root completion authorization digest")
     elif event == "authorization-retired":
         for field in (
             "source_state_id",
@@ -2029,6 +2152,69 @@ class RecoveryRegistry:
                     raise RecoveryStateError("terminal abandonment source invalidation is not authoritative")
             return
 
+        if semantic.get("disposition") == "root-completed":
+            if semantic.get("lease_id") != lease.get("lease_id"):
+                raise RecoveryStateError("terminal root completion lease binding drifted")
+            recorded = [
+                event
+                for event in state.get("history", [])
+                if event.get("event") == "terminal-root-completion-recorded"
+                and event.get("lease_id") == lease.get("lease_id")
+                and event.get("run_id") == expected_run_id
+            ]
+            if len(recorded) != 1:
+                raise RecoveryStateError("terminal root completion requires one recorded history event")
+            immutable_recorded_fields = set(recorded[0]) - {"event", "checkpoint_invalidation"}
+            if (
+                recorded[0].get("checkpoint_invalidation") != "pending"
+                or any(recorded[0].get(field) != semantic.get(field) for field in immutable_recorded_fields)
+            ):
+                raise RecoveryStateError("terminal root completion history binding drifted")
+            source = self._read_source_locked(str(semantic["source_state_id"]), rebarrier=True)
+            checkpoint = source.get("public_checkpoint")
+            post = source.get("post_commit_root_completion")
+            action = post.get("action") if isinstance(post, Mapping) else None
+            authorization = post.get("authorization") if isinstance(post, Mapping) else None
+            if (
+                not isinstance(action, Mapping)
+                or not isinstance(authorization, Mapping)
+                or action.get("tuple_digest") != semantic.get("user_action_digest")
+                or authorization.get("status") not in {"issued", "consumed"}
+                or semantic.get("authorization_consumption") != "consumed"
+                or semantic.get("terminal_binding_format") != "run-dir-v1"
+                or lease.get("terminal_receipt", {}).get("binding_digest")
+                != semantic.get("terminal_binding_digest")
+                or _domain_digest(_DOMAIN_POST_COMMIT_AUTHORIZATION, {
+                    "action_id": authorization.get("action_id"),
+                    "authorization_handle": authorization.get("authorization_handle"),
+                    "capability": authorization.get("capability"),
+                    "tuple_digest": authorization.get("tuple_digest"),
+                }) != semantic.get("authorization_digest")
+            ):
+                raise RecoveryStateError("terminal root completion authorization binding drifted")
+            if semantic.get("checkpoint_invalidation") == "completed":
+                completed = [
+                    event
+                    for event in state.get("history", [])
+                    if event.get("event") == "terminal-root-completion-completed"
+                    and event.get("lease_id") == lease.get("lease_id")
+                    and event.get("run_id") == expected_run_id
+                ]
+                invalidation = source.get("checkpoint_invalidation")
+                if (
+                    len(completed) != 1
+                    or completed[0].get("checkpoint_digest") != semantic.get("checkpoint_digest")
+                    or completed[0].get("authorization_digest") != semantic.get("authorization_digest")
+                    or not isinstance(checkpoint, Mapping)
+                    or checkpoint.get("disposition") != "recovery-ineligible"
+                    or checkpoint.get("checkpoint_digest") != semantic.get("checkpoint_digest")
+                    or not isinstance(invalidation, Mapping)
+                    or invalidation.get("reason") != "post-commit-root-completed"
+                    or invalidation.get("evidence_digest") != semantic.get("authorization_digest")
+                ):
+                    raise RecoveryStateError("terminal root completion invalidation binding drifted")
+            return
+
         lease_id = lease.get("lease_id")
         run_id = semantic.get("run_id")
         rejections = [
@@ -2571,7 +2757,7 @@ class RecoveryRegistry:
                     "authorization",
                     "digest",
                 },
-                {"checkpoint_invalidation"},
+                {"checkpoint_invalidation", "post_commit_root_completion"},
             )
         )
         if state.get("schema_version") != 1 or state.get("workspace_key") != self.workspace_key:
@@ -2667,6 +2853,7 @@ class RecoveryRegistry:
             if invalidation["reason"] not in {
                 "semantic-needs-escalation",
                 "terminal-abandoned-outside-set-drift",
+                "post-commit-root-completed",
             }:
                 raise RecoveryStateError("private checkpoint invalidation reason is unsupported")
             _require_hex(invalidation["evidence_digest"], "checkpoint invalidation evidence")
@@ -2676,6 +2863,102 @@ class RecoveryRegistry:
                 or checkpoint["reasons"] != [invalidation["reason"]]
             ):
                 raise RecoveryStateError("private checkpoint invalidation binding drifted")
+        post_commit = state.get("post_commit_root_completion")
+        if post_commit is not None:
+            post_commit = _require_exact_object(
+                post_commit,
+                "private post-commit root completion state",
+                {"action", "authorization"},
+            )
+            action = post_commit["action"]
+            authorization = post_commit["authorization"]
+            action_value = _require_exact_object(
+                action,
+                "private post-commit root completion action",
+                {
+                    "schema",
+                    "status",
+                    "action_id",
+                    "session_action_id",
+                    "normalized_intent",
+                    "workspace_identity_digest",
+                    "action_snapshot_id",
+                    "action_snapshot_sha256",
+                    "tuple_digest",
+                    "run_id",
+                    "task_commit",
+                    "root_verification_digest",
+                    "source_checkpoint_digest",
+                    "producer_allowed_set_digest",
+                    "remediation_scope_digest",
+                    "specification_revision",
+                    "milestone",
+                },
+            )
+            if (
+                action_value["schema"] != "post-commit-root-completion-user-action-v1"
+                or action_value["status"] not in {"confirmed", "issued"}
+                or action_value["normalized_intent"]
+                != "authorize-post-commit-root-completion"
+                or action_value["workspace_identity_digest"] != self.workspace_key
+                or checkpoint is None
+                or (
+                    action_value["source_checkpoint_digest"] != checkpoint["checkpoint_digest"]
+                    and (
+                        not isinstance(state.get("checkpoint_invalidation"), Mapping)
+                        or state["checkpoint_invalidation"].get("reason")
+                        != "post-commit-root-completed"
+                    )
+                )
+                or action_value["producer_allowed_set_digest"]
+                != checkpoint["allowed_set_digest"]
+                or action_value["specification_revision"] != binding["specification_revision"]
+                or action_value["milestone"] != binding["source_milestone"]
+                or (authorization is None) != (action_value["status"] == "confirmed")
+            ):
+                raise RecoveryStateError("private post-commit root completion action binding drifted")
+            for field in (
+                "action_id",
+                "session_action_id",
+                "workspace_identity_digest",
+                "action_snapshot_id",
+                "action_snapshot_sha256",
+                "tuple_digest",
+                "root_verification_digest",
+                "source_checkpoint_digest",
+                "producer_allowed_set_digest",
+                "remediation_scope_digest",
+            ):
+                _require_hex(action_value[field], f"post-commit root completion action {field}")
+            _require_string(action_value["run_id"], "post-commit root completion action run ID")
+            _require_git_sha(action_value["task_commit"], "post-commit root completion action task commit")
+            if authorization is not None:
+                authorization_value = _require_exact_object(
+                    authorization,
+                    "private post-commit root completion authorization",
+                    {
+                        "schema",
+                        "status",
+                        "action_id",
+                        "authorization_handle",
+                        "capability",
+                        "tuple_digest",
+                        "issued_at_ns",
+                        "expires_at_ns",
+                    },
+                )
+                if (
+                    authorization_value["schema"] != "post-commit-root-completion-authorization-v1"
+                    or authorization_value["status"] not in {"issued", "consumed"}
+                    or authorization_value["action_id"] != action_value["action_id"]
+                    or authorization_value["tuple_digest"] != action_value["tuple_digest"]
+                    or authorization_value["expires_at_ns"] < authorization_value["issued_at_ns"]
+                ):
+                    raise RecoveryStateError("private post-commit root completion authorization binding drifted")
+                for field in ("authorization_handle", "capability", "tuple_digest"):
+                    _require_hex(authorization_value[field], f"post-commit root completion authorization {field}")
+                _require_integer(authorization_value["issued_at_ns"], "post-commit root completion issued time")
+                _require_integer(authorization_value["expires_at_ns"], "post-commit root completion expiry")
         return state
 
     def _read_source_locked(self, source_state_id: str, *, rebarrier: bool = True) -> dict[str, Any]:
@@ -3426,6 +3709,15 @@ class RecoveryRegistry:
         changed_paths = {
             path for path in all_paths if pre["records"].get(path) != candidate["records"].get(path)
         }
+        if candidate["head"] != pre["head"]:
+            committed_paths = {
+                _normalize_relative(_decode_git_path(item))
+                for item in self._git(
+                    "diff", "--name-only", "-z", f"{pre['head']}..{candidate['head']}"
+                ).split(b"\0")
+                if item
+            }
+            changed_paths |= committed_paths
         outside = sorted(
             path
             for path in changed_paths
@@ -4092,6 +4384,732 @@ class RecoveryRegistry:
             lease["state"] = "stopped-terminal"
             return self._commit_registry_locked(state)
 
+    def remediation_scope_manifest(
+        self,
+        *,
+        task_commit: str,
+        parent_commit: str,
+        source_checkpoint_digest: str,
+        specification_revision: str,
+        milestone: str,
+        producer_allowed_set_digest: str,
+        root_verification_digest: str,
+        entries: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        """Return the private, exact task-commit manifest used by remediation."""
+        _require_git_sha(task_commit, "remediation task commit")
+        _require_git_sha(parent_commit, "remediation parent commit")
+        for value, label in (
+            (source_checkpoint_digest, "remediation source checkpoint"),
+            (producer_allowed_set_digest, "remediation producer allowed set"),
+            (root_verification_digest, "remediation root verification"),
+        ):
+            _require_hex(value, label)
+        _require_string(specification_revision, "remediation specification revision")
+        _require_string(milestone, "remediation milestone")
+        normalized: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for entry in entries:
+            if not isinstance(entry, Mapping) or set(entry) != {"path", "role"}:
+                raise RecoveryStateError("remediation scope entry is malformed")
+            path = _normalize_relative(_require_string(entry.get("path"), "remediation scope path"))
+            role = entry.get("role")
+            if role not in {"producer", "root-completion"} or path in seen:
+                raise RecoveryStateError("remediation scope paths must be unique with a supported role")
+            seen.add(path)
+            normalized.append({"path": path, "role": role})
+        if not normalized:
+            raise RecoveryStateError("remediation scope requires at least one task path")
+        manifest: dict[str, Any] = {
+            "schema": "remediation-scope-v1",
+            "task_commit": task_commit,
+            "parent_commit": parent_commit,
+            "source_checkpoint_digest": source_checkpoint_digest,
+            "specification_revision": specification_revision,
+            "milestone": milestone,
+            "producer_allowed_set_digest": producer_allowed_set_digest,
+            "root_verification_digest": root_verification_digest,
+            "entries": sorted(normalized, key=lambda value: value["path"]),
+        }
+        manifest["digest"] = _domain_digest(_DOMAIN_REMEDIATION_SCOPE, manifest)
+        return manifest
+
+    @staticmethod
+    def _post_commit_authorization_digest(authorization: Mapping[str, Any]) -> str:
+        return _domain_digest(
+            _DOMAIN_POST_COMMIT_AUTHORIZATION,
+            {
+                "action_id": authorization.get("action_id"),
+                "authorization_handle": authorization.get("authorization_handle"),
+                "capability": authorization.get("capability"),
+                "tuple_digest": authorization.get("tuple_digest"),
+            },
+        )
+
+    def _validated_remediation_scope(
+        self,
+        manifest: Mapping[str, Any],
+        *,
+        source_checkpoint_digest: str,
+        specification_revision: str,
+        milestone: str,
+        producer_allowed_set_digest: str,
+        root_verification_digest: str,
+    ) -> dict[str, Any]:
+        required = {
+            "schema",
+            "task_commit",
+            "parent_commit",
+            "source_checkpoint_digest",
+            "specification_revision",
+            "milestone",
+            "producer_allowed_set_digest",
+            "root_verification_digest",
+            "entries",
+            "digest",
+        }
+        if not isinstance(manifest, Mapping) or set(manifest) != required:
+            raise RecoveryStateError("remediation scope manifest fields are incomplete")
+        rebuilt = self.remediation_scope_manifest(
+            task_commit=manifest["task_commit"],
+            parent_commit=manifest["parent_commit"],
+            source_checkpoint_digest=manifest["source_checkpoint_digest"],
+            specification_revision=manifest["specification_revision"],
+            milestone=manifest["milestone"],
+            producer_allowed_set_digest=manifest["producer_allowed_set_digest"],
+            root_verification_digest=manifest["root_verification_digest"],
+            entries=manifest["entries"],
+        )
+        if rebuilt != dict(manifest):
+            raise RecoveryStateError("remediation scope manifest digest drifted")
+        if any(
+            rebuilt[field] != value
+            for field, value in (
+                ("source_checkpoint_digest", source_checkpoint_digest),
+                ("specification_revision", specification_revision),
+                ("milestone", milestone),
+                ("producer_allowed_set_digest", producer_allowed_set_digest),
+                ("root_verification_digest", root_verification_digest),
+            )
+        ):
+            raise RecoveryStateError("remediation scope manifest tuple drifted")
+        return rebuilt
+
+    def _post_commit_action_context_locked(
+        self,
+        registry: Mapping[str, Any],
+        *,
+        run_id: str,
+        task_commit: str,
+        root_verification_digest: str,
+        source_checkpoint_digest: str,
+        remediation_scope: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+        _require_string(run_id, "post-commit action run ID")
+        _require_git_sha(task_commit, "post-commit action task commit")
+        _require_hex(root_verification_digest, "post-commit action root verification")
+        _require_hex(source_checkpoint_digest, "post-commit action source checkpoint")
+        lease = registry.get("lease")
+        if (
+            not isinstance(lease, dict)
+            or lease.get("state") != "stopped-terminal"
+            or _lease_run_id(lease) != run_id
+            or not isinstance(lease.get("source_state_id"), str)
+            or lease.get("terminal_receipt", {}).get("success") is not True
+            or lease.get("terminal_receipt", {}).get("terminal_event") != "turn.completed"
+            or not isinstance(lease.get("zero_proof"), Mapping)
+            or registry.get("outbox") is not None
+            or registry.get("quarantine") is not None
+        ):
+            raise RecoveryStateError("post-commit action requires stopped no-handoff containment")
+        source = self._read_source_locked(lease["source_state_id"])
+        checkpoint = source.get("public_checkpoint")
+        binding = source.get("source_binding")
+        if not isinstance(checkpoint, Mapping) or not isinstance(binding, Mapping):
+            raise RecoveryStateError("post-commit action source checkpoint is unavailable")
+        manifest = self._validated_remediation_scope(
+            remediation_scope,
+            source_checkpoint_digest=source_checkpoint_digest,
+            specification_revision=str(binding.get("specification_revision") or ""),
+            milestone=str(binding.get("source_milestone") or ""),
+            producer_allowed_set_digest=str(lease.get("allowed_set_digest") or ""),
+            root_verification_digest=root_verification_digest,
+        )
+        if checkpoint.get("checkpoint_digest") != source_checkpoint_digest:
+            raise RecoveryStateError("post-commit action checkpoint drifted")
+        tuple_basis = {
+            "run_id": run_id,
+            "task_commit": task_commit,
+            "root_verification_digest": root_verification_digest,
+            "source_checkpoint_digest": source_checkpoint_digest,
+            "producer_allowed_set_digest": lease["allowed_set_digest"],
+            "remediation_scope_digest": manifest["digest"],
+            "specification_revision": binding["specification_revision"],
+            "milestone": binding["source_milestone"],
+        }
+        return lease, source, manifest, tuple_basis
+
+    def build_post_commit_root_completion_action_snapshot(
+        self,
+        *,
+        run_id: str,
+        task_commit: str,
+        root_verification_digest: str,
+        source_checkpoint_digest: str,
+        remediation_scope: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Build one canonical same-account confirmation snapshot without issuing it."""
+        with self._lock():
+            registry = self._read_registry_locked(rebarrier=True)
+            _lease, _source, _manifest, tuple_basis = self._post_commit_action_context_locked(
+                registry,
+                run_id=run_id,
+                task_commit=task_commit,
+                root_verification_digest=root_verification_digest,
+                source_checkpoint_digest=source_checkpoint_digest,
+                remediation_scope=remediation_scope,
+            )
+            return {
+                "schema": "post-commit-root-completion-user-action-v1",
+                "status": "confirmed",
+                "session_action_id": secrets.token_hex(32),
+                "normalized_intent": "authorize-post-commit-root-completion",
+                "workspace_identity_digest": self.workspace_key,
+                **tuple_basis,
+            }
+
+    def stage_post_commit_root_completion_action(
+        self,
+        *,
+        run_id: str,
+        task_commit: str,
+        root_verification_digest: str,
+        source_checkpoint_digest: str,
+        remediation_scope: Mapping[str, Any],
+        action_snapshot: Mapping[str, Any],
+        action_snapshot_id: str,
+        action_snapshot_sha256: str,
+    ) -> dict[str, Any]:
+        """Bind one pre-existing confirmed action snapshot to the private source."""
+        _require_hex(action_snapshot_id, "post-commit action snapshot ID")
+        _require_hex(action_snapshot_sha256, "post-commit action snapshot SHA-256")
+        snapshot = _require_exact_object(
+            action_snapshot,
+            "post-commit root completion action snapshot",
+            {
+                "schema",
+                "status",
+                "session_action_id",
+                "normalized_intent",
+                "workspace_identity_digest",
+                "run_id",
+                "task_commit",
+                "root_verification_digest",
+                "source_checkpoint_digest",
+                "producer_allowed_set_digest",
+                "remediation_scope_digest",
+                "specification_revision",
+                "milestone",
+            },
+        )
+        _require_hex(snapshot["session_action_id"], "post-commit session action ID")
+        if hashlib.sha256(_canonical(snapshot)).hexdigest() != action_snapshot_sha256:
+            raise RecoveryStateError("post-commit action snapshot digest drifted")
+        with self._lock():
+            registry = self._read_registry_locked(rebarrier=True)
+            _lease, source, _manifest, tuple_basis = self._post_commit_action_context_locked(
+                registry,
+                run_id=run_id,
+                task_commit=task_commit,
+                root_verification_digest=root_verification_digest,
+                source_checkpoint_digest=source_checkpoint_digest,
+                remediation_scope=remediation_scope,
+            )
+            expected_snapshot = {
+                "schema": "post-commit-root-completion-user-action-v1",
+                "status": "confirmed",
+                "session_action_id": snapshot["session_action_id"],
+                "normalized_intent": "authorize-post-commit-root-completion",
+                "workspace_identity_digest": self.workspace_key,
+                **tuple_basis,
+            }
+            if snapshot != expected_snapshot:
+                raise RecoveryStateError("post-commit action snapshot tuple drifted")
+            action = {
+                **expected_snapshot,
+                "action_id": snapshot["session_action_id"],
+                "action_snapshot_id": action_snapshot_id,
+                "action_snapshot_sha256": action_snapshot_sha256,
+                "tuple_digest": _domain_digest(
+                    _DOMAIN_POST_COMMIT_ACTION,
+                    {
+                        "action_snapshot_id": action_snapshot_id,
+                        "action_snapshot_sha256": action_snapshot_sha256,
+                        "snapshot": snapshot,
+                    },
+                ),
+            }
+            existing = source.get("post_commit_root_completion")
+            if isinstance(existing, Mapping):
+                if existing.get("action") == action and existing.get("authorization") is None:
+                    if registry.get("reader_floor") != READER_FLOOR:
+                        self._commit_registry_locked(registry)
+                    return {
+                        "action_handle": action["action_id"],
+                        "action_digest": action["tuple_digest"],
+                    }
+                existing_action = existing.get("action")
+                existing_authorization = existing.get("authorization")
+                semantic = registry.get("lease", {}).get("semantic_disposition")
+                replacement_allowed = (
+                    isinstance(existing_action, Mapping)
+                    and isinstance(existing_authorization, Mapping)
+                    and existing_action.get("status") == "issued"
+                    and existing_authorization.get("status") == "issued"
+                    and semantic is None
+                    and existing_action.get("action_snapshot_id") != action_snapshot_id
+                    and all(
+                        existing_action.get(field) == value
+                        for field, value in tuple_basis.items()
+                    )
+                )
+                if not replacement_allowed:
+                    raise RecoveryStateError(
+                        "post-commit action snapshot was already issued or replaced"
+                    )
+            source["post_commit_root_completion"] = {"action": action, "authorization": None}
+            self._commit_source_locked(source)
+            # The source addition is the first 2.2.3 durable shape; raise the
+            # registry reader floor in the same owner lock before returning it.
+            self._commit_registry_locked(registry)
+            return {
+                "action_handle": action["action_id"],
+                "action_digest": action["tuple_digest"],
+            }
+
+    def issue_post_commit_root_completion_authorization(
+        self, action: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Issue one short-lived opaque capability for a staged exact tuple."""
+        action_handle = action.get("action_handle") if isinstance(action, Mapping) else None
+        action_digest = action.get("action_digest") if isinstance(action, Mapping) else None
+        _require_hex(action_handle, "post-commit action handle")
+        _require_hex(action_digest, "post-commit action digest")
+        with self._lock():
+            registry = self._read_registry_locked(rebarrier=True)
+            lease = registry.get("lease")
+            if not isinstance(lease, Mapping) or not isinstance(lease.get("source_state_id"), str):
+                raise RecoveryStateError("post-commit authorization requires an active source")
+            source = self._read_source_locked(lease["source_state_id"])
+            post = source.get("post_commit_root_completion")
+            if not isinstance(post, Mapping) or not isinstance(post.get("action"), Mapping):
+                raise RecoveryStateError("post-commit authorization action is missing")
+            staged = post["action"]
+            existing = post.get("authorization")
+            if isinstance(existing, Mapping):
+                raise RecoveryStateError("post-commit action snapshot was already issued")
+            if (
+                staged.get("status") != "confirmed"
+                or staged.get("action_id") != action_handle
+                or staged.get("tuple_digest") != action_digest
+            ):
+                raise RecoveryStateError("post-commit authorization action binding drifted")
+            issued_at_ns = time.time_ns()
+            authorization = {
+                "schema": "post-commit-root-completion-authorization-v1",
+                "status": "issued",
+                "action_id": staged["action_id"],
+                "authorization_handle": secrets.token_hex(32),
+                "capability": secrets.token_hex(32),
+                "tuple_digest": staged["tuple_digest"],
+                "issued_at_ns": issued_at_ns,
+                "expires_at_ns": issued_at_ns + 300_000_000_000,
+            }
+            issued_action = dict(staged)
+            issued_action["status"] = "issued"
+            source["post_commit_root_completion"] = {
+                "action": issued_action,
+                "authorization": authorization,
+            }
+            self._commit_source_locked(source)
+            return {
+                "authorization_handle": authorization["authorization_handle"],
+                "authorization_digest": self._post_commit_authorization_digest(authorization),
+            }
+
+    def _task_commit_paths(self, task_commit: str) -> list[str]:
+        raw = self._git("diff-tree", "--no-commit-id", "--name-only", "-r", "-z", task_commit)
+        paths = [_normalize_relative(_decode_git_path(value)) for value in raw.split(b"\0") if value]
+        if len(set(paths)) != len(paths):
+            raise RecoveryStateError("task commit contains duplicate normalized paths")
+        return sorted(paths)
+
+    def finalize_post_commit_root_completion(
+        self,
+        lease_id: str,
+        *,
+        run_id: str,
+        task_commit: str,
+        root_verification_digest: str,
+        authorization_handle: str,
+        remediation_scope: Mapping[str, Any],
+        terminal_binding_format: str,
+    ) -> dict[str, Any]:
+        """Atomically bind capability consumption to the first root-completion intent."""
+        _require_string(run_id, "post-commit finalization run ID")
+        _require_git_sha(task_commit, "post-commit finalization task commit")
+        _require_hex(root_verification_digest, "post-commit finalization root verification")
+        _require_hex(authorization_handle, "post-commit authorization handle")
+        if terminal_binding_format != "run-dir-v1":
+            raise RecoveryStateError("post-commit finalization requires exact legacy terminal binding")
+        with self._lock():
+            state = self._read_registry_locked(rebarrier=True)
+            lease = state.get("lease")
+            if not isinstance(lease, dict) or lease.get("lease_id") != lease_id:
+                raise RecoveryStateError("post-commit finalization lease is missing")
+            semantic = lease.get("semantic_disposition")
+            source_state_id = lease.get("source_state_id")
+            if not isinstance(source_state_id, str):
+                raise RecoveryStateError("post-commit finalization source is missing")
+            source = self._read_source_locked(source_state_id)
+            post = source.get("post_commit_root_completion")
+            action = post.get("action") if isinstance(post, Mapping) else None
+            authorization = post.get("authorization") if isinstance(post, Mapping) else None
+            if not isinstance(action, Mapping) or not isinstance(authorization, Mapping):
+                raise RecoveryStateError("post-commit finalization authorization is missing")
+            authorization_digest = self._post_commit_authorization_digest(authorization)
+            binding = source.get("source_binding")
+            if not isinstance(binding, Mapping):
+                raise RecoveryStateError("post-commit finalization source binding is unavailable")
+            manifest = self._validated_remediation_scope(
+                remediation_scope,
+                source_checkpoint_digest=action["source_checkpoint_digest"],
+                specification_revision=binding["specification_revision"],
+                milestone=binding["source_milestone"],
+                producer_allowed_set_digest=lease["allowed_set_digest"],
+                root_verification_digest=root_verification_digest,
+            )
+            if manifest["digest"] != action.get("remediation_scope_digest"):
+                raise RecoveryStateError("post-commit finalization remediation scope drifted")
+            if isinstance(semantic, Mapping):
+                if (
+                    semantic.get("disposition") == "root-completed"
+                    and semantic.get("run_id") == run_id
+                    and semantic.get("task_commit") == task_commit
+                    and semantic.get("root_verification_digest") == root_verification_digest
+                    and semantic.get("authorization_digest") == authorization_digest
+                    and semantic.get("authorization_consumption") == "consumed"
+                    and semantic.get("terminal_binding_format") == terminal_binding_format
+                    and semantic.get("remediation_scope_digest") == manifest["digest"]
+                    and authorization.get("authorization_handle") == authorization_handle
+                ):
+                    if authorization.get("status") == "issued":
+                        consumed = dict(authorization)
+                        consumed["status"] = "consumed"
+                        source["post_commit_root_completion"] = {
+                            "action": dict(action),
+                            "authorization": consumed,
+                        }
+                        self._commit_source_locked(source)
+                    elif authorization.get("status") != "consumed":
+                        raise RecoveryStateError(
+                            "post-commit finalization authorization consumption drifted"
+                        )
+                    return state
+                raise RecoveryStateError("terminal lease already has a different semantic disposition")
+            if (
+                lease.get("state") != "stopped-terminal"
+                or lease.get("terminal_receipt", {}).get("success") is not True
+                or lease.get("terminal_receipt", {}).get("terminal_event") != "turn.completed"
+                or lease.get("terminal_receipt", {}).get("binding_format") not in {None, "run-dir-v1"}
+                or not isinstance(lease.get("zero_proof"), Mapping)
+                or state.get("outbox") is not None
+                or state.get("quarantine") is not None
+                or _lease_run_id(lease) != run_id
+                or authorization.get("status") != "issued"
+                or authorization.get("authorization_handle") != authorization_handle
+                or authorization.get("expires_at_ns", 0) <= time.time_ns()
+                or action.get("run_id") != run_id
+                or action.get("task_commit") != task_commit
+                or action.get("root_verification_digest") != root_verification_digest
+            ):
+                raise RecoveryStateError("post-commit finalization safety proof is incomplete")
+            checkpoint = source.get("public_checkpoint")
+            if not isinstance(checkpoint, Mapping):
+                raise RecoveryStateError("post-commit finalization checkpoint is unavailable")
+            if checkpoint.get("checkpoint_digest") != action.get("source_checkpoint_digest"):
+                raise RecoveryStateError("post-commit finalization checkpoint drifted")
+            parent = self._git("rev-parse", "--verify", f"{task_commit}^").strip().decode("ascii")
+            if parent != manifest["parent_commit"] or parent != source["pre_snapshot"]["head"]:
+                raise RecoveryStateError("post-commit task parent provenance drifted")
+            merge_base = self._git("merge-base", task_commit, "HEAD").strip().decode("ascii")
+            if merge_base != task_commit:
+                raise RecoveryStateError("post-commit task commit is not an ancestor of HEAD")
+            commit_paths = self._task_commit_paths(task_commit)
+            entries = {entry["path"]: entry["role"] for entry in manifest["entries"]}
+            if set(commit_paths) != set(entries):
+                raise RecoveryStateError("post-commit task paths do not exactly match remediation scope")
+            allowed_paths = source["pre_snapshot"]["allowed_paths"]
+            records = source["pre_snapshot"]["records"]
+            if any(
+                (role == "producer" and not self._path_is_allowed(path, allowed_paths, records))
+                or role not in {"producer", "root-completion"}
+                for path, role in entries.items()
+            ):
+                raise RecoveryStateError("post-commit remediation role is outside its immutable scope")
+            proof_source, candidate_checkpoint = self._revalidate_source_locked(
+                copy.deepcopy(source), checkpoint, persist=False
+            )
+            if candidate_checkpoint.get("reasons") != ["git-control-plane-drift", "outside-set-drift"]:
+                raise RecoveryStateError("post-commit finalization requires exact mixed drift")
+            candidate_snapshot = candidate_checkpoint.get("candidate_snapshot")
+            if not isinstance(candidate_snapshot, Mapping):
+                raise RecoveryStateError("post-commit finalization candidate snapshot is missing")
+            provenance = {
+                "head": proof_source["candidate_snapshot"]["head"],
+                "ref": proof_source["candidate_snapshot"]["ref"],
+                "full_index": proof_source["candidate_snapshot"]["full_index"],
+                "status": proof_source["candidate_snapshot"]["status"],
+                "records": proof_source["candidate_snapshot"]["records"],
+                "task_commit": task_commit,
+                "parent_commit": parent,
+                "commit_paths": commit_paths,
+            }
+            # Re-capture immediately before intent; any race remains a no-mutation failure.
+            _, barrier_checkpoint = self._revalidate_source_locked(
+                proof_source, candidate_checkpoint, persist=False
+            )
+            if barrier_checkpoint != candidate_checkpoint:
+                raise RecoveryStateError("post-commit Git provenance drifted before durable intent")
+            terminal_binding = lease["terminal_receipt"].get("binding_digest")
+            if not isinstance(terminal_binding, str):
+                raise RecoveryStateError("post-commit terminal binding is missing")
+            semantic = {
+                "disposition": "root-completed",
+                "schema": "terminal-root-completion-v1",
+                "run_id": run_id,
+                "lease_id": lease_id,
+                "source_state_id": source_state_id,
+                "source_checkpoint_digest": action["source_checkpoint_digest"],
+                "allowed_set_digest": lease["allowed_set_digest"],
+                "remediation_scope_digest": manifest["digest"],
+                "task_commit": task_commit,
+                "parent_commit": parent,
+                "root_verification_digest": root_verification_digest,
+                "user_action_digest": action["tuple_digest"],
+                "authorization_digest": authorization_digest,
+                "authorization_consumption": "consumed",
+                "terminal_binding_format": terminal_binding_format,
+                "terminal_binding_digest": terminal_binding,
+                "zero_proof_digest": _terminal_part_digest("zero", lease["zero_proof"]),
+                "candidate_snapshot_digest": _domain_digest(_DOMAIN_CHECKPOINT, candidate_snapshot),
+                "git_provenance_digest": _domain_digest(_DOMAIN_CHECKPOINT, provenance),
+                "checkpoint_invalidation": "pending",
+            }
+            lease["semantic_disposition"] = semantic
+            lease["terminal_receipt"]["success"] = False
+            lease["terminal_receipt"]["semantic_rejected"] = True
+            lease["terminal_receipt"]["semantic_evidence_digest"] = authorization_digest
+            state["history"].append({"event": "terminal-root-completion-recorded", **semantic})
+            committed = self._commit_registry_locked(state)
+            # The intent is now durable.  A reload treats it as the authority
+            # if a source write crashes, so a capability cannot be reused.
+            authorization = dict(authorization)
+            authorization["status"] = "consumed"
+            source["post_commit_root_completion"] = {"action": dict(action), "authorization": authorization}
+            self._commit_source_locked(source)
+            return committed
+
+    def complete_post_commit_root_completion(self, lease_id: str) -> dict[str, Any]:
+        """Invalidate the exact source checkpoint after a durable root intent."""
+        with self._lock():
+            state = self._read_registry_locked(rebarrier=True)
+            lease = state.get("lease")
+            semantic = lease.get("semantic_disposition") if isinstance(lease, Mapping) else None
+            if (
+                not isinstance(lease, dict)
+                or lease.get("lease_id") != lease_id
+                or lease.get("state") != "stopped-terminal"
+                or not isinstance(semantic, dict)
+                or semantic.get("disposition") != "root-completed"
+            ):
+                raise RecoveryStateError("post-commit root completion is not bound to the stopped lease")
+            if semantic.get("checkpoint_invalidation") == "completed":
+                return state
+            if semantic.get("checkpoint_invalidation") != "pending":
+                raise RecoveryStateError("post-commit root completion invalidation is not pending")
+            source = self._read_source_locked(semantic["source_state_id"])
+            checkpoint = source.get("public_checkpoint")
+            if not isinstance(checkpoint, Mapping):
+                raise RecoveryStateError("post-commit root completion source checkpoint drifted")
+            invalidation = source.get("checkpoint_invalidation")
+            if checkpoint.get("checkpoint_digest") == semantic.get("source_checkpoint_digest"):
+                source, candidate = self._revalidate_source_locked(source, checkpoint, persist=False)
+                if (
+                    candidate.get("reasons") != ["git-control-plane-drift", "outside-set-drift"]
+                    or _domain_digest(_DOMAIN_CHECKPOINT, candidate.get("candidate_snapshot"))
+                    != semantic.get("candidate_snapshot_digest")
+                ):
+                    raise RecoveryStateError("post-commit root completion source evidence drifted")
+                invalidated = dict(candidate)
+                invalidated["disposition"] = "recovery-ineligible"
+                invalidated["reasons"] = ["post-commit-root-completed"]
+                invalidated["checkpoint_digest"] = self._checkpoint_digest(invalidated)
+                source["public_checkpoint"] = invalidated
+                source["checkpoint_invalidation"] = {
+                    "reason": "post-commit-root-completed",
+                    "evidence_digest": semantic["authorization_digest"],
+                }
+                post = source.get("post_commit_root_completion")
+                if not isinstance(post, Mapping) or not isinstance(
+                    post.get("authorization"), Mapping
+                ):
+                    raise RecoveryStateError("post-commit root completion authorization is missing")
+                if post["authorization"].get("status") == "issued":
+                    post = dict(post)
+                    authorization = dict(post["authorization"])
+                    authorization["status"] = "consumed"
+                    post["authorization"] = authorization
+                    source["post_commit_root_completion"] = post
+                self._commit_source_locked(source)
+            elif (
+                checkpoint.get("disposition") == "recovery-ineligible"
+                and checkpoint.get("reasons") == ["post-commit-root-completed"]
+                and isinstance(invalidation, Mapping)
+                and invalidation.get("reason") == "post-commit-root-completed"
+                and invalidation.get("evidence_digest") == semantic.get("authorization_digest")
+                and _domain_digest(_DOMAIN_CHECKPOINT, checkpoint.get("candidate_snapshot"))
+                == semantic.get("candidate_snapshot_digest")
+            ):
+                invalidated = dict(checkpoint)
+            else:
+                raise RecoveryStateError("post-commit root completion source checkpoint drifted")
+            if any(
+                event.get("event") == "terminal-root-completion-completed"
+                and event.get("lease_id") == lease_id
+                for event in state["history"]
+            ):
+                raise RecoveryStateError("post-commit root completion event preceded registry phase")
+            semantic["checkpoint_invalidation"] = "completed"
+            semantic["checkpoint_digest"] = invalidated["checkpoint_digest"]
+            state["history"].append(
+                {
+                    "event": "terminal-root-completion-completed",
+                    "lease_id": lease_id,
+                    "run_id": semantic["run_id"],
+                    "source_state_id": semantic["source_state_id"],
+                    "checkpoint_digest": semantic["checkpoint_digest"],
+                    "authorization_digest": semantic["authorization_digest"],
+                }
+            )
+            return self._commit_registry_locked(state)
+
+    def post_commit_root_completion_replay_binding(
+        self,
+        *,
+        lease_id: str,
+        run_id: str,
+        task_commit: str,
+        root_verification_digest: str,
+        authorization_handle: str,
+        remediation_scope_digest: str,
+    ) -> dict[str, Any]:
+        """Rebuild the exact released tuple before returning completed replay."""
+        _require_string(lease_id, "post-commit replay lease ID")
+        _require_string(run_id, "post-commit replay run ID")
+        _require_git_sha(task_commit, "post-commit replay task commit")
+        _require_hex(root_verification_digest, "post-commit replay root verification")
+        _require_hex(authorization_handle, "post-commit replay authorization handle")
+        _require_hex(remediation_scope_digest, "post-commit replay remediation scope")
+        with self._lock():
+            state = self._read_registry_locked(rebarrier=True)
+            recorded = [
+                event
+                for event in state["history"]
+                if event.get("event") == "terminal-root-completion-recorded"
+                and event.get("lease_id") == lease_id
+                and event.get("run_id") == run_id
+            ]
+            completed = [
+                event
+                for event in state["history"]
+                if event.get("event") == "terminal-root-completion-completed"
+                and event.get("lease_id") == lease_id
+                and event.get("run_id") == run_id
+            ]
+            released = [
+                event
+                for event in state["history"]
+                if event.get("event") == "contained-terminal-released"
+                and event.get("lease_id") == lease_id
+                and event.get("semantic_disposition") == "root-completed"
+            ]
+            if (
+                state.get("lease") is not None
+                or state.get("outbox") is not None
+                or len(recorded) != 1
+                or len(completed) != 1
+                or len(released) != 1
+            ):
+                raise RecoveryStateError("post-commit completed replay binding drifted")
+            semantic = dict(recorded[0])
+            semantic.pop("event")
+            semantic["checkpoint_invalidation"] = "completed"
+            semantic["checkpoint_digest"] = completed[0]["checkpoint_digest"]
+            _validate_semantic_disposition(semantic)
+            source = self._read_source_locked(semantic["source_state_id"])
+            post = source.get("post_commit_root_completion")
+            action = post.get("action") if isinstance(post, Mapping) else None
+            authorization = post.get("authorization") if isinstance(post, Mapping) else None
+            if not isinstance(action, Mapping) or not isinstance(authorization, Mapping):
+                raise RecoveryStateError("post-commit completed replay binding drifted")
+            authorization_digest = self._post_commit_authorization_digest(authorization)
+            if (
+                semantic.get("task_commit") != task_commit
+                or semantic.get("root_verification_digest") != root_verification_digest
+                or semantic.get("remediation_scope_digest") != remediation_scope_digest
+                or semantic.get("authorization_consumption") != "consumed"
+                or semantic.get("terminal_binding_format") != "run-dir-v1"
+                or semantic.get("authorization_digest") != authorization_digest
+                or action.get("run_id") != run_id
+                or action.get("task_commit") != task_commit
+                or action.get("root_verification_digest") != root_verification_digest
+                or action.get("remediation_scope_digest") != remediation_scope_digest
+                or action.get("tuple_digest") != semantic.get("user_action_digest")
+                or action.get("source_checkpoint_digest")
+                != semantic.get("source_checkpoint_digest")
+                or action.get("producer_allowed_set_digest")
+                != semantic.get("allowed_set_digest")
+                or authorization.get("status") != "consumed"
+                or authorization.get("authorization_handle") != authorization_handle
+                or authorization.get("tuple_digest") != action.get("tuple_digest")
+                or completed[0].get("source_state_id") != semantic.get("source_state_id")
+                or completed[0].get("authorization_digest") != authorization_digest
+                or released[0].get("semantic_disposition_digest")
+                != _terminal_part_digest("semantic", semantic)
+            ):
+                raise RecoveryStateError("post-commit completed replay binding drifted")
+            return {
+                "schema": "terminal-root-completion-artifact-v1",
+                "lease_id": lease_id,
+                "run_id": run_id,
+                "source_state_id": semantic["source_state_id"],
+                "task_commit": task_commit,
+                "parent_commit": semantic["parent_commit"],
+                "root_verification_digest": root_verification_digest,
+                "producer_allowed_set_digest": action["producer_allowed_set_digest"],
+                "remediation_scope_digest": remediation_scope_digest,
+                "action_snapshot_id": action["action_snapshot_id"],
+                "action_snapshot_sha256": action["action_snapshot_sha256"],
+                "user_action_digest": action["tuple_digest"],
+                "authorization_digest": authorization_digest,
+                "authorization_consumption": "consumed",
+                "terminal_binding_format": semantic["terminal_binding_format"],
+                "terminal_binding_digest": semantic["terminal_binding_digest"],
+                "checkpoint_digest": semantic["checkpoint_digest"],
+                "archive_digest": released[0]["archive_digest"],
+            }
+
     def record_terminal_abandonment(self, lease_id: str) -> dict[str, Any]:
         """Record the one exact no-handoff terminal outcome for outside-set drift.
 
@@ -4357,7 +5375,11 @@ class RecoveryRegistry:
         evidence_digest: str,
     ) -> dict[str, Any]:
         """Invalidate a previously materialized checkpoint after zero-write escalation."""
-        if reason not in {"semantic-needs-escalation", "terminal-abandoned-outside-set-drift"}:
+        if reason not in {
+            "semantic-needs-escalation",
+            "terminal-abandoned-outside-set-drift",
+            "post-commit-root-completed",
+        }:
             raise RecoveryStateError("checkpoint invalidation reason is unsupported")
         _require_hex(evidence_digest, "checkpoint invalidation evidence digest")
         with self._lock():
@@ -4528,7 +5550,7 @@ class RecoveryRegistry:
             semantic = lease.get("semantic_disposition")
             if (
                 isinstance(semantic, dict)
-                and semantic.get("disposition") in {"needs-escalation", "abandoned"}
+                and semantic.get("disposition") in {"needs-escalation", "abandoned", "root-completed"}
                 and semantic.get("checkpoint_invalidation") != "completed"
             ):
                 raise RecoveryStateError("guardian close requires completed checkpoint invalidation")
@@ -4548,7 +5570,7 @@ class RecoveryRegistry:
             semantic = lease.get("semantic_disposition")
             if (
                 isinstance(semantic, dict)
-                and semantic.get("disposition") in {"needs-escalation", "abandoned"}
+                and semantic.get("disposition") in {"needs-escalation", "abandoned", "root-completed"}
                 and semantic.get("checkpoint_invalidation") != "completed"
             ):
                 raise RecoveryStateError("contained release requires completed checkpoint invalidation")
