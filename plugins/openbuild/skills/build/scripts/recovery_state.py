@@ -4738,11 +4738,63 @@ class RecoveryRegistry:
             }
 
     def _task_commit_paths(self, task_commit: str) -> list[str]:
-        raw = self._git("diff-tree", "--no-commit-id", "--name-only", "-r", "-z", task_commit)
+        raw = self._git(
+            "diff-tree",
+            "--no-commit-id",
+            "--name-only",
+            "--no-renames",
+            "-r",
+            "-z",
+            task_commit,
+        )
         paths = [_normalize_relative(_decode_git_path(value)) for value in raw.split(b"\0") if value]
         if len(set(paths)) != len(paths):
             raise RecoveryStateError("task commit contains duplicate normalized paths")
         return sorted(paths)
+
+    def _verified_intervening_root_commits(
+        self,
+        checkpoint_head: str,
+        task_parent: str,
+        allowed_paths: Sequence[str],
+        records: Mapping[str, Mapping[str, Any]],
+    ) -> list[str]:
+        """Return a linear checkpoint-to-parent chain, rejecting merges and unrelated history."""
+        _require_git_sha(checkpoint_head, "post-commit checkpoint head")
+        _require_git_sha(task_parent, "post-commit task parent")
+        if checkpoint_head == task_parent:
+            return []
+        merge_base = self._git(
+            "merge-base", checkpoint_head, task_parent, allow_failure=True
+        ).strip().decode("ascii")
+        if merge_base != checkpoint_head:
+            raise RecoveryStateError("post-commit task parent does not descend from checkpoint")
+        raw = self._git(
+            "rev-list", "--reverse", "--parents", f"{checkpoint_head}..{task_parent}"
+        )
+        previous = checkpoint_head
+        commits: list[str] = []
+        for raw_line in raw.splitlines():
+            fields = raw_line.decode("ascii").split()
+            if len(fields) != 2 or fields[1] != previous:
+                raise RecoveryStateError("post-commit intervening history is not linear")
+            commit = fields[0]
+            _require_git_sha(commit, "post-commit intervening commit")
+            commits.append(commit)
+            previous = commit
+        if not commits or previous != task_parent:
+            raise RecoveryStateError("post-commit intervening history is incomplete")
+        intervening_paths = {
+            path for commit in commits for path in self._task_commit_paths(commit)
+        }
+        if any(
+            self._path_is_allowed(path, allowed_paths, records)
+            for path in intervening_paths
+        ):
+            raise RecoveryStateError(
+                "post-commit intervening history overlaps immutable producer scope"
+            )
+        return commits
 
     def finalize_post_commit_root_completion(
         self,
@@ -4840,8 +4892,14 @@ class RecoveryRegistry:
             if checkpoint.get("checkpoint_digest") != action.get("source_checkpoint_digest"):
                 raise RecoveryStateError("post-commit finalization checkpoint drifted")
             parent = self._git("rev-parse", "--verify", f"{task_commit}^").strip().decode("ascii")
-            if parent != manifest["parent_commit"] or parent != source["pre_snapshot"]["head"]:
+            if parent != manifest["parent_commit"]:
                 raise RecoveryStateError("post-commit task parent provenance drifted")
+            checkpoint_head = source["pre_snapshot"]["head"]
+            allowed_paths = source["pre_snapshot"]["allowed_paths"]
+            records = source["pre_snapshot"]["records"]
+            intervening_commits = self._verified_intervening_root_commits(
+                checkpoint_head, parent, allowed_paths, records
+            )
             merge_base = self._git("merge-base", task_commit, "HEAD").strip().decode("ascii")
             if merge_base != task_commit:
                 raise RecoveryStateError("post-commit task commit is not an ancestor of HEAD")
@@ -4849,8 +4907,6 @@ class RecoveryRegistry:
             entries = {entry["path"]: entry["role"] for entry in manifest["entries"]}
             if set(commit_paths) != set(entries):
                 raise RecoveryStateError("post-commit task paths do not exactly match remediation scope")
-            allowed_paths = source["pre_snapshot"]["allowed_paths"]
-            records = source["pre_snapshot"]["records"]
             if any(
                 (role == "producer" and not self._path_is_allowed(path, allowed_paths, records))
                 or role not in {"producer", "root-completion"}
@@ -4872,7 +4928,9 @@ class RecoveryRegistry:
                 "status": proof_source["candidate_snapshot"]["status"],
                 "records": proof_source["candidate_snapshot"]["records"],
                 "task_commit": task_commit,
+                "checkpoint_head": checkpoint_head,
                 "parent_commit": parent,
+                "intervening_commits": intervening_commits,
                 "commit_paths": commit_paths,
             }
             # Re-capture immediately before intent; any race remains a no-mutation failure.

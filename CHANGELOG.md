@@ -4,6 +4,18 @@ OpenBuild follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.2.4] - 2026-07-18
+
+### Fixed
+
+- Post-commit root completion now accepts an actual task parent reached from the immutable writer checkpoint through a complete strictly linear chain of root-only commits. Every path changed by every intervening commit must remain outside the producer allowlist; commit path collection forces `--no-renames` so configured rename detection cannot hide an old producer path. Merge history, unrelated or incomplete ancestry, rename-hidden overlap, and other producer-scope overlap still fail closed before durable intent.
+- Git provenance now binds the checkpoint head, actual task parent, and every verified intervening commit ID, while the existing repeated repository barrier continues to reject a concurrent ref/index/worktree change without lifecycle mutation.
+
+### Changed
+
+- Package and release documentation now identify 2.2.4. The durable recovery schema does not change: its reader floor remains 2.2.3 and exact 2.2.0–2.2.2 state remains readable without rewrite-on-read.
+- The packaged defaults, `codex-exec-explicit-model`, project → user → packaged precedence, and the ban on unknown-model agent routes remain unchanged; both README files now pin and describe 2.2.4.
+
 ## [2.2.3] - 2026-07-18
 
 ### Added

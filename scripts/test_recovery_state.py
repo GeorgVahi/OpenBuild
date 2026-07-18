@@ -69,7 +69,14 @@ class RegistryContractTests(unittest.TestCase):
             )
             owner.commit_activation("normal-1", preflight["allowed_set_digest"])
             owner.finalize_prepared_checkpoint(preflight, source_receipt_digest="a" * 64)
+            source_parent = run_git(workspace, "rev-parse", "HEAD")
+            (workspace / "outside.txt").write_text(
+                "root interleaved\n", encoding="utf-8", newline="\n"
+            )
+            run_git(workspace, "add", "outside.txt")
+            run_git(workspace, "commit", "--quiet", "-m", "interleaved root completion")
             parent = run_git(workspace, "rev-parse", "HEAD")
+            self.assertNotEqual(parent, source_parent)
             (workspace / "allowed" / "seed.txt").write_text("producer\n", encoding="utf-8", newline="\n")
             (workspace / "root-completion.txt").write_text("root\n", encoding="utf-8", newline="\n")
             run_git(workspace, "add", "allowed/seed.txt", "root-completion.txt")
@@ -367,6 +374,21 @@ class RegistryContractTests(unittest.TestCase):
                 race_checkpoint,
                 persist=False,
             )
+            expected_git_provenance_digest = recovery_state._domain_digest(
+                recovery_state._DOMAIN_CHECKPOINT,
+                {
+                    "head": proof_source["candidate_snapshot"]["head"],
+                    "ref": proof_source["candidate_snapshot"]["ref"],
+                    "full_index": proof_source["candidate_snapshot"]["full_index"],
+                    "status": proof_source["candidate_snapshot"]["status"],
+                    "records": proof_source["candidate_snapshot"]["records"],
+                    "task_commit": task_commit,
+                    "checkpoint_head": source_parent,
+                    "parent_commit": parent,
+                    "intervening_commits": [parent],
+                    "commit_paths": owner._task_commit_paths(task_commit),
+                },
+            )
             drifted_checkpoint = json.loads(json.dumps(candidate_checkpoint))
             drifted_checkpoint["checkpoint_digest"] = "0" * 64
             registry_before_barrier = owner.path.read_bytes()
@@ -460,6 +482,10 @@ class RegistryContractTests(unittest.TestCase):
             )
 
             self.assertEqual(completed["lease"]["semantic_disposition"]["schema"], "terminal-root-completion-v1")
+            self.assertEqual(
+                completed["lease"]["semantic_disposition"]["git_provenance_digest"],
+                expected_git_provenance_digest,
+            )
             consumed_source = reloaded.read_private_source(preflight["source_state_id"])
             self.assertEqual(
                 consumed_source["post_commit_root_completion"]["authorization"]["status"],
@@ -556,6 +582,209 @@ class RegistryContractTests(unittest.TestCase):
             self.assertEqual(
                 (workspace / "later-user-change.txt").read_text(encoding="utf-8"), "untouched\n"
             )
+
+    def test_m1_direct_task_parent_remains_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = self.make_git_workspace(root)
+            owner = self.owner(workspace, root / "state")
+            context = self.prepare_post_commit_finalizer(
+                workspace, owner, run_id="direct-parent-run", history="direct"
+            )
+            completed = owner.finalize_post_commit_root_completion(
+                "normal-1",
+                run_id=context["run_id"],
+                task_commit=context["task_commit"],
+                root_verification_digest="f" * 64,
+                authorization_handle=context["authorization"]["authorization_handle"],
+                remediation_scope=context["manifest"],
+                terminal_binding_format="run-dir-v1",
+            )
+            semantic = completed["lease"]["semantic_disposition"]
+            self.assertEqual(semantic["parent_commit"], context["pre_snapshot"]["head"])
+
+    def test_m1_intervening_root_commit_cannot_overlap_producer_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = self.make_git_workspace(root)
+            owner = self.owner(workspace, root / "state")
+            context = self.prepare_post_commit_finalizer(
+                workspace, owner, run_id="intervening-overlap-run", history="overlap"
+            )
+            registry_before = owner.path.read_bytes()
+            source_before = owner.source_path(context["preflight"]["source_state_id"]).read_bytes()
+
+            with self.assertRaisesRegex(
+                recovery_state.RecoveryStateError,
+                "intervening history overlaps immutable producer scope",
+            ):
+                owner.finalize_post_commit_root_completion(
+                    "normal-1",
+                    run_id=context["run_id"],
+                    task_commit=context["task_commit"],
+                    root_verification_digest="f" * 64,
+                    authorization_handle=context["authorization"]["authorization_handle"],
+                    remediation_scope=context["manifest"],
+                    terminal_binding_format="run-dir-v1",
+                )
+            self.assertEqual(owner.path.read_bytes(), registry_before)
+            self.assertEqual(
+                owner.source_path(context["preflight"]["source_state_id"]).read_bytes(),
+                source_before,
+            )
+
+    def test_m1_intervening_rename_cannot_hide_producer_overlap(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = self.make_git_workspace(root)
+            owner = self.owner(workspace, root / "state")
+            context = self.prepare_post_commit_finalizer(
+                workspace, owner, run_id="intervening-rename-run", history="rename"
+            )
+            registry_before = owner.path.read_bytes()
+            source_before = owner.source_path(context["preflight"]["source_state_id"]).read_bytes()
+
+            with self.assertRaisesRegex(
+                recovery_state.RecoveryStateError,
+                "intervening history overlaps immutable producer scope",
+            ):
+                owner.finalize_post_commit_root_completion(
+                    "normal-1",
+                    run_id=context["run_id"],
+                    task_commit=context["task_commit"],
+                    root_verification_digest="f" * 64,
+                    authorization_handle=context["authorization"]["authorization_handle"],
+                    remediation_scope=context["manifest"],
+                    terminal_binding_format="run-dir-v1",
+                )
+            self.assertEqual(owner.path.read_bytes(), registry_before)
+            self.assertEqual(
+                owner.source_path(context["preflight"]["source_state_id"]).read_bytes(),
+                source_before,
+            )
+
+    def test_m1_task_commit_path_scan_forces_no_renames(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = self.make_git_workspace(root)
+            owner = self.owner(workspace, root / "state")
+            task_commit = "a" * 40
+            with mock.patch.object(
+                owner,
+                "_git",
+                return_value=b"allowed/seed.txt\0renamed-outside.txt\0",
+            ) as git:
+                self.assertEqual(
+                    owner._task_commit_paths(task_commit),
+                    ["allowed/seed.txt", "renamed-outside.txt"],
+                )
+            git.assert_called_once_with(
+                "diff-tree",
+                "--no-commit-id",
+                "--name-only",
+                "--no-renames",
+                "-r",
+                "-z",
+                task_commit,
+            )
+
+    def test_m1_intervening_root_history_must_be_linear(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = self.make_git_workspace(root)
+            owner = self.owner(workspace, root / "state")
+            context = self.prepare_post_commit_finalizer(
+                workspace, owner, run_id="intervening-merge-run", history="merge"
+            )
+            registry_before = owner.path.read_bytes()
+            source_before = owner.source_path(context["preflight"]["source_state_id"]).read_bytes()
+
+            with self.assertRaisesRegex(
+                recovery_state.RecoveryStateError,
+                "intervening history is not linear",
+            ):
+                owner.finalize_post_commit_root_completion(
+                    "normal-1",
+                    run_id=context["run_id"],
+                    task_commit=context["task_commit"],
+                    root_verification_digest="f" * 64,
+                    authorization_handle=context["authorization"]["authorization_handle"],
+                    remediation_scope=context["manifest"],
+                    terminal_binding_format="run-dir-v1",
+                )
+            self.assertEqual(owner.path.read_bytes(), registry_before)
+            self.assertEqual(
+                owner.source_path(context["preflight"]["source_state_id"]).read_bytes(),
+                source_before,
+            )
+
+    def test_m1_intervening_root_history_must_descend_from_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = self.make_git_workspace(root)
+            owner = self.owner(workspace, root / "state")
+            context = self.prepare_post_commit_finalizer(
+                workspace, owner, run_id="intervening-unrelated-run", history="unrelated"
+            )
+            registry_before = owner.path.read_bytes()
+            source_before = owner.source_path(context["preflight"]["source_state_id"]).read_bytes()
+
+            with self.assertRaisesRegex(
+                recovery_state.RecoveryStateError,
+                "task parent does not descend from checkpoint",
+            ):
+                owner.finalize_post_commit_root_completion(
+                    "normal-1",
+                    run_id=context["run_id"],
+                    task_commit=context["task_commit"],
+                    root_verification_digest="f" * 64,
+                    authorization_handle=context["authorization"]["authorization_handle"],
+                    remediation_scope=context["manifest"],
+                    terminal_binding_format="run-dir-v1",
+                )
+            self.assertEqual(owner.path.read_bytes(), registry_before)
+            self.assertEqual(
+                owner.source_path(context["preflight"]["source_state_id"]).read_bytes(),
+                source_before,
+            )
+
+    def test_m1_intervening_root_history_must_be_complete(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = self.make_git_workspace(root)
+            owner = self.owner(workspace, root / "state")
+            context = self.prepare_post_commit_finalizer(
+                workspace, owner, run_id="intervening-incomplete-run", history="outside"
+            )
+            registry_before = owner.path.read_bytes()
+            source_before = owner.source_path(context["preflight"]["source_state_id"]).read_bytes()
+            original_git = owner._git
+
+            def incomplete_rev_list(*arguments: str, **kwargs: object) -> bytes:
+                if arguments[:3] == ("rev-list", "--reverse", "--parents"):
+                    return b""
+                return original_git(*arguments, **kwargs)
+
+            with mock.patch.object(owner, "_git", side_effect=incomplete_rev_list):
+                with self.assertRaisesRegex(
+                    recovery_state.RecoveryStateError,
+                    "intervening history is incomplete",
+                ):
+                    owner.finalize_post_commit_root_completion(
+                        "normal-1",
+                        run_id=context["run_id"],
+                        task_commit=context["task_commit"],
+                        root_verification_digest="f" * 64,
+                        authorization_handle=context["authorization"]["authorization_handle"],
+                        remediation_scope=context["manifest"],
+                        terminal_binding_format="run-dir-v1",
+                    )
+            self.assertEqual(owner.path.read_bytes(), registry_before)
+            self.assertEqual(
+                owner.source_path(context["preflight"]["source_state_id"]).read_bytes(),
+                source_before,
+            )
+
     def make_git_workspace(self, root: Path) -> Path:
         workspace = root / "workspace"
         workspace.mkdir()
@@ -574,6 +803,138 @@ class RegistryContractTests(unittest.TestCase):
 
     def owner(self, workspace: Path, state_root: Path, **kwargs: object):
         return recovery_state.RecoveryRegistry(workspace, state_root=state_root, **kwargs)
+
+    def prepare_post_commit_finalizer(
+        self,
+        workspace: Path,
+        owner,
+        *,
+        run_id: str,
+        history: str,
+    ) -> dict[str, object]:
+        preflight = self.reserve_source(owner, run_id=run_id)
+        owner.claim_contained_launch("normal-1", "contained-token")
+        owner.bind_process_unactivated(
+            "normal-1",
+            allowed_set_digest=preflight["allowed_set_digest"],
+            provider_receipt=self.provider_receipt(),
+            process_receipt=self.process_receipt(),
+        )
+        owner.commit_activation("normal-1", preflight["allowed_set_digest"])
+        owner.finalize_prepared_checkpoint(preflight, source_receipt_digest="a" * 64)
+        pre_snapshot = owner.read_private_source(preflight["source_state_id"])["pre_snapshot"]
+
+        if history == "outside":
+            (workspace / "outside.txt").write_text(
+                "root interleaved\n", encoding="utf-8", newline="\n"
+            )
+            run_git(workspace, "add", "outside.txt")
+            run_git(workspace, "commit", "--quiet", "-m", "interleaved root completion")
+        elif history == "overlap":
+            (workspace / "allowed" / "seed.txt").write_text(
+                "root overlap\n", encoding="utf-8", newline="\n"
+            )
+            run_git(workspace, "add", "allowed/seed.txt")
+            run_git(workspace, "commit", "--quiet", "-m", "overlapping root completion")
+        elif history == "rename":
+            run_git(workspace, "config", "diff.renames", "true")
+            run_git(workspace, "mv", "allowed/seed.txt", "renamed-outside.txt")
+            run_git(workspace, "commit", "--quiet", "-m", "renamed producer completion")
+        elif history == "merge":
+            base_branch = run_git(workspace, "branch", "--show-current")
+            run_git(workspace, "checkout", "--quiet", "-b", "intervening-side")
+            (workspace / "side-root.txt").write_text("side\n", encoding="utf-8", newline="\n")
+            run_git(workspace, "add", "side-root.txt")
+            run_git(workspace, "commit", "--quiet", "-m", "side root completion")
+            run_git(workspace, "checkout", "--quiet", base_branch)
+            (workspace / "main-root.txt").write_text("main\n", encoding="utf-8", newline="\n")
+            run_git(workspace, "add", "main-root.txt")
+            run_git(workspace, "commit", "--quiet", "-m", "main root completion")
+            run_git(
+                workspace,
+                "merge",
+                "--quiet",
+                "--no-ff",
+                "intervening-side",
+                "-m",
+                "merge root completion",
+            )
+        elif history == "unrelated":
+            run_git(workspace, "checkout", "--quiet", "--orphan", "unrelated-root")
+            run_git(workspace, "read-tree", "--empty")
+            run_git(workspace, "add", ".gitignore", "allowed/seed.txt", "outside.txt")
+            run_git(workspace, "commit", "--quiet", "-m", "unrelated root completion")
+        elif history != "direct":
+            raise AssertionError(f"unsupported history fixture: {history}")
+
+        parent = run_git(workspace, "rev-parse", "HEAD")
+        (workspace / "allowed" / "seed.txt").write_text(
+            "producer\n", encoding="utf-8", newline="\n"
+        )
+        (workspace / "root-completion.txt").write_text(
+            "root\n", encoding="utf-8", newline="\n"
+        )
+        run_git(workspace, "add", "allowed/seed.txt", "root-completion.txt")
+        run_git(workspace, "commit", "--quiet", "-m", "task completion")
+        task_commit = run_git(workspace, "rev-parse", "HEAD")
+
+        owner.record_terminal_evidence(
+            "normal-1", self.terminal_receipt(True), preflight["allowed_set_digest"]
+        )
+        owner.prove_contained_tree_empty(
+            "normal-1", self.zero_proof(), preflight["allowed_set_digest"]
+        )
+        checkpoint = owner.revalidate_checkpoint(
+            owner.read_private_source(preflight["source_state_id"])["public_checkpoint"]
+        )
+        self.assertEqual(checkpoint["reasons"], ["git-control-plane-drift", "outside-set-drift"])
+        manifest = owner.remediation_scope_manifest(
+            task_commit=task_commit,
+            parent_commit=parent,
+            source_checkpoint_digest=checkpoint["checkpoint_digest"],
+            specification_revision="R-029",
+            milestone="M2c-source",
+            producer_allowed_set_digest=preflight["allowed_set_digest"],
+            root_verification_digest="f" * 64,
+            entries=[
+                {"path": "allowed/seed.txt", "role": "producer"},
+                {"path": "root-completion.txt", "role": "root-completion"},
+            ],
+        )
+        snapshot = owner.build_post_commit_root_completion_action_snapshot(
+            run_id=run_id,
+            task_commit=task_commit,
+            root_verification_digest="f" * 64,
+            source_checkpoint_digest=checkpoint["checkpoint_digest"],
+            remediation_scope=manifest,
+        )
+        snapshot_bytes = json.dumps(
+            snapshot,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        action = owner.stage_post_commit_root_completion_action(
+            run_id=run_id,
+            task_commit=task_commit,
+            root_verification_digest="f" * 64,
+            source_checkpoint_digest=checkpoint["checkpoint_digest"],
+            remediation_scope=manifest,
+            action_snapshot=snapshot,
+            action_snapshot_id="8" * 64,
+            action_snapshot_sha256=hashlib.sha256(snapshot_bytes).hexdigest(),
+        )
+        authorization = owner.issue_post_commit_root_completion_authorization(action)
+        return {
+            "owner": owner,
+            "preflight": preflight,
+            "pre_snapshot": pre_snapshot,
+            "parent": parent,
+            "task_commit": task_commit,
+            "manifest": manifest,
+            "authorization": authorization,
+            "run_id": run_id,
+        }
 
     def checkpoint(self, owner, **kwargs: object) -> dict[str, object]:
         values: dict[str, object] = {

@@ -7,17 +7,17 @@
 - Review baseline: `main@bbb701c894e463741013b3bc89939970dbac9698`; исходное состояние чистое (`## main...origin/main`).
 - Workflow target: Complete
 - Starting phase: discovery
-- Specification revision: R-007
+- Specification revision: R-008
 - Complexity: high — меняются backward compatibility durable binding, terminal state transitions, Git provenance, single-writer concurrency и security boundary освобождения lease.
 - Implementation mode: TDD-first — меняются persistence/compatibility/state-machine contracts.
-- Version impact: patch `2.2.2` → `2.2.3` — backward-compatible исправление released lifecycle; authoritative source `plugins/openbuild/.codex-plugin/plugin.json`, синхронные поверхности `CHANGELOG.md`, `README.md`, `README.ru.md`, recovery reader floor и workflow contracts.
+- Version impact: patch `2.2.3` → `2.2.4` — live-shaped provenance correction поверх backward-compatible lifecycle fix; authoritative source `plugins/openbuild/.codex-plugin/plugin.json`, синхронные поверхности `CHANGELOG.md`, `README.md`, `README.ru.md`. Durable recovery schema и reader floor остаются 2.2.3.
 - Routing mode: `codex-exec-explicit-model`
 - Discovery mode: mixed — exact search process завершился transport-success, но не нашёл тестовую точку и compatibility defect; после `unusable-evidence` выполнен один targeted root-recovery по уже локализованным owner symbols/tests.
 - Search usage route: separate-pool → targeted root-recovery; второй discovery run не создавался.
 - Search routing receipt: packaged map `OpenBuild defaults`, SHA-256 `fce8589a24dd2dd4fb8b538c91e306f7883bb3a5511f3e4b9605b031191b5e03`, discovery/default step 1/1, exact `openbuild_search_separate`, configured/observed `gpt-5.3-codex-spark`/low/read-only, `turn.completed`, exit 0, valid result, stopped tree; semantic result incomplete for tests/compatibility, normalized `unusable-evidence`.
 - Implementation model route: resolve packaged `implementation.high`; expected start `openbuild_implementation_balanced`, further steps only after a valid configured pre-edit trigger.
 - Implementation routing receipt: packaged map `OpenBuild defaults`, SHA-256 `fce8589a24dd2dd4fb8b538c91e306f7883bb3a5511f3e4b9605b031191b5e03`, implementation/high. Step 1 `openbuild_implementation_balanced` (`gpt-5.6-terra`/medium/workspace-write) completed transport-success before edit with semantic `NEEDS_ESCALATION`, adjudicated configured trigger `task-complexity-above-tier`; exact zero-write status confirmed, source checkpoint invalidation completed and registry vacant. Step 2 `openbuild_implementation_strong` (`gpt-5.6-terra`/xhigh/workspace-write) owned all M1 edits and completed `turn.completed`/exit 0/valid result/stopped tree. Independent root validation initially found one test tuple mismatch; active-lease Python validation also produced exact generated `__pycache__` outside-set drift, so the lifecycle was closed through `terminal-abandonment-v1`, checkpoint invalidation and exact vacancy rather than accepted handoff. Root used the existing same-scope completion authority, fixed the test binding and proof-phase mutation under TDD, reran 331 focused tests green, and recorded `_record-root-completion` with exact allowed-set/diff attribution.
-- Review routing receipt: packaged high-risk route `openbuild_review_balanced` → `openbuild_review_strong` → `openbuild_review_sol_high`, map SHA-256 `fce8589a24dd2dd4fb8b538c91e306f7883bb3a5511f3e4b9605b031191b5e03`. Earlier ladders exhausted their configured routes and every concrete finding was remediated through RED/GREEN. The final user-authorized fresh cycle started again at exact `openbuild_review_balanced` (`gpt-5.6-terra`/medium/read-only) and completed with valid `turn.completed`, exit 0, valid result and stopped tree; verdict `ACCEPT`, high confidence, complete AC-01–AC-12 coverage, no finding and no escalation trigger.
+- Review routing receipt: packaged high-risk route `openbuild_review_balanced` → `openbuild_review_strong` → `openbuild_review_sol_high`, map SHA-256 `fce8589a24dd2dd4fb8b538c91e306f7883bb3a5511f3e4b9605b031191b5e03`. Earlier ladders exhausted their configured routes and every concrete finding was remediated through RED/GREEN. The user-authorized fresh cycle at R-007 returned `ACCEPT`, high confidence, complete AC-01–AC-12 coverage and no finding. Live remediation then exposed the R-008 interleaved-root provenance gap. Fresh Balanced required complete AC-13 execution coverage; Strong required configuration-independent no-rename path attribution; terminal Sol/high confirmed runtime/tests and required only normative/source-map/validation/activity reconciliation. All findings were applied. The user explicitly authorized a new fresh R-008 cycle; exact `openbuild_review_balanced` completed with configured/observed `gpt-5.6-terra`/medium/read-only, `turn.completed`, exit 0, valid result and stopped tree, returning `ACCEPT`, high confidence, complete AC-01–AC-13 coverage and no escalation trigger.
 
 ## 1. Outcome
 
@@ -40,7 +40,7 @@ OpenBuild 2.2.1 успешно завершил writer (`turn.completed`, exit 0
 - Backward-compatible verification terminal binding `run-dir-v1` и `run-id-v2`.
 - Exact owner transition для verified post-commit root completion существующего stopped terminal lifecycle.
 - Registry/source schema, reader-floor, replay/fault и negative tests.
-- Static workflow guards, EN/RU docs, changelog и patch version 2.2.3.
+- Static workflow guards, EN/RU docs, changelog и patch version 2.2.4.
 - Операторская инструкция для уже застрявшего состояния без раскрытия private registry paths/nonces.
 
 ### Out of scope
@@ -65,7 +65,7 @@ OpenBuild 2.2.1 успешно завершил writer (`turn.completed`, exit 0
 | Missing regression | `scripts/test_recovery_state.py:2244-2317` | Legacy fixture меняет reader floor, но terminal digest создаёт текущим helper и вызывает registry owner напрямую. | Runner-level 2.2.1 `run_dir` binding mismatch не воспроизведён. |
 | Mixed negative | `scripts/test_recovery_state.py:2019-2056` | Mixed drift обязан отказать обычному abandonment без mutation. | Нужен отдельный authorized outcome, а не ослабление v1. |
 | Ordering contract | `plugins/openbuild/skills/build/references/implementation-delegation.md:40-44,181-194` | Root writes/Git разрешены только после `_finalize-success` и vacancy. | Предотвращение уже заявлено, но compatibility trace/validator не ловит нарушение. |
-| Version policy | `CONTRIBUTING.md:14-31`; `plugins/openbuild/.codex-plugin/plugin.json:3` | Каждый commit повышает manifest и синхронизирует docs/changelog. | Target patch 2.2.3 и новый reader floor входят в один commit. |
+| Version policy | `CONTRIBUTING.md:14-31`; `plugins/openbuild/.codex-plugin/plugin.json:3` | Каждый commit повышает manifest и синхронизирует docs/changelog. | Follow-up target patch 2.2.4 синхронизирован; durable reader floor остаётся 2.2.3. |
 
 ### Source of truth
 
@@ -75,16 +75,16 @@ OpenBuild 2.2.1 успешно завершил writer (`turn.completed`, exit 0
 
 | Source | Authority/owner | Status/revision | Normative scope and decisions | Outgoing normative links | Editable | Reconciliation |
 |---|---|---|---|---|---|---|
-| `BUILD-terminal-finalization-2.2.3.md` | current user + repository root spec | R-007 | D-001–D-008, T-001–T-009, AC-01–AC-12 | current owner/contracts listed below | yes | root |
+| `BUILD-terminal-finalization-2.2.3.md` | current user + repository root spec | R-008 | D-001–D-008, T-001–T-009, AC-01–AC-13 | current owner/contracts listed below | yes | root |
 | `BUILD-recovery-autonomy-2.2.2.md` | accepted historical user decision record | Complete R-005 | existing D-001–D-004; exact outside-only abandonment and no-force boundary | its source graph is closed at `:85-102`; current editable owners are mapped below, frozen historical BUILD nodes are not rewritten | no | aligned; current incident adds new evidence |
-| `plugins/openbuild/skills/build/SKILL.md` | packaged workflow owner | 2.2.3 | lifecycle/order/authority/reporting | implementation/model/TDD/minimality/review/version references | yes | aligned: legacy binding and post-commit owner flow documented |
-| `plugins/openbuild/skills/build/references/implementation-delegation.md` | single-writer and terminal order owner | 2.2.3 | D-001–D-003, root handoff/vacancy | model routing/TDD | yes | aligned: exact legacy incident and bytecode-artifact boundary |
-| `plugins/openbuild/skills/build/references/model-routing.md` | exact route owner | 2.2.3 | no transport fallback/new writer | implementation/review | yes | aligned: post-commit completion is not routing |
-| `plugins/openbuild/skills/build/references/tdd-workflow.md` | behavioral test owner | 2.2.3 | red/green recovery trace | delegation/minimality | yes | aligned: historical binding/post-commit/fault trace |
+| `plugins/openbuild/skills/build/SKILL.md` | packaged workflow owner | package 2.2.4; durable contract 2.2.3 | lifecycle/order/authority/reporting | implementation/model/TDD/minimality/review/version references | yes | aligned: legacy binding and post-commit owner flow documented |
+| `plugins/openbuild/skills/build/references/implementation-delegation.md` | single-writer and terminal order owner | package 2.2.4; durable contract 2.2.3 | D-001–D-003, root handoff/vacancy | model routing/TDD | yes | aligned: exact legacy incident and bytecode-artifact boundary |
+| `plugins/openbuild/skills/build/references/model-routing.md` | exact route owner | package 2.2.4 | no transport fallback/new writer | implementation/review | yes | aligned: post-commit completion is not routing |
+| `plugins/openbuild/skills/build/references/tdd-workflow.md` | behavioral test owner | package 2.2.4 | red/green recovery trace | delegation/minimality | yes | aligned: historical binding/post-commit/fault/interleaved ancestry trace |
 | `plugins/openbuild/skills/build/references/minimality-protocol.md` | technical minimality owner | 2.2.2 unchanged | owner-layer/no parallel fallback | none in scope | yes | aligned |
-| `plugins/openbuild/skills/build/references/review-protocol.md` | high-risk acceptance owner | 2.2.3 | final recovery review gates | TDD/minimality/versioning | yes | aligned: compatibility/post-commit evidence required |
+| `plugins/openbuild/skills/build/references/review-protocol.md` | high-risk acceptance owner | package 2.2.4 | final recovery review gates | TDD/minimality/versioning | yes | aligned: compatibility/post-commit evidence required |
 | `plugins/openbuild/skills/build/references/versioning.md`, `CONTRIBUTING.md` | version/release owner | current | patch/reader-floor/same-commit sync | manifest/changelog/READMEs | yes | aligned |
-| `README.md`, `README.ru.md`, `CHANGELOG.md`, manifest | public behavior/version record | 2.2.3 | install/update/recovery behavior | release contract above | yes | aligned; validation/review pending |
+| `README.md`, `README.ru.md`, `CHANGELOG.md`, manifest | public behavior/version record | 2.2.4 | install/update/recovery behavior; durable reader floor 2.2.3 | release contract above | yes | aligned; final fresh review pending |
 
 Historical `BUILD-auto-continuation-2.2.1.md` and `BUILD-route-recovery-safety.md` remain frozen evidence already reconciled by the accepted 2.2.2 source graph; this task does not change their decisions or acceptance records.
 
@@ -121,7 +121,7 @@ Historical `BUILD-auto-continuation-2.2.1.md` and `BUILD-route-recovery-safety.m
 |---|---|---|---|---|
 | T-001 | Один owner helper вычисляет version-tagged candidate records для current `run-id-v2` и legacy `run-dir-v1`; tag не входит в исторический hashed payload. `run-dir-v1` в точности реконструирует прежний `str(run_dir.resolve())` и прежний closed field order, но принимается только после current owner checks: directory name=`expected_run_id`, stable canonical path/object identity совпадает с загруженными private request/run artifacts, а alternate equivalent-name/different-path не существует. Stored digest обязан совпасть ровно с одним candidate; zero/multiple/dual match блокируется, downstream использует matched immutable digest. | selected | минимально расширяет `agent_runner.py`; downgrade и mutation registry не нужны; exact legacy serialization подтверждена tag v2.2.0/v2.2.1 | D-003/D-005, exact run/receipt/path identity сохраняются без публикации path |
 | T-002 | Обычный `terminal-abandonment-v1` не меняется. Новый private transition `terminal-root-completion-v1` принимает exact run, full commit SHA, root verification digest и canonical user-action digest. | selected | отдельный outcome предотвращает расширение automatic abandon | D-001/D-003/D-006; caller не передаёт cause/paths/force flag |
-| T-003 | Owner сам требует stopped transport success, authenticated zero, no outbox/handoff/quarantine, exact legacy binding, current reasons exactly `git-control-plane-drift + outside-set-drift`, full task commit ancestry и parent=`pre_snapshot.head`. NUL-decoded task-commit path set обязан в точности совпасть с отдельным `remediation-scope-v1` manifest: producer entries проходят исходный checkpoint `allowed_paths`, root-completion entries проходят exact same-account authorization/root attribution и не подменяют producer allowed-set. Preliminary proof фиксирует exact current `HEAD`, symbolic ref, full index, status/record snapshot, task commit metadata/path manifest и descendant commit IDs; непосредственно перед первым durable intent write под registry lock owner повторно захватывает тот же snapshot и требует byte-equality. Ref/index/worktree/commit drift между proof и barrier даёт no-mutation failure; committed intent сохраняет exact observed Git-provenance digest, поэтому более позднее независимое изменение не переопределяет proof. | selected | Git provenance/snapshot уже принадлежит `RecoveryRegistry`; разделяет writer allowlist и полный task/remediation scope | не принимает stale/чужой task commit/path attribution и не требует считать later descendant changes частью task commit |
+| T-003 | Owner сам требует stopped transport success, authenticated zero, no outbox/handoff/quarantine, exact legacy binding, current reasons exactly `git-control-plane-drift + outside-set-drift` и full task commit ancestry. Task parent обязан совпасть с manifest и либо равняться `pre_snapshot.head`, либо быть его потомком через строго линейную цепочку промежуточных root-коммитов; каждый path каждого такого коммита обязан находиться вне immutable producer `allowed_paths`. Commit-path collector принудительно использует NUL-delimited `git diff-tree --no-renames`, поэтому Git config не может скрыть старую producer-сторону rename; old/new paths проверяются раздельно. Merge, unrelated history, неполная цепочка или любое producer-scope overlap блокируются. NUL-decoded task-commit path set обязан в точности совпасть с отдельным `remediation-scope-v1` manifest: producer entries проходят исходный checkpoint `allowed_paths`, root-completion entries проходят exact same-account authorization/root attribution и не подменяют producer allowed-set. Preliminary proof фиксирует exact current `HEAD`, symbolic ref, full index, status/record snapshot, checkpoint head, task parent, intermediate commit IDs, task commit metadata/path manifest и descendant commit IDs; непосредственно перед первым durable intent write под registry lock owner повторно захватывает тот же snapshot и требует byte-equality. Ref/index/worktree/commit drift между proof и barrier даёт no-mutation failure; committed intent сохраняет exact observed Git-provenance digest, поэтому более позднее независимое изменение не переопределяет proof. | selected | Git provenance/snapshot уже принадлежит `RecoveryRegistry`; разделяет writer allowlist, безопасную root-only interleaving chain и полный task/remediation scope | не принимает stale/чужой task commit/path attribution, rename-hidden overlap, merge или пересечение с producer scope и не требует считать later descendant changes частью task commit |
 | T-004 | Exact `terminal-root-completion-v1` schema содержит `disposition=root-completed`, run/lease/source IDs, source checkpoint/producer-allowed-set/remediation-scope/terminal-binding(format+digest)/zero/candidate/Git-provenance digests, full task commit, root verification digest, user-action/authorization digests, `checkpoint_invalidation=pending|completed` и completed-only checkpoint digest. Durable order: (1) registry intent `pending` + one history event and terminal success=false/no handoff; (2) source checkpoint invalidation `post-commit-root-completed` bound to the same evidence digest; (3) registry `completed` bound to the exact invalidated checkpoint digest; (4) existing guardian close → validated archive → release. Reload starts from the authoritative completed phase, validates every cross-binding and creates no duplicate event/invalidation/archive. | selected | intent-first replay avoids source mutation without a durable owner instruction; separate scope digest closes the producer/task ambiguity | D-003, zero/identity/archive invariants сохраняются |
 | T-005 | Первый новый durable shape поднимает reader floor до 2.2.3; 2.2.0–2.2.2 читаются без rewrite-on-read, downgrade после нового write fail-closed до vacant retirement. | selected | recovery state-machine version contract | backward read и downgrade safety сохранены |
 | T-006 | No dependency/service/public force API; runtime/tests в существующих owners, docs/version root-owned после lease release. | selected | minimality ladder | scope/observable outcome без лишней инфраструктуры |
@@ -141,7 +141,7 @@ Decision applied: D-007 фиксирует одноразовый exact run+comm
 
 ### Already committed scenario
 
-1. Legacy task commit is an ancestor of current HEAD, its first parent equals snapshot HEAD, and every changed path is allowed.
+1. Legacy task commit is an ancestor of current HEAD and its manifest-bound first parent either equals snapshot HEAD or descends from it through one complete single-parent chain. Rename-disabled old/new path attribution proves every intermediate commit path is outside immutable producer scope; the task commit itself exactly matches the authorized producer-versus-root-completion remediation manifest.
 2. Current user explicitly authorizes the exact opaque run handle + full task commit in the active Build session; root independently validates primary signal and stages a canonical owner-private user-action snapshot without asking the user for raw digests or private paths.
 3. Hidden issuance command consumes that snapshot once and returns an opaque handle to a short-lived owner-private capability bound to the exact session action/run/commit/verification/scope tuple.
 4. Hidden finalize command requires and atomically consumes the capability with the first `terminal-root-completion-v1` intent, invalidates the unusable checkpoint, closes containment/archive and releases without handoff.
@@ -171,8 +171,9 @@ Decision applied: D-007 фиксирует одноразовый exact run+comm
 - [x] AC-08: Reader-floor fixtures load 2.2.0–2.2.2 without rewrite, raise to 2.2.3 on the first new transition and reject unsafe downgrade.
 - [x] AC-09: Workflow/static contracts require finalization/vacancy before any root workspace, specification, version or Git write and require append-only terminal-binding compatibility tests for future receipt projection changes.
 - [x] AC-10: Operator docs explain incident cause and the same-account confirmation → private one-time issuance → hidden owner finalization → closed result flow in English and Russian. They document the D-008 local-owner threat boundary, capability expiry/reconfirmation, exact idempotent replay, privacy-safe `terminal-root-completed|blocked`, and prohibited manual deletion/rollback/replacement-writer/private-capability actions without exposing private values.
-- [x] AC-11: Manifest/changelog/README/recovery reader floor agree at 2.2.3; no tag/release publication is claimed.
+- [x] AC-11: Manifest/changelog/README agree at package 2.2.4, while the unchanged durable recovery reader floor remains 2.2.3; no tag/release publication is claimed.
 - [x] AC-12: Focused/full tests, package validator, diff/commit gate and risk-matched independent review pass with no actionable finding.
+- [x] AC-13: Live-shaped regression permits a task parent reachable from the immutable checkpoint only through a strictly linear chain whose complete per-commit path union is outside producer scope; direct parent remains valid, while producer overlap, rename-hidden overlap under `diff.renames=true`, merge/unrelated/incomplete history and provenance races fail before durable intent. Commit path collection explicitly disables rename detection, and the successful provenance digest binds checkpoint head, actual task parent and every intervening commit ID.
 
 Invariants:
 
@@ -192,14 +193,14 @@ Invariants:
 - Data migration: no workspace migration/backfill; owner-private registry forward transition only.
 - Security/privacy: session action IDs, snapshots, capabilities and verification digests are same-account controller/owner-generated private inputs, never user-entered secrets; capability raw material is excluded from workspace, command output and public receipts. Report exposes only a closed outcome, allowlisted blocked reason tokens and the commit SHA when already public/non-sensitive. Same-account hostile processes are outside the accepted threat model and no chat-provenance authentication is claimed.
 - Concurrency: all verification and durable transitions under existing registry/source locks; Git commands are read-only and bounded.
-- Rollback: code rollback to 2.2.2 allowed only before any 2.2.3 registry write or after explicit vacant retirement; never downgrade a non-vacant 2.2.3 registry.
+- Rollback: reverting package 2.2.4 to 2.2.3 reintroduces the interleaved-parent block but does not change the durable schema. Any downgrade to 2.2.2 is allowed only before a 2.2.3 durable registry write or after explicit vacant retirement; never downgrade a non-vacant reader-floor-2.2.3 registry.
 
 ## 7. Validation and review
 
 - Red: focused runner fixture persists the 2.2.1 binding, then current reconcile raises `terminal receipt binding drifted during reload`; post-commit fixture remains occupied because ordinary abandonment rejects mixed reasons.
 - Minimality: custom owner-layer — reuse existing binding, snapshot, Git, semantic invalidation, guardian/archive/release owners; skip new service/dependency/general unlock.
-- Focused green: `python -m unittest scripts.test_agent_runner scripts.test_recovery_state scripts.test_validate_package -v` — 333 tests, 4 platform skips, exit 0.
-- Wider: `python -m unittest discover -s scripts -p "test_*.py" -v` — 348 tests, 4 platform skips, exit 0; `python scripts/validate_package.py` passed; `git diff --check` passed.
+- Focused green: `python -m unittest scripts.test_recovery_state` — 56 tests, exit 0 after interleaved/rename hardening; the eight exact R-008 finalizer/path-attribution regressions pass.
+- Wider: `python -m unittest discover -s scripts -p "test_*.py"` — 355 tests, 4 platform skips, exit 0; `python scripts/validate_package.py` passed; `git diff --check` passed.
 - Commit gate: `git diff --cached --check`; `python scripts/validate_package.py --commit-gate`.
 - Review: high-risk balanced start, sequential escalation only on configured concrete findings; focus compatibility, Git provenance, crash consistency, privacy, no-force and version parity.
 
@@ -227,13 +228,22 @@ Invariants:
 - Acceptance: AC-09–AC-12.
 - Publication: none.
 
+### M3. Live-shaped interleaved-root provenance correction
+
+- Status: Complete
+- Implementation mode: TDD-first; owner-only follow-up after the accepted 2.2.3 commit exposed a stricter-than-live parent invariant.
+- Scope: `recovery_state.py`, focused recovery tests, synchronized release surfaces and this specification; package version advances to 2.2.4 and local installs use a cachebuster.
+- Red/green: end-to-end finalizer coverage proves direct-parent and live-shaped interleaved success, exact provenance binding, and byte-identical rejection for direct/rename-hidden producer overlap, merge, unrelated and incomplete history; the owner invocation forces `--no-renames`.
+- Acceptance: AC-13 plus unchanged AC-01–AC-12 regression coverage.
+- Review/publication: fresh Balanced review returned `ACCEPT`, high confidence, complete AC-01–AC-13 coverage; no push, tag or release.
+
 ## 9. Coverage and risks
 
 ### Coverage ledger
 
 | ID | Concern | Status | Disposition | Evidence/decision |
 |---|---|---|---|---|
-| B-001 | outcome/scope/non-goals | covered | product + technical | current request, D-005/D-006, T-009 writer/task scope split, AC-01–AC-12 |
+| B-001 | outcome/scope/non-goals | covered | product + technical | current request, D-005/D-006, T-009 writer/task scope split, AC-01–AC-13 |
 | B-002 | actors/permissions/authority | covered | product decision | D-008 explicitly selects current OS account as owner principal |
 | B-003 | primary/error/recovery flows | covered | technical decision | T-001–T-004/T-009, scenarios, AC-01–AC-07 |
 | B-004 | accessibility/localization/responsive UI | not applicable | repository fact | CLI/plugin; EN/RU docs covered AC-10 |
@@ -244,9 +254,9 @@ Invariants:
 | B-009 | integrations/timeouts/partial failure | covered | technical decision | existing guardian lifecycle + fault matrix |
 | B-010 | compatibility/rollout/rollback | covered | product + technical | D-005, T-001/T-005, AC-01/AC-08/AC-11 |
 | B-011 | observability/support/docs | covered | product decision | T-007 closed success/blocked contract and AC-10 EN/RU operator flow |
-| B-012 | acceptance/testability/minimality/cost | covered | product + technical | tests reproduce root-completion path outside producer allowlist plus local-owner issuance/state mechanics |
-| B-013 | Git provenance/path attribution | covered | technical decision | T-003/T-009, AC-04/AC-06 exact commit path manifest and Git barrier |
-| B-014 | current external stuck registry execution | not applicable | repository fact | this repo task builds the fix; installing/running it against Lazy Trader is a separate explicit global/external action |
+| B-012 | acceptance/testability/minimality/cost | covered | product + technical | AC-13 tests reproduce direct/interleaved success, exact provenance and no-mutation overlap/rename/merge/unrelated/incomplete negatives without a parallel owner |
+| B-013 | Git provenance/path attribution | covered | technical decision | T-003/T-009, AC-04/AC-06/AC-13 exact manifest, rename-disabled per-commit attribution and repeated Git barrier |
+| B-014 | current external stuck registry execution | covered, gated | explicit user authority + repository fact | local installation and Lazy Trader owner-remediation are authorized only after a fresh review `ACCEPT`; read-only live chain proof passes and no external state has yet changed |
 
 ### Risk register
 
@@ -286,11 +296,11 @@ Invariants:
 
 Blocking product questions: none.
 
-Non-blocking assumption: the concrete stuck Lazy Trader commit can satisfy parent/allowed-path ancestry proof; installation and external remediation are not performed by this repository-scoped run.
+Non-blocking evidence: read-only owner proof against the concrete stuck Lazy Trader lifecycle validates one complete linear intermediate root commit with no producer-scope overlap. Installation and external remediation are explicitly authorized but remain gated on a fresh review `ACCEPT`.
 
 ## 11. Agent activity ledger
 
-Created logical agent runs: `16`.
+Created logical agent runs: `20`.
 
 | Run | Role/task | Actual model | Effort | Status/outcome | Work/mapping |
 |---|---|---|---|---|---|
@@ -310,6 +320,10 @@ Created logical agent runs: `16`.
 | A-014 | review / terminal-finalization-r007-fresh-review-strong | `gpt-5.6-terra` | xhigh | completed / `REVISE`, high confidence | found post-release artifact write outside the privacy-safe error boundary and incomplete handler/barrier execution coverage; RED/GREEN moved the write under the closed boundary and added exact fault/replay plus second-barrier tests |
 | A-015 | review / terminal-finalization-r007-fresh-review-sol-high | `gpt-5.6-sol` | high | completed / `REVISE`, high confidence | found copied same-name current binding acceptance and incomplete 2.2.0–2.2.2 no-rewrite matrix; both were remediated through authoritative request-path identity and parameterized behavioral coverage, but the terminal route is exhausted |
 | A-016 | review / terminal-finalization-r007-fresh2-review-balanced | `gpt-5.6-terra` | medium | completed / `ACCEPT`, high confidence | independently verified the complete remediated diff, AC-01–AC-12, TDD/minimality/version parity and all recovery/privacy boundaries; no finding and no escalation trigger |
+| A-017 | review / terminal-finalization-r008-live-provenance-review-balanced | `gpt-5.6-terra` | medium | completed / `REVISE`, high confidence | implementation was narrow and correct; required direct-parent, unrelated/incomplete-chain finalizer coverage and an exact successful provenance-digest assertion; all applied through focused RED/GREEN |
+| A-018 | review / terminal-finalization-r008-live-provenance-review-strong | `gpt-5.6-terra` | xhigh | completed / `REVISE`, high confidence | found that configured rename detection could make path attribution implementation-dependent; `_task_commit_paths` now forces `--no-renames`, with invocation and end-to-end rename/no-mutation regressions |
+| A-019 | review / terminal-finalization-r008-live-provenance-review-sol-high | `gpt-5.6-sol` | high | completed / `REVISE`, high confidence | confirmed runtime/tests sound and narrow; required only direct-parent scenario, source-map/version/floor, validation-count, coverage and agent-ledger reconciliation; all applied root-only |
+| A-020 | review / terminal-finalization-r008-fresh2-review-balanced | `gpt-5.6-terra` | medium | completed / `ACCEPT`, high confidence | independently rebuilt the conclusion from the complete reconciled diff, verified AC-01–AC-13 and all lifecycle/provenance/privacy/version boundaries; no finding and no escalation trigger |
 
 Pre-spawn dispatch failures: one review invocation included an implementation-only specification option and was rejected before run creation; the corrected command preserved the same balanced route.
 
@@ -430,3 +444,42 @@ Pre-spawn dispatch failures: one review invocation included an implementation-on
 - Exact `openbuild_review_balanced` completed read-only with configured/observed `gpt-5.6-terra`/medium, `turn.completed`, exit 0, valid result and a stopped process tree.
 - Verdict: `ACCEPT`, high confidence, complete AC-01–AC-12 coverage, no actionable finding and no escalation recommendation.
 - Status advanced to Complete; the scoped 2.2.3 commit is authorized after final commit-gate validation. Push/publication remains unauthorized.
+
+### 2026-07-18 — live remediation provenance correction R-008
+
+- The accepted 2.2.3 commit was created and a cache-busted local package was installed temporarily; restoring the configured Git marketplace returned the active package to 2.2.2, so no corrected package remained active and no external remediation was attempted. Read-only inspection of the real retained lifecycle then proved that one independent root commit landed after the writer checkpoint but before the writer task commit.
+- RED changed the end-to-end fixture to the same topology and failed at `post-commit task parent provenance drifted` before any external remediation was attempted.
+- GREEN accepts only a complete strictly linear checkpoint-to-parent chain whose per-commit path union is disjoint from the immutable producer scope. It records checkpoint head and intervening commit IDs in the Git-provenance digest; producer overlap and merge history have focused negative tests.
+- Read-only live proof now validates exactly one safe intervening root commit. Registry remains occupied and unmodified until AC-13 receives a fresh review `ACCEPT` and the corrected local package is installed.
+
+### 2026-07-18 — R-008 Balanced review remediation
+
+- Exact `openbuild_review_balanced` completed read-only with configured/observed `gpt-5.6-terra`/medium, `turn.completed`, exit 0, valid result and a stopped process tree; verdict `REVISE`, high confidence.
+- The implementation itself received no correctness finding. The actionable gap was execution evidence: the original direct-parent end-to-end topology had been replaced, helper-only negatives did not prove no-mutation through the finalizer, and the successful semantic provenance digest was not asserted against its exact payload.
+- RED/GREEN now preserves a dedicated direct-parent finalizer success; routes overlap, merge, unrelated and synthetic incomplete-chain cases through `finalize_post_commit_root_completion` with byte-identical registry/source rejection; and compares the successful interleaved semantic digest with checkpoint head, actual parent, every intervening commit ID and current candidate snapshot fields.
+- Six targeted tests pass. The concrete remediated finding advances the fresh cycle to the configured Strong tier; external remediation remains untouched.
+
+### 2026-07-18 — R-008 Strong review remediation
+
+- Exact `openbuild_review_strong` completed read-only with configured/observed `gpt-5.6-terra`/xhigh, `turn.completed`, exit 0, valid result and a stopped process tree after progressive observation timeouts; verdict `REVISE`, high confidence.
+- It found one configuration-dependent attribution risk: rename detection could report only a post-image path and hide the old producer path from an intervening-commit overlap check.
+- RED asserts the exact owner Git invocation includes `--no-renames`; GREEN makes all task/intervening commit path collection NUL-delimited and rename-disabled. A separate end-to-end fixture sets `diff.renames=true`, renames a producer path outside the allowlist, and proves finalizer rejection with byte-identical registry/source state.
+- The two rename-focused tests pass. This concrete remediated finding advances the fresh cycle to the configured Sol/high tier; external remediation remains untouched.
+
+### 2026-07-18 — R-008 Sol review reconciliation and route exhaustion
+
+- Exact `openbuild_review_sol_high` completed read-only with configured/observed `gpt-5.6-sol`/high, `turn.completed`, exit 0, valid result and a stopped process tree after progressive observation timeouts; verdict `REVISE`, high confidence.
+- It confirmed the 2.2.4 runtime correction, direct/interleaved/negative finalizer coverage, rename-disabled attribution, exact provenance binding and repeated Git barrier. Its two findings were root-owned specification reconciliation only: a stale direct-parent-only scenario and outdated R-007/2.2.3 source-map, validation-count, coverage and activity metadata.
+- R-008 now states the manifest-bound direct-or-linear parent contract, separates package 2.2.4 from durable reader floor 2.2.3, maps AC-01–AC-13, records final validation targets and 19 logical runs, and marks external execution as explicitly authorized but `ACCEPT`-gated.
+- The terminal configured tier returned no `ACCEPT` for the subsequently reconciled diff, so AC-12 remains incomplete and the outcome is `automation-exhausted`. A new explicit fresh review cycle is required; no installation, external remediation, registry deletion or replacement writer was attempted.
+
+### 2026-07-18 — new explicit fresh R-008 cycle authorized
+
+- The user explicitly authorized a new fresh review cycle on the fully reconciled R-008 diff and authorized commit, local 2.2.4 installation and Lazy Trader owner-remediation only after a terminal `ACCEPT`.
+- The cycle restarts at exact `openbuild_review_balanced`; no installation or external lifecycle mutation precedes that gate.
+
+### 2026-07-18 — final R-008 fresh review ACCEPT
+
+- Exact `openbuild_review_balanced` completed read-only with configured/observed `gpt-5.6-terra`/medium, `turn.completed`, exit 0, valid result and a stopped process tree after one soft observation timeout.
+- Verdict: `ACCEPT`, high confidence, complete AC-01–AC-13 coverage, no actionable finding and no escalation trigger.
+- Status advanced to Complete. The scoped 2.2.4 commit, local installation and authorized Lazy Trader owner-remediation may proceed; push/tag/release remain unauthorized.
