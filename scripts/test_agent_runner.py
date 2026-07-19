@@ -466,6 +466,16 @@ class SearchAvailabilityFallbackTests(unittest.TestCase):
             ),
             ({**clean_exit, "cleanup_errors": ["runner cleanup failed"]}, "missing", "valid", 1),
             ({**clean_exit, "failure_message": "runner cleanup failed"}, "missing", "valid", 1),
+            (
+                {
+                    **clean_exit,
+                    "exit_code": 0,
+                    "failure_message": "codex exec exited with code 0",
+                },
+                "missing",
+                "valid",
+                0,
+            ),
             (clean_exit, "missing", "missing", None),
             (clean_exit, "missing", "invalid", None),
             (None, "missing", "valid", 1),

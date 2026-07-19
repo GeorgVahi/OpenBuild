@@ -350,6 +350,7 @@ def search_availability_event_stream_is_eligible(
         and evidence.get("structured_stderr_valid", True) is True
         and codex_exit_status == "valid"
         and exact_exit_code
+        and codex_exit_code != 0
         and type(termination.get("exit_code")) is int
         and termination.get("exit_code") == codex_exit_code
         and termination.get("success") is False

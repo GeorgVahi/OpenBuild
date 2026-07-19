@@ -7,17 +7,17 @@
 - Review baseline: `main@7f92d4603f2eb3a2e434415c20bcf48b879dd3a3`, clean worktree, `main...origin/main [ahead 2]`; локальные коммиты `ed6875f` (`2.2.3`) и `7f92d46` (`2.2.4`) входят в baseline и не принадлежат этой задаче.
 - Workflow target: Complete
 - Starting phase: discovery
-- Specification revision: R-022
+- Specification revision: R-023
 - Complexity: high — меняются публичный discovery-контракт, строгая маршрутизация между двумя моделями, runner failure evidence, packaged map, двуязычная документация и релизная поверхность.
 - Implementation mode: TDD-first — поведение маршрута и валидатора должно быть зафиксировано failing tests до изменения production-контракта.
-- Version impact: minor — backward-compatible capability, authoritative source `plugins/openbuild/.codex-plugin/plugin.json`, план `2.2.4 -> 2.3.0`.
+- Version impact: patch follow-up — immutable `2.3.0` is published; the zero-exit fail-closed correction advances the authoritative manifest to `2.3.1`.
 - Routing mode: codex-exec-explicit-model
 - Discovery mode: delegated — exact run `openbuild_search_separate`, observed `gpt-5.3-codex-spark`, low, read-only, `turn.completed`, exit 0, semantic evidence accepted.
 - Search usage route: separate-pool — packaged map SHA-256 `fce8589a24dd2dd4fb8b538c91e306f7883bb3a5511f3e4b9605b031191b5e03`, step 1/1; circuit breaker closed.
 - Search routing receipt: packaged `openbuild_search_separate`; configured/observed `gpt-5.3-codex-spark`, low, read-only; exact runner completed; evidence consumed for sections 2, 6, 7 and M1.
 - Implementation model route: exact `implementation.high` started with `openbuild_implementation_balanced`; its partial handoff was rejected, then the root completed the unchanged M2 scope under recorded same-scope root-completion authority.
 - Implementation routing receipt: Terra/medium/workspace-write created; model-map grammar accepted, incomplete runner/discovery handoff rejected; no second writer was created and root completion was recorded after vacancy.
-- Review routing receipt: balanced and strong reviews returned actionable findings; source-map binding, pre-turn gating, no-follow identity validation and reparse regressions are staged. R-010 Sol found and R-011 fixed an incomplete index. R-011 Sol then found that a checked-out gitlink's stable directory/commit marker did not include dirty nested content. R-012 recursively fingerprints bounded tracked plus untracked/nonignored nested content before and after marker capture, counts nested files/bytes against global limits, validates public fingerprint field types/constants, and makes the exclusive fallback claim durable. R-013 passed the complete candidate suite; A-021/A-022/A-023 progressively closed first-match, lossy-collector, predicate and non-regular artifact gaps. A-024 reviewed immutable task tree `f4b2581c` and found raw top-level `code`/error-shaped `type` records could bypass the complete-stream collector. R-018 collected those records. A-025 reviewed immutable task tree `19f9cceb` and found that a suffix vocabulary could still omit shapes such as `unknown_failure`; R-019 replaced suffix inference with a closed grammar. A-026 reviewed immutable task tree `5bb1f7ea` and found that cleanup failures or missing/malformed creation-bound exit evidence did not participate in eligibility. R-020 binds a clean runner exit and valid `codex-exit.json` to the stream. Combined A-027 then found path-based artifact reopens after `lstat`; R-021 binds every read to one verified descriptor identity. A-028 found a preinjected source fallback binding could reintroduce a reason after eligibility failed; R-022 rejects and suppresses source-side bindings. Fresh Sol/high closure remains required.
+- Review routing receipt: balanced and strong reviews returned actionable findings; source-map binding, pre-turn gating, no-follow identity validation and reparse regressions are staged. R-010 Sol found and R-011 fixed an incomplete index. R-011 Sol then found that a checked-out gitlink's stable directory/commit marker did not include dirty nested content. R-012 recursively fingerprints bounded tracked plus untracked/nonignored nested content before and after marker capture, counts nested files/bytes against global limits, validates public fingerprint field types/constants, and makes the exclusive fallback claim durable. R-013 passed the complete candidate suite; A-021/A-022/A-023 progressively closed first-match, lossy-collector, predicate and non-regular artifact gaps. A-024 reviewed immutable task tree `f4b2581c` and found raw top-level `code`/error-shaped `type` records could bypass the complete-stream collector. R-018 collected those records. A-025 reviewed immutable task tree `19f9cceb` and found that a suffix vocabulary could still omit shapes such as `unknown_failure`; R-019 replaced suffix inference with a closed grammar. A-026 reviewed immutable task tree `5bb1f7ea` and found that cleanup failures or missing/malformed creation-bound exit evidence did not participate in eligibility. R-020 binds a clean runner exit and valid `codex-exit.json` to the stream. Combined A-027 then found path-based artifact reopens after `lstat`; R-021 binds every read to one verified descriptor identity. A-028 found a preinjected source fallback binding could reintroduce a reason after eligibility failed; R-022 rejects and suppresses source-side bindings. A-029 rejected a 30-path candidate contaminated by the neighboring recovery release. A-030 then found that zero Codex exit could still satisfy a forged failed envelope; R-023 requires an exact non-zero exit. A-031 accepted immutable task tree `7ee71cb5102e83b3cbaa7ae59a0c2fc24595f518`.
 
 ## 1. Outcome
 
@@ -162,9 +162,10 @@ OpenBuild has the correct exact profiles but lacks both a strict Code Scout-styl
 - [x] AC-06: schema-1 project/user complete maps without optional availability fields remain valid and keep block/targeted-root; packaged or explicit maps may enable only one canonical search fallback with allowlisted triggers; other route types cannot enable it.
 - [x] AC-07: EN/RU README, Build skill/references, model-map interview, contributor guidance, validator and tests agree on the fallback and quality contract.
 - [x] AC-08: full unit suite, package validation, whitespace, commit gate, clean install/candidate validation and exact search smokes are green.
-- [ ] AC-09: manifest/changelog/README pins agree on `2.3.0`; commit pushed; annotated `v2.3.0` and public GitHub Release resolve to the reviewed commit.
-- [ ] AC-10: post-release remote installation from `v2.3.0` resolves Spark-first/Terra-on-eligible-failure map; next parallel release remains unmodified by this task and must start from the published state.
+- [x] AC-09: manifest/changelog/README pins agree on `2.3.0`; commit pushed; annotated `v2.3.0` and public GitHub Release resolve to the reviewed commit.
+- [x] AC-10: post-release remote installation from `v2.3.0` resolves Spark-first/Terra-on-eligible-failure map; next parallel release remains unmodified by this task and must start from the published state.
 - [x] AC-11: Terra fallback dispatch requires an atomic one-shot source claim bound to the exact stopped Spark receipt, effective map hash, canonical T-009 source/target profile descriptor digest sequence, eligible reason, creation-bound process evidence and identical prompt snapshot ID/SHA; replay, cross-run, drift, profile shadowing or a second fallback is rejected before target process start.
+- [ ] AC-12: the 2.3.1 patch requires a valid non-zero creation-bound Codex exit, passes focused/full/package/install validation, receives fresh exact-tree Sol/high acceptance, and is published as a new immutable commit/tag/Release without altering v2.3.0.
 
 ### Invariants
 
@@ -239,7 +240,7 @@ Authoritative current `2.2.4`; backward-compatible capability -> `2.3.0`. Public
 
 ### M2. Discovery contract and routing implementation
 
-- Status: In progress
+- Status: Completed
 - Scope: production owner layers, tests, docs, version surfaces.
 - Excludes: GitHub publication before review/validation.
 - Implementation mode: TDD-first.
@@ -247,15 +248,15 @@ Authoritative current `2.2.4`; backward-compatible capability -> `2.3.0`. Public
 - Red signal: focused tests for current missing schema/fingerprint and eligible-only Terra route.
 - Minimality decision: existing profiles/map/runner + stdlib helper only.
 - Focused green: deterministic discovery/routing/package checks pass; the final live Spark smoke completed with exact Spark/low/read-only selection, unchanged fingerprint and valid `openbuild.discovery.v1` evidence after two prompt/validator-grammar clarifications.
-- Validation: R-022 passes 106 affected runner/evidence/discovery/package tests with 3 expected platform skips and all 403 repository tests with 4 expected platform skips, including creation-bound exit, cleanup, descriptor-replacement and source-binding injection regressions. Package and official plugin/skill validators pass. Pre-receipt task-only tree `e5a141bc44c02b4ca7f4908577b5d46413b22ab2` contains exactly 23 UTF-8 paths, compiles/parses every Python/TOML blob, binds the R-022 guards and contains no neighboring recovery marker.
+- Validation: R-023 passes 99 affected tests with 3 expected platform skips and all 403 repository tests with 4 expected platform skips. Package validation passes. Exact task-only tree `7ee71cb5102e83b3cbaa7ae59a0c2fc24595f518` contains 23 UTF-8 paths, compiles/parses every Python/TOML blob, executes exit 1 as eligible and exit 0 as rejected, passes the staged package classifier contract and contains no neighboring recovery marker.
 - Acceptance: AC-01..AC-08, AC-11.
-- Review: A-028 returned `REVISE` because an injected source-side fallback binding could republish an eligible reason after strict eligibility failed. R-022 rejects every source binding before claim and suppresses it in Spark receipts; fresh Sol/high closure is required before commit.
-- Version: `2.2.4 -> 2.3.0`.
+- Review: A-031 returned `ACCEPT` on the immutable R-023 task tree after A-029 isolated the neighboring release and A-030 exposed the zero-exit gap.
+- Version: `2.2.4 -> 2.3.0`, followed by fail-closed patch `2.3.1` without rewriting the published tag.
 - Commit: Pending.
 
-### M3. First publication and verification
+### M3. Patch publication and verification
 
-- Status: Pending
+- Status: In progress
 - Scope: push reviewed commit, annotated tag, GitHub Release, public/install verification.
 - Excludes: changes belonging to the neighboring release.
 - Implementation mode: Direct external publication after green gates.
@@ -334,7 +335,7 @@ Non-blocking assumptions:
 
 ## 11. Agent activity ledger
 
-Created logical agent runs: `28`.
+Created logical agent runs: `31`.
 
 | Run | Created | Role/task | Actual model | Effort | Status/outcome | Work and specification mapping | Evidence |
 |---|---|---|---|---|---|---|---|
@@ -366,6 +367,9 @@ Created logical agent runs: `28`.
 | A-026 | yes | review / Sol R-019 immutable task-tree closure | `gpt-5.6-sol` | high | completed; REVISE, high confidence | M2; found cleanup failure and missing/malformed creation-bound Codex exit absent from eligibility | exact runner, read-only, `turn.completed`, exit 0; required clean runner-exit rederivation and exit-evidence binding |
 | A-027 | yes | review / Sol combined R-020 exact-tree closure | `gpt-5.6-sol` | high | completed; REVISE, high confidence | M2; found JSONL/stderr/result paths reopened after no-follow `lstat`, permitting check/open/read replacement | exact runner, read-only, `turn.completed`, exit 0; external test drift also invalidated the review tree |
 | A-028 | yes | review / Sol R-020 task-tree closure | `gpt-5.6-sol` | high | completed; REVISE, high confidence | M2; found an injected source-side fallback binding could publish an eligible reason after cleanup/exit eligibility failed | exact runner, read-only, `turn.completed`, exit 0; required source binding absence at receipt and claim gates |
+| A-029 | yes | review / Sol R-022 candidate isolation | `gpt-5.6-sol` | high | completed; REVISE, high confidence | M2; found the reviewed candidate contained 30 paths and neighboring recovery-release hunks | exact runner, read-only, `turn.completed`, exit 0; required restoration of the exact 23-path task-only tree |
+| A-030 | yes | review / Sol R-022 immutable task-tree closure | `gpt-5.6-sol` | high | completed; REVISE, high confidence | M2; found `codex_exit_code=0` could satisfy a forged failed envelope and authorize Terra | exact runner, read-only, `turn.completed`, exit 0; required a direct non-zero exit predicate and negative fixture |
+| A-031 | yes | review / Sol R-023 immutable task-tree closure | `gpt-5.6-sol` | high | completed; ACCEPT, high confidence | M2; accepted the non-zero exit guard and complete Spark/Terra fail-closed contract | exact runner, read-only, `turn.completed`, exit 0; immutable tree `7ee71cb5102e83b3cbaa7ae59a0c2fc24595f518` |
 
 Pre-spawn dispatch failures (not included in created count): one R-006 closure dispatch and one smoke redispatch were rejected because their staged owner-private prompt snapshots were missing; one source Spark smoke command incorrectly paired `--expected-map-sha256` without a fallback source. Restaging/correct dispatch succeeded without creating an agent or changing repository state.
 
@@ -547,3 +551,9 @@ Pre-spawn dispatch failures (not included in created count): one R-006 closure d
 - Sol/high A-028 found that a Spark source request with an injected `search_fallback_binding.reason` could republish that reason after the clean eligibility predicate returned none; the claim gate rejected nested fallback sources but not a source-side binding.
 - A Spark source now requires both `search_fallback_source` and `search_fallback_binding` to be null. Public source receipts ignore any injected binding, and claim preparation rejects it before consuming a reason. Only the owner-generated Terra target binding can publish the freshly derived source reason.
 - Receipt, claim-gate and package-mutation regressions pass. The complete repository suite passes all 403 tests with 4 expected platform skips; package, official plugin and official skill validators pass; the exact 30-file combined commit gate and both whitespace checks pass with no unstaged path; and the clean enabled 2.3.0 install is byte-equal across all 46 source/cache files. Fresh unchanged-tree Sol/high acceptance remains before publication.
+
+### 2026-07-19 — R-023 zero-exit patch closure
+
+- Immutable 2.3.0 was published from the combined tree. A-029 rejected a contaminated review candidate, and task-only Sol/high A-030 then demonstrated that valid exit evidence plus a forged failed runner envelope could satisfy the availability predicate with `codex_exit_code=0`.
+- The owner predicate now independently requires an exact non-zero Codex exit. Direct negative, package-contract and mutation regressions bind the guard; every existing structured error, clean-runner, creation-bound exit, claim and source-binding requirement remains unchanged.
+- The fix advances the manifest and pinned install documentation to 2.3.1 without rewriting commit `7e7f247`, tag `v2.3.0` or its public Release. The affected suite passes 99 tests with 3 expected platform skips; the complete suite passes all 403 tests with 4 expected skips; package validation passes; exact staged-blob validation passes; and A-031 returns `ACCEPT`. Exact nine-file staging, immutable 2.3.1 publication and post-tag install verification remain.

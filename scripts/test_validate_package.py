@@ -60,6 +60,7 @@ class SearchAvailabilityClassifierPackageTests(unittest.TestCase):
             "event_type not in NON_ERROR_JSONL_EVENT_TYPES",
             'evidence.get("structured_stderr_valid", True) is True',
             'codex_exit_status == "valid"',
+            "codex_exit_code != 0",
             'termination.get("cleanup_errors") == []',
             'termination.get("failure_message") == expected_failure',
             'source_receipt.get("codex_exit_evidence") != "valid"',
@@ -1003,19 +1004,19 @@ class ImplementationDelegationContractTests(unittest.TestCase):
 class ChangelogContractTests(unittest.TestCase):
     def test_release_manifest_version_and_latest_release_are_documented(self) -> None:
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-        self.assertEqual(validate_changelog_contract(changelog, "2.3.0"), [])
+        self.assertEqual(validate_changelog_contract(changelog, "2.3.1"), [])
         self.assertNotIn("## [2.1.1]", changelog)
 
-        mutated = changelog.replace("## [2.3.0]", "## [next]", 1)
-        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "2.3.0")))
+        mutated = changelog.replace("## [2.3.1]", "## [next]", 1)
+        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "2.3.1")))
 
     def test_released_version_is_pinned_in_both_install_channels(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         readme_ru = (ROOT / "README.ru.md").read_text(encoding="utf-8")
-        self.assertEqual(validate_release_docs_contract(readme, readme_ru, "2.3.0"), [])
+        self.assertEqual(validate_release_docs_contract(readme, readme_ru, "2.3.1"), [])
 
-        mutated = readme.replace("--ref v2.3.0", "--ref main")
-        self.assertTrue(any("README.md" in error for error in validate_release_docs_contract(mutated, readme_ru, "2.3.0")))
+        mutated = readme.replace("--ref v2.3.1", "--ref main")
+        self.assertTrue(any("README.md" in error for error in validate_release_docs_contract(mutated, readme_ru, "2.3.1")))
 
 
 class DecisionAuthorityTraceTests(unittest.TestCase):

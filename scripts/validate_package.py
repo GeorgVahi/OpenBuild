@@ -4359,6 +4359,7 @@ def validate_search_availability_classifier_contract(runner_text: str) -> list[s
         "event_type not in NON_ERROR_JSONL_EVENT_TYPES",
         'evidence.get("structured_stderr_valid", True) is True',
         'codex_exit_status == "valid"',
+        "codex_exit_code != 0",
         'termination.get("cleanup_errors") == []',
         'termination.get("failure_message") == expected_failure',
         'source_receipt.get("codex_exit_evidence") != "valid"',

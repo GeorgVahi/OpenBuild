@@ -4,6 +4,18 @@ OpenBuild follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.3.1] - 2026-07-19
+
+### Fixed
+
+- Required a valid non-zero creation-bound Codex exit code before a structured Spark model/quota failure can authorize the one-shot Terra discovery fallback. A zero exit now fails closed even if a forged or inconsistent failed-run envelope otherwise matches the terminal fields.
+- Added direct eligibility, package-contract, and mutation regressions for the zero-exit boundary and updated the pinned install documentation to 2.3.1.
+
+### Changed
+
+- Updated both README files and release pins for 2.3.1.
+- Preserved the packaged defaults, `codex-exec-explicit-model`, project → user → packaged precedence, and the ban on unknown-model agent routes.
+
 ## [2.3.0] - 2026-07-19
 
 ### Added
