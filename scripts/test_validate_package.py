@@ -38,9 +38,102 @@ from validate_package import (
     validate_recovery_control_plane,
     validate_release_docs_contract,
     validate_review_escalation_trace,
+    validate_safe_artifact_reader_contract,
     validate_search_dispatch_trace,
+    validate_search_availability_classifier_contract,
     validate_usage_routing_contract,
 )
+
+
+class SearchAvailabilityClassifierPackageTests(unittest.TestCase):
+    def test_package_requires_complete_stream_and_same_payload_consistency(self) -> None:
+        runner = (SKILL / "scripts" / "agent_runner.py").read_text(encoding="utf-8")
+        self.assertEqual(validate_search_availability_classifier_contract(runner), [])
+
+        for token in (
+            "for value in structured_objects:",
+            "code_field != type_field",
+            "return next(iter(reasons)) if len(reasons) == 1 else None",
+            "RAW_SEARCH_ERROR_TYPES",
+            "NON_ERROR_JSONL_EVENT_TYPES",
+            'elif "code" in event or event_type in RAW_SEARCH_ERROR_TYPES:',
+            "event_type not in NON_ERROR_JSONL_EVENT_TYPES",
+            'evidence.get("structured_stderr_valid", True) is True',
+            'codex_exit_status == "valid"',
+            'termination.get("cleanup_errors") == []',
+            'termination.get("failure_message") == expected_failure',
+            'source_receipt.get("codex_exit_evidence") != "valid"',
+            'source_receipt.get("result_evidence") != "missing"',
+            'source_request.get("search_fallback_binding") is not None',
+            'request.get("search_fallback_source") is None',
+        ):
+            with self.subTest(token=token):
+                mutated = runner.replace(token, "removed fail-closed classifier guard")
+                self.assertTrue(
+                    any(
+                        "search availability classifier" in error
+                        for error in validate_search_availability_classifier_contract(mutated)
+                    )
+                )
+
+    def test_package_requires_descriptor_bound_same_object_artifact_reads(self) -> None:
+        runner = (SKILL / "scripts" / "agent_runner.py").read_text(encoding="utf-8")
+        discovery = (SKILL / "scripts" / "discovery_contract.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(validate_safe_artifact_reader_contract(runner, discovery), [])
+
+        for token in (
+            "read_regular_file_no_follow,",
+            "raw = read_regular_file_no_follow(path)",
+            "except DiscoveryContractError:",
+        ):
+            with self.subTest(runner_token=token):
+                mutated = runner.replace(token, "removed safe artifact reader guard")
+                self.assertTrue(
+                    any(
+                        "safe artifact reader" in error
+                        for error in validate_safe_artifact_reader_contract(
+                            mutated,
+                            discovery,
+                        )
+                    )
+                )
+
+        for token in (
+            "def read_regular_file_no_follow(",
+            'getattr(os, "O_NOFOLLOW", 0)',
+            "opened_before = os.fstat(descriptor)",
+            "chunk = os.read(descriptor, 1024 * 1024)",
+            "opened_after = os.fstat(descriptor)",
+            "_is_link_or_reparse(opened_before)",
+            "_file_identity(before) != _file_identity(opened_before)",
+            "_file_identity(opened_after) != _file_identity(after)",
+            "raw = read_regular_file_no_follow(",
+        ):
+            with self.subTest(discovery_token=token):
+                mutated = discovery.replace(token, "removed safe artifact reader guard")
+                self.assertTrue(
+                    any(
+                        "safe artifact reader" in error
+                        for error in validate_safe_artifact_reader_contract(
+                            runner,
+                            mutated,
+                        )
+                    )
+                )
+
+        reopened = discovery.replace(
+            "raw = read_regular_file_no_follow(",
+            "raw = result_path.read_bytes() or read_regular_file_no_follow(",
+            1,
+        )
+        self.assertTrue(
+            any(
+                "must not reopen" in error
+                for error in validate_safe_artifact_reader_contract(runner, reopened)
+            )
+        )
 
 
 class RecoveryControlPlanePackageTests(unittest.TestCase):
@@ -52,7 +145,13 @@ class RecoveryControlPlanePackageTests(unittest.TestCase):
         self.assertEqual(validate_recovery_control_plane(self.runner, self.recovery), [])
 
         mutations = [
-            ("recovery", 'READER_FLOOR = "2.2.3"', 'READER_FLOOR = "1"', "reader floor"),
+            ("recovery", 'READER_FLOOR = "2.2.5"', 'READER_FLOOR = "1"', "reader floor"),
+            (
+                "recovery",
+                "state = self._read_registry_for_write_locked(rebarrier=True)",
+                "state = self._read_registry_locked(rebarrier=True)",
+                "pending abandonment reader floor before source replay",
+            ),
             ("runner", '"run-dir-v1"', '"run-dir-v0"', "legacy terminal binding compatibility"),
             ("recovery", '"terminal-root-completion-v1"', '"terminal-root-completion-v0"', "post-commit terminal schema"),
             ("recovery", '"remediation-scope-v1"', '"remediation-scope-v0"', "post-commit remediation scope"),
@@ -156,6 +255,14 @@ class RecoveryControlPlanePackageTests(unittest.TestCase):
             ("runner", '"--soft-timeout-exit-zero"', '"--strict-timeout-only"', "soft observation timeout"),
             ("runner", "return 0 if args.soft_timeout_exit_zero else 3", "return 3", "soft observation timeout"),
             ("recovery", "terminal-abandonment-v1", "terminal-abandonment-v0", "terminal abandonment schema"),
+            ("recovery", "terminal-abandonment-v2", "terminal-abandonment-v0", "recovery overlap abandonment schema"),
+            ("runner", "terminal-abandonment-v2", "terminal-abandonment-v0", "runner recovery overlap public result"),
+            (
+                "recovery",
+                "terminal-abandoned-recovery-overlap",
+                "terminal-abandoned-recovery-overlap-v0",
+                "recovery overlap abandonment invalidation",
+            ),
             ("recovery", "record_terminal_abandonment", "record_generic_abandonment", "terminal abandonment transition"),
             ("recovery", "persist=False", "persist=True", "terminal abandonment no-mutation gate"),
             ("recovery", "retire_authorization", "retain_authorization", "prompt authorization retirement"),
@@ -697,6 +804,8 @@ class ImplementationDelegationContractTests(unittest.TestCase):
         )
         self.model_routing = (SKILL / "references" / "model-routing.md").read_text(encoding="utf-8")
         self.tdd_workflow = (SKILL / "references" / "tdd-workflow.md").read_text(encoding="utf-8")
+        self.review_protocol = (SKILL / "references" / "review-protocol.md").read_text(encoding="utf-8")
+        self.versioning_text = (SKILL / "references" / "versioning.md").read_text(encoding="utf-8")
         self.readme = (ROOT / "README.md").read_text(encoding="utf-8")
         self.readme_ru = (ROOT / "README.ru.md").read_text(encoding="utf-8")
         self.runner_text = (SKILL / "scripts" / "agent_runner.py").read_text(encoding="utf-8")
@@ -707,6 +816,8 @@ class ImplementationDelegationContractTests(unittest.TestCase):
             overrides.get("protocol_text", self.protocol_text),
             overrides.get("model_routing", self.model_routing),
             overrides.get("tdd_workflow", self.tdd_workflow),
+            overrides.get("review_protocol", self.review_protocol),
+            overrides.get("versioning_text", self.versioning_text),
             overrides.get("readme", self.readme),
             overrides.get("readme_ru", self.readme_ru),
             overrides.get("runner_text", self.runner_text),
@@ -843,22 +954,68 @@ class ImplementationDelegationContractTests(unittest.TestCase):
             any("abandonment fixture" in error for error in self.validate(tdd_workflow=tdd))
         )
 
+        skill = self.skill_text.replace(
+            "terminal-abandonment-v2", "manual-recovery-v2"
+        )
+        self.assertTrue(
+            any("v2 terminal outcome" in error for error in self.validate(skill_text=skill))
+        )
+
+        protocol = self.protocol_text.replace(
+            "exact sorted pair `[outside-set-drift, preexisting-dirty-overlap]`",
+            "generic mixed reasons",
+        )
+        self.assertTrue(
+            any("recovery-target-only exact pair" in error for error in self.validate(protocol_text=protocol))
+        )
+
+        routing = self.model_routing.replace(
+            "exact `[outside-set-drift, preexisting-dirty-overlap]` uses terminal abandonment v2 only for a recovery-target",
+            "mixed reasons resume routing",
+        )
+        self.assertTrue(
+            any("recovery-target-only routing" in error for error in self.validate(model_routing=routing))
+        )
+
+        tdd = self.tdd_workflow.replace(
+            "terminal-abandonment-v2", "manual-recovery-v2"
+        )
+        self.assertTrue(
+            any("v2 fixture" in error for error in self.validate(tdd_workflow=tdd))
+        )
+
+        review = self.review_protocol.replace(
+            "recovery-target-only exact `[outside-set-drift, preexisting-dirty-overlap]`",
+            "generic mixed recovery",
+        )
+        self.assertTrue(
+            any("exact review boundary" in error for error in self.validate(review_protocol=review))
+        )
+
+        versioning = self.versioning_text.replace(
+            "first durable write by the new owner raises the floor to 2.2.5",
+            "reader floor remains unchanged",
+        )
+        self.assertTrue(
+            any("reader-floor rollout" in error for error in self.validate(versioning_text=versioning))
+        )
+
 class ChangelogContractTests(unittest.TestCase):
     def test_release_manifest_version_and_latest_release_are_documented(self) -> None:
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-        self.assertEqual(validate_changelog_contract(changelog, "2.2.4"), [])
+        self.assertEqual(validate_changelog_contract(changelog, "2.3.0"), [])
         self.assertNotIn("## [2.1.1]", changelog)
 
-        mutated = changelog.replace("## [2.2.4]", "## [next]", 1)
-        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "2.2.4")))
+        mutated = changelog.replace("## [2.3.0]", "## [next]", 1)
+        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "2.3.0")))
 
     def test_released_version_is_pinned_in_both_install_channels(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         readme_ru = (ROOT / "README.ru.md").read_text(encoding="utf-8")
-        self.assertEqual(validate_release_docs_contract(readme, readme_ru, "2.2.4"), [])
+        self.assertEqual(validate_release_docs_contract(readme, readme_ru, "2.3.0"), [])
 
-        mutated = readme.replace("--ref v2.2.4", "--ref main")
-        self.assertTrue(any("README.md" in error for error in validate_release_docs_contract(mutated, readme_ru, "2.2.4")))
+        mutated = readme.replace("--ref v2.3.0", "--ref main")
+        self.assertTrue(any("README.md" in error for error in validate_release_docs_contract(mutated, readme_ru, "2.3.0")))
 
 
 class DecisionAuthorityTraceTests(unittest.TestCase):
@@ -2150,8 +2307,8 @@ class UsageRoutingContractTests(unittest.TestCase):
         self.assertTrue(any("exact agent dispatch" in error for error in self.validate(code_discovery=code_discovery)))
 
         code_discovery = self.code_discovery.replace(
-            "create no other discovery agent",
-            "use legacy `openbuild-discovery` when needed",
+            "All other transport/exact-selection/result failures use only minimum targeted root recovery.",
+            "Use legacy `openbuild-discovery` when needed.",
         )
         self.assertTrue(any("legacy openbuild-discovery" in error for error in self.validate(code_discovery=code_discovery)))
 
@@ -2176,11 +2333,68 @@ class UsageRoutingContractTests(unittest.TestCase):
         self.assertTrue(any("routing receipt" in error for error in self.validate(code_discovery=discovery)))
 
     def test_search_quota_failure_opens_one_run_circuit_breaker(self) -> None:
-        model_routing = self.model_routing.replace("open a circuit breaker", "fall back")
+        model_routing = self.model_routing.replace("opens the circuit breaker", "falls back")
         self.assertTrue(any("search usage-pool" in error for error in self.validate(model_routing=model_routing)))
 
-        discovery = self.code_discovery.replace("do not pay for repeated failed attempts", "retry later")
+        discovery = self.code_discovery.replace(
+            "All other transport/exact-selection/result failures",
+            "Retry all other transport/exact-selection/result failures",
+        )
         self.assertTrue(any("code-discovery.md" in error for error in self.validate(code_discovery=discovery)))
+
+    def test_discovery_fallback_preserves_lifecycle_and_path_safeguards(self) -> None:
+        for token in (
+            "rung metadata is validated after profile precedence resolves",
+            "same-OS-account confirmation plus exact legacy binding/commit/remediation/Git evidence",
+            "diagnostic root review cannot close an exact-review or release gate",
+        ):
+            with self.subTest(model_routing=token):
+                mutated = self.model_routing.replace(token, "removed safeguard")
+                self.assertTrue(
+                    any(
+                        "preserved lifecycle safeguard" in error
+                        for error in self.validate(model_routing=mutated)
+                    )
+                )
+
+        for token in (
+            "coherent pre-turn",
+            "complete JSONL/stderr collection",
+            "every explicit error record",
+            "raw top-level `code`",
+            "unrecognized error-bearing event",
+            "present JSONL, stderr, and result read",
+            "verified regular non-reparse descriptor identity",
+            "conflicting `code`/`type` values",
+            "JSONL and stderr evidence",
+            "Source-time Spark/Terra",
+        ):
+            with self.subTest(search_order=token):
+                mutated = self.model_routing.replace(token, "removed search safeguard")
+                self.assertTrue(
+                    any(
+                        "search usage-pool order" in error
+                        for error in self.validate(model_routing=mutated)
+                    )
+                )
+
+        for token in (
+            "literal backslashes fail closed",
+            "`.pytest_cache`",
+            "`artifacts`",
+            "`target`",
+            "symlink/reparse escapes",
+            "same-object identity checks",
+            "Checked-out gitlinks contribute a bounded nested tracked plus untracked/nonignored content fingerprint",
+        ):
+            with self.subTest(code_discovery=token):
+                mutated = self.code_discovery.replace(token, "removed path safeguard")
+                self.assertTrue(
+                    any(
+                        "evidence contract" in error
+                        for error in self.validate(code_discovery=mutated)
+                    )
+                )
 
     def test_code_edits_use_risk_matched_writer_tiers(self) -> None:
         implementation = self.implementation.replace(

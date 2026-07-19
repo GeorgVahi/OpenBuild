@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -69,6 +70,13 @@ class ModelMapContractTests(unittest.TestCase):
         self.assertEqual(
             configured.routes[("discovery", "default")].agents,
             ("openbuild_search_separate",),
+        )
+        discovery = configured.routes[("discovery", "default")]
+        self.assertEqual(discovery.transport_failure, "availability-fallback")
+        self.assertEqual(discovery.availability_fallback_agent, "openbuild_search_balanced")
+        self.assertEqual(
+            discovery.availability_fallback_triggers,
+            ("model-unavailable", "quota-exhausted"),
         )
         self.assertEqual(
             configured.routes[("implementation", "high")].agents,
@@ -225,6 +233,60 @@ class ModelMapContractTests(unittest.TestCase):
             path.write_text(text, encoding="utf-8", newline="\n")
             with self.assertRaisesRegex(model_map.ModelMapError, "semantic-before-edit"):
                 model_map.load_model_map_file(path)
+
+    def test_legacy_complete_map_keeps_blocked_targeted_root_discovery(self) -> None:
+        data = tomllib.loads(model_map.PACKAGED_MODEL_MAP.read_text(encoding="utf-8"))
+        discovery = data["discovery"]["default"]
+        discovery["transport_failure"] = "block"
+        discovery.pop("availability_fallback_agent")
+        discovery.pop("availability_fallback_triggers")
+
+        route = model_map._route_from_data(
+            discovery,
+            use_case="discovery",
+            risk="default",
+            path=model_map.PACKAGED_MODEL_MAP,
+        )
+        self.assertEqual(route.transport_failure, "block")
+        self.assertIsNone(route.availability_fallback_agent)
+        self.assertEqual(route.availability_fallback_triggers, ())
+        self.assertEqual(route.fallback, "targeted-root")
+
+    def test_availability_fallback_requires_the_exact_discovery_pair(self) -> None:
+        cases = (
+            ("missing triggers", lambda route: route.pop("availability_fallback_triggers"), "paired"),
+            ("missing agent", lambda route: route.pop("availability_fallback_agent"), "paired"),
+            ("wrong agent", lambda route: route.__setitem__("availability_fallback_agent", "openbuild_search_separate"), "canonical"),
+            ("wrong source", lambda route: route.__setitem__("agents", ["openbuild_search_strong"]), "source"),
+            ("unknown trigger", lambda route: route.__setitem__("availability_fallback_triggers", ["network-error"]), "unsupported availability"),
+            ("block with pair", lambda route: route.__setitem__("transport_failure", "block"), "availability-fallback"),
+        )
+        for label, mutate, error in cases:
+            with self.subTest(case=label):
+                data = tomllib.loads(model_map.PACKAGED_MODEL_MAP.read_text(encoding="utf-8"))
+                route = data["discovery"]["default"]
+                mutate(route)
+                with self.assertRaisesRegex(model_map.ModelMapError, error):
+                    model_map._route_from_data(
+                        route,
+                        use_case="discovery",
+                        risk="default",
+                        path=model_map.PACKAGED_MODEL_MAP,
+                    )
+
+    def test_availability_fallback_is_discovery_only(self) -> None:
+        data = tomllib.loads(model_map.PACKAGED_MODEL_MAP.read_text(encoding="utf-8"))
+        route = data["implementation"]["low"]
+        route["transport_failure"] = "availability-fallback"
+        route["availability_fallback_agent"] = "openbuild_search_balanced"
+        route["availability_fallback_triggers"] = ["model-unavailable"]
+        with self.assertRaisesRegex(model_map.ModelMapError, "unknown fields"):
+            model_map._route_from_data(
+                route,
+                use_case="implementation",
+                risk="low",
+                path=model_map.PACKAGED_MODEL_MAP,
+            )
 
     def test_critical_routes_require_explicit_confirmation(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

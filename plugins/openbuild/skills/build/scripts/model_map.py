@@ -42,6 +42,13 @@ ROUTE_FIELDS = {
     "fallback",
     "critical_confirmed",
 }
+DISCOVERY_AVAILABILITY_FIELDS = {
+    "availability_fallback_agent",
+    "availability_fallback_triggers",
+}
+AVAILABILITY_FALLBACK_AGENT = "openbuild_search_balanced"
+AVAILABILITY_SOURCE_AGENT = "openbuild_search_separate"
+AVAILABILITY_FALLBACK_TRIGGERS = {"model-unavailable", "quota-exhausted"}
 AGENT_PREFIX = {
     "discovery": "openbuild_search_",
     "critic": "openbuild_review_",
@@ -136,6 +143,8 @@ class ModelRoute(NamedTuple):
     transport_failure: str
     fallback: str
     critical_confirmed: bool
+    availability_fallback_agent: str | None
+    availability_fallback_triggers: tuple[str, ...]
 
 
 class ModelMap(NamedTuple):
@@ -208,7 +217,8 @@ def _route_from_data(
     path: Path,
 ) -> ModelRoute:
     route_name = f"{use_case}.{risk}"
-    unknown = set(data) - ROUTE_FIELDS
+    allowed_fields = ROUTE_FIELDS | (DISCOVERY_AVAILABILITY_FIELDS if use_case == "discovery" else set())
+    unknown = set(data) - allowed_fields
     missing = ROUTE_FIELDS - set(data)
     if unknown:
         raise ModelMapError(f"{path}: route {route_name} has unknown fields: {', '.join(sorted(unknown))}")
@@ -261,7 +271,43 @@ def _route_from_data(
     if stop_on_success is not True:
         raise ModelMapError(f"{path}: route {route_name} stop_on_success must be true")
     transport_failure = _required_string(data, "transport_failure", path)
-    if transport_failure != "block":
+    availability_agent: str | None = None
+    availability_triggers: tuple[str, ...] = ()
+    has_availability_agent = "availability_fallback_agent" in data
+    has_availability_triggers = "availability_fallback_triggers" in data
+    if has_availability_agent != has_availability_triggers:
+        raise ModelMapError(f"{path}: route {route_name} availability fallback fields must be paired")
+    if use_case == "discovery" and has_availability_agent:
+        if agents[0] != AVAILABILITY_SOURCE_AGENT:
+            raise ModelMapError(
+                f"{path}: route {route_name} availability fallback source must start with "
+                f"{AVAILABILITY_SOURCE_AGENT!r}"
+            )
+        availability_agent = _required_string(data, "availability_fallback_agent", path)
+        if availability_agent != AVAILABILITY_FALLBACK_AGENT:
+            raise ModelMapError(
+                f"{path}: route {route_name} availability fallback must use canonical agent "
+                f"{AVAILABILITY_FALLBACK_AGENT!r}"
+            )
+        availability_triggers = _string_list(
+            data.get("availability_fallback_triggers"),
+            field=f"{route_name}.availability_fallback_triggers",
+            path=path,
+        )
+        if len(availability_triggers) != len(set(availability_triggers)):
+            raise ModelMapError(f"{path}: route {route_name} repeats an availability fallback trigger")
+        unsupported_availability = set(availability_triggers) - AVAILABILITY_FALLBACK_TRIGGERS
+        if unsupported_availability:
+            raise ModelMapError(
+                f"{path}: route {route_name} has unsupported availability fallback triggers: "
+                f"{', '.join(sorted(unsupported_availability))}"
+            )
+        if transport_failure != "availability-fallback":
+            raise ModelMapError(
+                f"{path}: route {route_name} availability fallback requires "
+                "transport_failure = 'availability-fallback'"
+            )
+    elif transport_failure != "block":
         raise ModelMapError(f"{path}: route {route_name} transport_failure must remain 'block'")
     fallback = _required_string(data, "fallback", path)
     required_fallback = "targeted-root" if use_case == "discovery" else "block"
@@ -285,6 +331,8 @@ def _route_from_data(
         transport_failure=transport_failure,
         fallback=fallback,
         critical_confirmed=critical_confirmed,
+        availability_fallback_agent=availability_agent,
+        availability_fallback_triggers=availability_triggers,
     )
 
 
@@ -399,6 +447,8 @@ def resolve_model_route(
         "escalation_triggers": list(route.escalation_triggers),
         "stop_on_success": route.stop_on_success,
         "transport_failure": route.transport_failure,
+        "availability_fallback_agent": route.availability_fallback_agent,
+        "availability_fallback_triggers": list(route.availability_fallback_triggers),
         "fallback": route.fallback,
         "critical_confirmed": route.critical_confirmed,
         "agents": agents,

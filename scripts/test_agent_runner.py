@@ -14,7 +14,7 @@ import sys
 import tempfile
 import unittest
 from argparse import Namespace
-from contextlib import redirect_stdout
+from contextlib import nullcontext, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
@@ -209,6 +209,453 @@ class AgentProfileResolutionTests(unittest.TestCase):
                     codex_home=user_home,
                 )
 
+
+class SearchAvailabilityFallbackTests(unittest.TestCase):
+    write_profile = AgentProfileResolutionTests.write_profile
+
+    def test_structured_classifier_accepts_only_exact_model_bound_vocabulary(self) -> None:
+        spark = "gpt-5.3-codex-spark"
+        positives = (
+            (
+                {"type": "error", "error": {"code": "model_not_found", "model": spark}},
+                "model-unavailable",
+            ),
+            (
+                {
+                    "type": "turn.failed",
+                    "error": {
+                        "type": "usage_limit_exceeded",
+                        "rate_limits": {"limit_name": spark},
+                    },
+                },
+                "quota-exhausted",
+            ),
+            (
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "usage_limit_exceeded",
+                        "model": spark,
+                        "rate_limits": {"limit_name": spark},
+                    },
+                },
+                "quota-exhausted",
+            ),
+        )
+        for value, expected in positives:
+            with self.subTest(expected=expected):
+                self.assertEqual(
+                    agent_runner.classify_search_availability_failure(
+                        [value], exact_model=spark
+                    ),
+                    expected,
+                )
+
+        negatives = (
+            {"type": "error", "message": f"model_not_found: {spark}"},
+            {"type": "usage_limit_exceeded", "model": "gpt-5.6-terra"},
+            {"type": "usage_limit_exceeded", "model": spark},
+            {"type": "usage_limit_exceeded"},
+            {"code": "rate_limit_exceeded", "model": spark},
+            {"code": "network_unavailable", "model": spark},
+            {
+                "type": "usage_limit_exceeded",
+                "rate_limits": {"limit_name": "workspace_member_usage_limit_reached"},
+            },
+            {
+                "type": "usage_limit_exceeded",
+                "model": "gpt-5.6-terra",
+                "rate_limits": {"limit_name": spark},
+            },
+            {"type": "usage_limit_exceeded", "rate_limits": spark},
+        )
+        for value in negatives:
+            with self.subTest(value=value):
+                self.assertIsNone(
+                    agent_runner.classify_search_availability_failure(
+                        [value], exact_model=spark
+                    )
+                )
+
+    def test_structured_classifier_rejects_mixed_or_conflicting_failures(self) -> None:
+        spark = "gpt-5.3-codex-spark"
+        eligible_model = {
+            "type": "error",
+            "error": {"code": "model_not_found", "model": spark},
+        }
+        eligible_quota = {
+            "type": "turn.failed",
+            "error": {
+                "type": "usage_limit_exceeded",
+                "rate_limits": {"limit_name": spark},
+            },
+        }
+        conflicts = (
+            {"type": "error", "error": {"code": "authentication_failed"}},
+            {"type": "error", "error": {"code": "network_error"}},
+            {"type": "error", "error": {"code": "unknown_failure"}},
+            eligible_quota,
+        )
+        for conflict in conflicts:
+            with self.subTest(conflict=conflict):
+                self.assertIsNone(
+                    agent_runner.classify_search_availability_failure(
+                        [eligible_model, conflict], exact_model=spark
+                    )
+                )
+        for conflict in (
+            {
+                "code": "model_not_found",
+                "type": "authentication_error",
+                "model": spark,
+            },
+            {
+                "code": "usage_limit_exceeded",
+                "type": "model_not_found",
+                "model": spark,
+                "rate_limits": {"limit_name": spark},
+            },
+        ):
+            with self.subTest(same_payload_conflict=conflict):
+                self.assertIsNone(
+                    agent_runner.classify_search_availability_failure(
+                        [conflict], exact_model=spark
+                    )
+                )
+
+    def test_search_profiles_share_runtime_instruction_digest(self) -> None:
+        fingerprint = {
+            "algorithm": "sha256",
+            "digest": "a" * 64,
+            "files": 2,
+            "bytes": 12,
+            "inventory": "git-tracked-untracked-nonignored-v1",
+        }
+        source = agent_runner.AgentProfile(
+            name="openbuild_search_separate",
+            description="source",
+            model="gpt-5.3-codex-spark",
+            reasoning_effort="low",
+            sandbox="read-only",
+            developer_instructions=agent_runner.SEARCH_DEVELOPER_INSTRUCTIONS,
+            source=ROOT
+            / "plugins"
+            / "openbuild"
+            / "skills"
+            / "build"
+            / "profiles"
+            / "openbuild_search_separate.toml",
+        )
+        target = source._replace(
+            name="openbuild_search_balanced",
+            model="gpt-5.6-terra",
+            reasoning_effort="medium",
+            source=source.source.with_name("openbuild_search_balanced.toml"),
+        )
+        source = agent_runner.discovery_profile_with_fingerprint(source, fingerprint)
+        target = agent_runner.discovery_profile_with_fingerprint(target, fingerprint)
+        source_descriptor = agent_runner.profile_descriptor(source)
+        target_descriptor = agent_runner.profile_descriptor(target)
+        self.assertEqual(
+            source_descriptor["descriptor"]["instructions_sha256"],
+            target_descriptor["descriptor"]["instructions_sha256"],
+        )
+        self.assertNotEqual(source_descriptor["sha256"], target_descriptor["sha256"])
+
+    def test_search_fallback_claim_is_atomic_and_one_shot(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            claim = Path(temp) / "claim.json"
+            agent_runner._create_private_claim(claim, {"schema": "claim-v1"})
+            self.assertEqual(json.loads(claim.read_text(encoding="utf-8"))["schema"], "claim-v1")
+            with self.assertRaisesRegex(agent_runner.RunnerError, "already claimed"):
+                agent_runner._create_private_claim(claim, {"schema": "claim-v1"})
+
+    def test_search_fallback_claim_uses_durable_exclusive_owner_record(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            claim = Path(temp) / "claim.json"
+            value = {"schema": "claim-v1"}
+            with mock.patch.object(agent_runner, "durable_create_private_json") as create:
+                agent_runner._create_private_claim(claim, value)
+            create.assert_called_once_with(claim, value)
+
+    def test_search_fallback_claim_after_metadata_barrier_is_durably_consumed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            claim = Path(temp) / "claim.json"
+            value = {"schema": "claim-v1"}
+            with self.assertRaisesRegex(
+                agent_runner.RunnerError,
+                "after private claim metadata barrier",
+            ):
+                agent_runner.durable_create_private_json(
+                    claim,
+                    value,
+                    fault="after-metadata-barrier",
+                )
+            self.assertEqual(json.loads(claim.read_text(encoding="utf-8")), value)
+            with self.assertRaises(FileExistsError):
+                agent_runner.durable_create_private_json(claim, value)
+
+    def test_search_fallback_claim_blocks_replay_after_target_durable_phases(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source_claim = root / "source" / "search-fallback-claim.json"
+            source_claim.parent.mkdir()
+            value = {
+                "schema": "openbuild-search-fallback-claim-v1",
+                "target_run_handle": "20260719T000001Z-0123456789",
+            }
+            agent_runner._create_private_claim(source_claim, value)
+            target = root / "target"
+            agent_runner.ensure_private_run_dir(target)
+            for durable_record in ("request.json", "worker.json"):
+                agent_runner.durable_write_private_json(
+                    target / durable_record,
+                    {"schema": durable_record, "source_claim": value},
+                )
+                with self.subTest(durable_record=durable_record), self.assertRaisesRegex(
+                    agent_runner.RunnerError, "already claimed"
+                ):
+                    agent_runner._create_private_claim(source_claim, value)
+
+    def test_availability_requires_a_coherent_pre_turn_failure_stream(self) -> None:
+        base = {
+            "completed": False,
+            "event_error": None,
+            "terminal_event": "turn.failed",
+            "turn_started": False,
+        }
+        clean_exit = {
+            "success": False,
+            "terminal_event": "turn.failed",
+            "exit_code": 1,
+            "failure_message": "codex exec exited with code 1",
+            "cleanup_errors": [],
+        }
+        self.assertTrue(
+            agent_runner.search_availability_event_stream_is_eligible(
+                base,
+                exit_record=clean_exit,
+                codex_exit_status="valid",
+                codex_exit_code=1,
+            )
+        )
+        for mutation in (
+            {"event_error": "invalid JSONL"},
+            {"terminal_event": "turn.completed"},
+            {"completed": True},
+            {"turn_started": True},
+            {"structured_stderr_valid": False},
+        ):
+            with self.subTest(mutation=mutation):
+                self.assertFalse(
+                    agent_runner.search_availability_event_stream_is_eligible(
+                        {**base, **mutation},
+                        exit_record=clean_exit,
+                        codex_exit_status="valid",
+                        codex_exit_code=1,
+                    )
+                )
+
+        for exit_record, result_status, codex_exit_status, codex_exit_code in (
+            ({**clean_exit, "cancelled": True}, "missing", "valid", 1),
+            (
+                {**clean_exit, "failure_message": "activation timed out after 300 seconds"},
+                "missing",
+                "valid",
+                1,
+            ),
+            ({**clean_exit, "cleanup_errors": ["runner cleanup failed"]}, "missing", "valid", 1),
+            ({**clean_exit, "failure_message": "runner cleanup failed"}, "missing", "valid", 1),
+            (clean_exit, "missing", "missing", None),
+            (clean_exit, "missing", "invalid", None),
+            (None, "missing", "valid", 1),
+            (clean_exit, "valid", "valid", 1),
+            (clean_exit, "empty", "valid", 1),
+            (clean_exit, "invalid", "valid", 1),
+        ):
+            with self.subTest(
+                exit_record=exit_record,
+                result_status=result_status,
+                codex_exit_status=codex_exit_status,
+            ):
+                self.assertFalse(
+                    agent_runner.search_availability_event_stream_is_eligible(
+                        base,
+                        exit_record=exit_record,
+                        result_status=result_status,
+                        codex_exit_status=codex_exit_status,
+                        codex_exit_code=codex_exit_code,
+                    )
+                )
+
+    def test_search_fallback_authorization_binds_source_route_profiles_and_prompt(self) -> None:
+        source_handle = f"20260719T000000Z-{os.urandom(5).hex()}"
+        target_handle = f"20260719T000001Z-{os.urandom(5).hex()}"
+        source_dir = agent_runner.default_run_root() / source_handle
+        source_dir.mkdir(parents=True)
+        try:
+            fingerprint = {
+                "algorithm": "sha256",
+                "digest": "a" * 64,
+                "files": 2,
+                "bytes": 12,
+                "inventory": "git-tracked-untracked-nonignored-v1",
+            }
+            source_static = agent_runner.load_agent_profile(
+                "openbuild_search_separate", repo=ROOT, codex_home=Path(tempfile.gettempdir())
+            )
+            target_static = agent_runner.load_agent_profile(
+                "openbuild_search_balanced", repo=ROOT, codex_home=Path(tempfile.gettempdir())
+            )
+            source = agent_runner.discovery_profile_with_fingerprint(source_static, fingerprint)
+            target = agent_runner.discovery_profile_with_fingerprint(target_static, fingerprint)
+            source_descriptor = agent_runner.profile_descriptor(source)
+            request = {
+                "repo": str(ROOT),
+                "task_name": "discover-owner",
+                "search_fallback_source": None,
+                "prompt_snapshot_id": "b" * 64,
+                "prompt_sha256": "c" * 64,
+                "discovery_fingerprint": fingerprint,
+                "profile_descriptor_sha256": source_descriptor["sha256"],
+                "profile": {
+                    "name": source.name,
+                    "model": source.model,
+                    "reasoning_effort": source.reasoning_effort,
+                    "sandbox": source.sandbox,
+                },
+            }
+            (source_dir / "request.json").write_text(json.dumps(request), encoding="utf-8")
+            receipt = {
+                "run_handle": source_handle,
+                "status": "failed",
+                "agent_name": source.name,
+                "configured_model": source.model,
+                "terminal_event": "turn.failed",
+                "codex_exit_evidence": "valid",
+                "codex_exit_code": 1,
+                "result_evidence": "missing",
+                "cancelled": False,
+                "completion_recovered_during_cancel": False,
+                "process_tree_stopped": True,
+                "codex_started": True,
+                "transport_failure_reason": "model-unavailable",
+                "prompt_sha256": "c" * 64,
+            }
+            route = {
+                "map_sha256": "d" * 64,
+                "map_scope": "packaged",
+                "transport_failure": "availability-fallback",
+                "fallback": "targeted-root",
+                "availability_fallback_agent": "openbuild_search_balanced",
+                "availability_fallback_triggers": ["model-unavailable", "quota-exhausted"],
+                "agents": [{"name": "openbuild_search_separate"}],
+            }
+            request["discovery_route_binding"] = agent_runner._discovery_route_binding(
+                route,
+                repo=ROOT,
+                codex_home=Path(tempfile.gettempdir()),
+                fingerprint=fingerprint,
+            )
+            (source_dir / "request.json").write_text(json.dumps(request), encoding="utf-8")
+            current = mock.Mock(public=fingerprint)
+            fake_map = mock.Mock()
+            fake_map.resolve_model_route.return_value = route
+            with (
+                mock.patch.object(agent_runner, "public_receipt", return_value=receipt),
+                mock.patch.object(
+                    agent_runner, "compute_worktree_fingerprint", return_value=current
+                ),
+                mock.patch.object(
+                    agent_runner,
+                    "load_agent_profile",
+                    side_effect=lambda name, **_kwargs: (
+                        source_static
+                        if name == "openbuild_search_separate"
+                        else target_static
+                    ),
+                ) as load_profile,
+                mock.patch.dict(sys.modules, {"model_map": fake_map}),
+            ):
+                request["search_fallback_binding"] = {"reason": "model-unavailable"}
+                (source_dir / "request.json").write_text(
+                    json.dumps(request), encoding="utf-8"
+                )
+                with self.assertRaisesRegex(
+                    agent_runner.RunnerError, "must not carry a fallback binding"
+                ):
+                    agent_runner.prepare_search_fallback_claim(
+                        source_reference=source_handle,
+                        expected_map_sha256="d" * 64,
+                        repo=ROOT,
+                        codex_home=Path(tempfile.gettempdir()),
+                        target_profile=target,
+                        task_name="discover-owner",
+                        target_run_dir=agent_runner.default_run_root() / target_handle,
+                    )
+                request["search_fallback_binding"] = None
+                (source_dir / "request.json").write_text(
+                    json.dumps(request), encoding="utf-8"
+                )
+                fake_map.resolve_model_route.return_value = {**route, "map_sha256": "e" * 64}
+                with self.assertRaisesRegex(agent_runner.RunnerError, "map binding drifted"):
+                    agent_runner.prepare_search_fallback_claim(
+                        source_reference=source_handle,
+                        expected_map_sha256="d" * 64,
+                        repo=ROOT,
+                        codex_home=Path(tempfile.gettempdir()),
+                        target_profile=target,
+                        task_name="discover-owner",
+                        target_run_dir=agent_runner.default_run_root() / target_handle,
+                    )
+                fake_map.resolve_model_route.return_value = route
+                drifted_target = target_static._replace(
+                    source=target_static.source.with_name("shadowed-search-balanced.toml")
+                )
+                load_profile.side_effect = lambda name, **_kwargs: (
+                    source_static
+                    if name == "openbuild_search_separate"
+                    else drifted_target
+                )
+                with self.assertRaisesRegex(agent_runner.RunnerError, "map binding drifted"):
+                    agent_runner.prepare_search_fallback_claim(
+                        source_reference=source_handle,
+                        expected_map_sha256="d" * 64,
+                        repo=ROOT,
+                        codex_home=Path(tempfile.gettempdir()),
+                        target_profile=target,
+                        task_name="discover-owner",
+                        target_run_dir=agent_runner.default_run_root() / target_handle,
+                    )
+                load_profile.side_effect = lambda name, **_kwargs: (
+                    source_static
+                    if name == "openbuild_search_separate"
+                    else target_static
+                )
+                binding = agent_runner.prepare_search_fallback_claim(
+                    source_reference=source_handle,
+                    expected_map_sha256="d" * 64,
+                    repo=ROOT,
+                    codex_home=Path(tempfile.gettempdir()),
+                    target_profile=target,
+                    task_name="discover-owner",
+                    target_run_dir=agent_runner.default_run_root() / target_handle,
+                )
+                self.assertEqual(binding["reason"], "model-unavailable")
+                self.assertEqual(binding["prompt_sha256"], "c" * 64)
+                with self.assertRaisesRegex(agent_runner.RunnerError, "already claimed"):
+                    agent_runner.prepare_search_fallback_claim(
+                        source_reference=source_handle,
+                        expected_map_sha256="d" * 64,
+                        repo=ROOT,
+                        codex_home=Path(tempfile.gettempdir()),
+                        target_profile=target,
+                        task_name="discover-owner",
+                        target_run_dir=agent_runner.default_run_root() / target_handle,
+                    )
+        finally:
+            shutil.rmtree(source_dir, ignore_errors=True)
+
     def test_packaged_spark_profile_makes_code_discovery_zero_config(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -228,10 +675,15 @@ class AgentProfileResolutionTests(unittest.TestCase):
             for token in [
                 "rg",
                 "Get-Content",
-                "path:line",
-                "snippet/signature",
-                "why it matters",
-                "targeted",
+                "openbuild.discovery.v1",
+                "worktree_fingerprint",
+                "line_start",
+                "owners",
+                "tests",
+                "flat arrays",
+                "arrays of bounded strings",
+                "line_end - line_start + 1",
+                "never combine distant symbols",
             ]:
                 with self.subTest(token=token):
                     self.assertIn(token, profile.developer_instructions)
@@ -2558,6 +3010,262 @@ class CodexInvocationTests(unittest.TestCase):
                 )
             allowed.write_text("root completion after audit\n", encoding="utf-8", newline="\n")
 
+    def test_ac14_recovery_overlap_abandonment_does_not_authorize_root_or_mutate_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "config", "core.autocrlf", "false"], cwd=repo, check=True
+            )
+            subprocess.run(
+                ["git", "config", "user.email", "tests@example.invalid"],
+                cwd=repo,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "Tests"], cwd=repo, check=True
+            )
+            allowed = repo / "allowed.txt"
+            allowed.write_text("seed\n", encoding="utf-8", newline="\n")
+            subprocess.run(["git", "add", "allowed.txt"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "--quiet", "-m", "baseline"],
+                cwd=repo,
+                check=True,
+            )
+            allowed.write_text(
+                "preexisting user change\n", encoding="utf-8", newline="\n"
+            )
+
+            run_dir = root / "recovery-overlap-run"
+            owner = agent_runner.RecoveryRegistry(repo, state_root=root / "state")
+            owner.initialize()
+            prompt = agent_runner.stage_owner_prompt_snapshot(
+                owner, b"bounded recovery overlap attempt\n"
+            )
+            checkpoint = owner.capture_checkpoint(
+                source_id="source-1",
+                source_lease_id="source-lease",
+                source_receipt_digest="a" * 64,
+                source_milestone="M2-source",
+                target_milestone="M2-recovery",
+                allowed_paths=["allowed.txt"],
+                specification_revision="R-005",
+            )
+            checkpoint = owner.revalidate_checkpoint(checkpoint)
+            grant = owner.grant_authorization(
+                checkpoint,
+                user_action_digest="b" * 64,
+                specification_revision="R-005",
+                prompt_snapshot_id=prompt["prompt_snapshot_id"],
+                prompt_sha256=prompt["prompt_sha256"],
+            )
+            owner.consume_grant_and_reserve(
+                grant_id=grant["grant_id"],
+                checkpoint=checkpoint,
+                target_plan={
+                    "lease_id": "recovery-lease",
+                    "run_id": run_dir.name,
+                    "prompt_snapshot_id": prompt["prompt_snapshot_id"],
+                    "prompt_sha256": prompt["prompt_sha256"],
+                    "launch_token": "d" * 64,
+                    "provider_plan_id": "provider-plan",
+                    "ipc_plan_id": "ipc-plan",
+                    "allowed_set_digest": checkpoint["allowed_set_digest"],
+                },
+            )
+            recovery_preflight = owner.prepare_source_checkpoint(
+                source_id="recovery-overlap-next-source",
+                source_lease_id="recovery-lease",
+                source_milestone="M2-recovery",
+                target_milestone="M3",
+                allowed_paths=["allowed.txt"],
+                specification_revision="R-005",
+            )
+            owner.claim_launch("recovery-lease", "d" * 64)
+            owner.bind_process_unactivated(
+                "recovery-lease",
+                allowed_set_digest=checkpoint["allowed_set_digest"],
+                provider_receipt=_provider_receipt(),
+                process_receipt=_process_receipt(),
+            )
+            owner.commit_activation(
+                "recovery-lease", checkpoint["allowed_set_digest"]
+            )
+
+            agent_runner.ensure_private_run_dir(run_dir)
+            agent_runner.atomic_write_json(
+                run_dir / "request.json",
+                {
+                    "profile": {"name": "openbuild_implementation_strong"},
+                    "task_name": "M2-recovery",
+                    "repo": str(repo),
+                    "lease_id": "recovery-lease",
+                    "lifecycle_allowed_set_digest": checkpoint[
+                        "allowed_set_digest"
+                    ],
+                    "recovery_preflight": recovery_preflight,
+                    "recovery_parent_checkpoint": checkpoint,
+                    "recovery_target": True,
+                    **self.private_run_request_identity(run_dir),
+                },
+            )
+            secret = bytes.fromhex("55" * 32)
+            agent_runner.atomic_write_bytes(run_dir / "guardian.key", secret)
+            agent_runner.write_guardian_message(
+                run_dir / "guardian-zero.json",
+                secret,
+                "guardian-zero",
+                _zero_proof(),
+            )
+            agent_runner.write_guardian_message(
+                run_dir / "guardian-closed.json",
+                secret,
+                "guardian-closed",
+                _guardian_close(),
+            )
+            receipt = {
+                "run_dir": str(run_dir),
+                "status": "completed",
+                "agent_name": "openbuild_implementation_strong",
+                "task_name": "M2-recovery",
+                "lease_id": "recovery-lease",
+                "activated": True,
+                "configured_model": "fixture",
+                "model_reasoning_effort": "xhigh",
+                "sandbox": "workspace-write",
+                "worker_pid": 123,
+                "worker_process_identity": "worker-1",
+                "codex_pid": 456,
+                "codex_process_identity": "codex-1",
+                "terminal_event": "turn.completed",
+                "codex_exit_evidence": "valid",
+                "codex_exit_code": 0,
+                "result_evidence": "valid",
+                "process_tree_stopped": True,
+            }
+            allowed.write_text(
+                "recovery writer change\n", encoding="utf-8", newline="\n"
+            )
+            outside = repo / "orchestrator-artifact.txt"
+            outside.write_text("outside drift\n", encoding="utf-8", newline="\n")
+            status_before = subprocess.run(
+                ["git", "status", "--porcelain=v2", "-z"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+            ).stdout
+            diff_before = subprocess.run(
+                ["git", "diff", "--binary", "--no-ext-diff"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+            ).stdout
+            index_before = (repo / ".git" / "index").read_bytes()
+            attribution_receipt = {
+                "status_sha256": agent_runner.sha256_bytes(status_before),
+                "diff_sha256": agent_runner.sha256_bytes(diff_before),
+                "index_sha256": agent_runner.sha256_bytes(index_before),
+            }
+            diff_attribution_digest = agent_runner.sha256_bytes(
+                json.dumps(
+                    attribution_receipt,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+
+            with mock.patch.object(
+                agent_runner, "recovery_registry_for_agent", return_value=owner
+            ):
+                with self.assertRaisesRegex(
+                    agent_runner.RunnerError, "exact registry vacancy"
+                ):
+                    agent_runner.record_root_completion_authorization_run(
+                        Namespace(
+                            run_dir=str(run_dir),
+                            specification_revision="R-005",
+                            milestone="M2-recovery",
+                            allowed_set_digest=checkpoint["allowed_set_digest"],
+                            diff_attribution_digest=diff_attribution_digest,
+                        )
+                    )
+                self.assertFalse((run_dir / "root-completion-authorized.json").exists())
+                with mock.patch.object(
+                    agent_runner, "audit_guardian_health"
+                ), mock.patch.object(
+                    agent_runner, "public_receipt", return_value=receipt
+                ), redirect_stdout(io.StringIO()):
+                    self.assertEqual(
+                        agent_runner.reconcile_terminal_abandonment_run(
+                            Namespace(run_dir=str(run_dir))
+                        ),
+                        0,
+                    )
+
+            state = owner.state()
+            abandonment = agent_runner.read_json(run_dir / "terminal-abandonment.json")
+            self.assertIsNone(state["lease"])
+            self.assertIsNone(state["outbox"])
+            self.assertEqual(abandonment["schema"], "terminal-abandonment-v2")
+            self.assertEqual(
+                abandonment["cause"],
+                "outside-set-drift-with-preexisting-dirty-overlap",
+            )
+            self.assertFalse((run_dir / "implementation-handoffs.jsonl").exists())
+            self.assertFalse((run_dir / "root-completion-authorized.json").exists())
+            audit_output = io.StringIO()
+            with mock.patch.object(
+                agent_runner, "recovery_registry_for_agent", return_value=owner
+            ), redirect_stdout(audit_output):
+                self.assertEqual(
+                    agent_runner.record_root_completion_authorization_run(
+                        Namespace(
+                            run_dir=str(run_dir),
+                            specification_revision="R-005",
+                            milestone="M2-recovery",
+                            allowed_set_digest=checkpoint["allowed_set_digest"],
+                            diff_attribution_digest=diff_attribution_digest,
+                        )
+                    ),
+                    0,
+                )
+            expected_audit = agent_runner.root_completion_authorization_record(
+                specification_revision="R-005",
+                milestone="M2-recovery",
+                allowed_set_digest=checkpoint["allowed_set_digest"],
+                diff_attribution_digest=diff_attribution_digest,
+            )
+            self.assertEqual(json.loads(audit_output.getvalue()), expected_audit)
+            self.assertEqual(
+                agent_runner.read_json(run_dir / "root-completion-authorized.json"),
+                expected_audit,
+            )
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "status", "--porcelain=v2", "-z"],
+                    cwd=repo,
+                    check=True,
+                    stdout=subprocess.PIPE,
+                ).stdout,
+                status_before,
+            )
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "diff", "--binary", "--no-ext-diff"],
+                    cwd=repo,
+                    check=True,
+                    stdout=subprocess.PIPE,
+                ).stdout,
+                diff_before,
+            )
+            self.assertEqual((repo / ".git" / "index").read_bytes(), index_before)
+            self.assertEqual(allowed.read_text(encoding="utf-8"), "recovery writer change\n")
+            self.assertEqual(outside.read_text(encoding="utf-8"), "outside drift\n")
+
     def test_ac09_ac13_root_completion_audit_is_durable_before_authorization(self) -> None:
         fault_stages = (
             "before-write",
@@ -2777,6 +3485,14 @@ class CodexInvocationTests(unittest.TestCase):
                 "checkpoint_invalidation": "completed",
             }
         )
+        recovery_overlap_abandoned = agent_runner.classify_recovery_outcome(
+            terminal_abandonment={
+                "outcome": "terminal-abandoned",
+                "schema": "terminal-abandonment-v2",
+                "cause": "outside-set-drift-with-preexisting-dirty-overlap",
+                "checkpoint_invalidation": "completed",
+            }
+        )
         audit = agent_runner.root_completion_authorization_record(
             specification_revision="R-005",
             milestone="M2",
@@ -2788,10 +3504,11 @@ class CodexInvocationTests(unittest.TestCase):
         self.assertEqual(blocked["outcome"], "blocked")
         self.assertEqual(exhausted["outcome"], "automation-exhausted")
         self.assertEqual(abandoned["outcome"], "terminal-abandoned")
+        self.assertEqual(recovery_overlap_abandoned["schema"], "terminal-abandonment-v2")
         self.assertEqual(audit["event"], "root-completion-authorized")
         self.assertEqual(audit["authority"], "original-build-request")
         self.assertTrue(audit["automatic"])
-        for record in (decision, blocked, exhausted, abandoned, audit):
+        for record in (decision, blocked, exhausted, abandoned, recovery_overlap_abandoned, audit):
             self.assertEqual(record["writer_action"], "none")
             rendered = json.dumps(record)
             self.assertNotIn(str(ROOT), rendered)
@@ -4377,6 +5094,27 @@ class RunEvidenceTests(unittest.TestCase):
                 "model unavailable",
             )
 
+    def test_structured_error_after_turn_started_is_not_availability_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            events = Path(temp) / "events.jsonl"
+            self.write_events(
+                events,
+                {"type": "thread.started", "thread_id": "thread-2"},
+                {"type": "turn.started"},
+                {
+                    "type": "turn.failed",
+                    "error": {
+                        "type": "usage_limit_exceeded",
+                        "rate_limits": {"limit_name": "gpt-5.3-codex-spark"},
+                    },
+                },
+            )
+
+            evidence = agent_runner.read_event_evidence(events)
+
+            self.assertTrue(evidence["turn_started"])
+            self.assertEqual(evidence["structured_errors"], [])
+
     def test_turn_completed_must_be_the_last_jsonl_event(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             events = Path(temp) / "events.jsonl"
@@ -4414,6 +5152,23 @@ class RunEvidenceTests(unittest.TestCase):
 
             self.assertFalse(evidence["completed"])
             self.assertIn("line 2", evidence["event_error"])
+
+    def test_structured_availability_error_followed_by_malformed_jsonl_is_ineligible(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            events = Path(temp) / "events.jsonl"
+            events.write_text(
+                '{"type":"error","error":{"code":"model_not_found","model":"gpt-5.3-codex-spark"}}\nnot-json\n',
+                encoding="utf-8",
+                newline="\n",
+            )
+
+            evidence = agent_runner.read_event_evidence(events)
+
+            self.assertEqual(len(evidence["structured_errors"]), 1)
+            self.assertIsNotNone(evidence["event_error"])
+            self.assertFalse(
+                agent_runner.search_availability_event_stream_is_eligible(evidence)
+            )
 
     def test_receipt_stays_running_while_worker_finalizes_after_codex_exit(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -4668,6 +5423,514 @@ class RunEvidenceTests(unittest.TestCase):
 
             self.assertEqual(receipt["status"], "failed")
             self.assertEqual(receipt["failure_message"], "result-evidence-invalid")
+
+    def test_completed_search_with_invalid_result_cannot_authorize_availability_fallback(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            agent_runner.atomic_write_json(
+                run_dir / "request.json",
+                {
+                    "task_name": "invalid_search_result",
+                    "profile_source": "profile.toml",
+                    "auth_mode": "chatgpt",
+                    "search_fallback_source": None,
+                    "search_fallback_binding": {"reason": "model-unavailable"},
+                    "profile": {
+                        "name": "openbuild_search_separate",
+                        "model": "gpt-5.3-codex-spark",
+                        "reasoning_effort": "low",
+                        "sandbox": "read-only",
+                    },
+                },
+            )
+            agent_runner.atomic_write_json(
+                run_dir / "worker.json", {"pid": 111, "identity": "worker-id"}
+            )
+            agent_runner.atomic_write_json(
+                run_dir / "codex.json", {"pid": 222, "identity": "codex-id"}
+            )
+            agent_runner.atomic_write_json(
+                run_dir / "exit.json", {"success": True, "failure_message": None}
+            )
+            agent_runner.atomic_write_json(
+                run_dir / "codex-exit.json",
+                {"pid": 222, "identity": "codex-id", "exit_code": 0},
+            )
+            self.write_events(
+                run_dir / "events.jsonl",
+                {"type": "thread.started", "thread_id": "thread-invalid-search"},
+                {
+                    "type": "error",
+                    "error": {
+                        "code": "model_not_found",
+                        "model": "gpt-5.3-codex-spark",
+                    },
+                },
+                {"type": "turn.completed", "usage": {"output_tokens": 1}},
+            )
+
+            with mock.patch.object(
+                agent_runner, "process_record_state", return_value="stopped"
+            ):
+                receipt = agent_runner.public_receipt(run_dir)
+
+            self.assertEqual(receipt["status"], "failed")
+            self.assertEqual(receipt["failure_message"], "result-evidence-invalid")
+            self.assertIsNone(receipt["transport_failure_reason"])
+
+    def test_mixed_pre_turn_failures_cannot_authorize_availability_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            agent_runner.atomic_write_json(
+                run_dir / "request.json",
+                {
+                    "task_name": "mixed_search_failure",
+                    "profile_source": "profile.toml",
+                    "auth_mode": "chatgpt",
+                    "search_fallback_source": None,
+                    "profile": {
+                        "name": "openbuild_search_separate",
+                        "model": "gpt-5.3-codex-spark",
+                        "reasoning_effort": "low",
+                        "sandbox": "read-only",
+                    },
+                },
+            )
+            agent_runner.atomic_write_json(
+                run_dir / "worker.json", {"pid": 111, "identity": "worker-id"}
+            )
+            agent_runner.atomic_write_json(
+                run_dir / "codex.json", {"pid": 222, "identity": "codex-id"}
+            )
+            agent_runner.atomic_write_json(
+                run_dir / "exit.json",
+                {"success": False, "failure_message": "codex exec exited with code 1"},
+            )
+            self.write_events(
+                run_dir / "events.jsonl",
+                {
+                    "type": "error",
+                    "error": {
+                        "code": "model_not_found",
+                        "model": "gpt-5.3-codex-spark",
+                    },
+                },
+                {"type": "error", "error": {"code": "authentication_failed"}},
+            )
+
+            with mock.patch.object(
+                agent_runner, "process_record_state", return_value="stopped"
+            ):
+                receipt = agent_runner.public_receipt(run_dir)
+
+            self.assertEqual(receipt["status"], "failed")
+            self.assertIsNone(receipt["transport_failure_reason"])
+
+            for raw_error in (
+                {
+                    "type": "usage_limit_exceeded",
+                    "rate_limits": {"limit_name": "gpt-5.3-codex-spark"},
+                },
+                {"code": "authentication_failed"},
+                {"type": "item.completed", "code": "authentication_failed"},
+                {"type": "unknown_failure"},
+            ):
+                with self.subTest(raw_error=raw_error):
+                    self.write_events(
+                        run_dir / "events.jsonl",
+                        {
+                            "type": "error",
+                            "error": {
+                                "code": "model_not_found",
+                                "model": "gpt-5.3-codex-spark",
+                            },
+                        },
+                        raw_error,
+                    )
+                    with mock.patch.object(
+                        agent_runner, "process_record_state", return_value="stopped"
+                    ):
+                        receipt = agent_runner.public_receipt(run_dir)
+                    self.assertEqual(receipt["status"], "failed")
+                    self.assertIsNone(receipt["transport_failure_reason"])
+
+            self.write_events(
+                run_dir / "events.jsonl",
+                {
+                    "type": "error",
+                    "error": {
+                        "code": "model_not_found",
+                        "model": "gpt-5.3-codex-spark",
+                    },
+                },
+            )
+            (run_dir / "stderr.log").write_text(
+                json.dumps({"code": "authentication_failed"}) + "\n",
+                encoding="utf-8",
+            )
+            with mock.patch.object(
+                agent_runner, "process_record_state", return_value="stopped"
+            ):
+                receipt = agent_runner.public_receipt(run_dir)
+            self.assertEqual(receipt["status"], "failed")
+            self.assertIsNone(receipt["transport_failure_reason"])
+
+            (run_dir / "stderr.log").write_text("", encoding="utf-8")
+            self.write_events(
+                run_dir / "events.jsonl",
+                {
+                    "type": "error",
+                    "error": {
+                        "code": "model_not_found",
+                        "model": "gpt-5.3-codex-spark",
+                    },
+                },
+                {"type": "item.failed", "error": {"code": "network_error"}},
+            )
+            with mock.patch.object(
+                agent_runner, "process_record_state", return_value="stopped"
+            ):
+                receipt = agent_runner.public_receipt(run_dir)
+            self.assertEqual(receipt["status"], "failed")
+            self.assertIsNone(receipt["transport_failure_reason"])
+
+            self.write_events(
+                run_dir / "events.jsonl",
+                {
+                    "type": "error",
+                    "error": {
+                        "code": "model_not_found",
+                        "model": "gpt-5.3-codex-spark",
+                    },
+                },
+            )
+            for malformed_stderr in (b"not-json\n", b"\xff"):
+                with self.subTest(malformed_stderr=malformed_stderr):
+                    (run_dir / "stderr.log").write_bytes(malformed_stderr)
+                    with mock.patch.object(
+                        agent_runner, "process_record_state", return_value="stopped"
+                    ):
+                        receipt = agent_runner.public_receipt(run_dir)
+                    self.assertEqual(receipt["status"], "failed")
+                    self.assertIsNone(receipt["transport_failure_reason"])
+
+            (run_dir / "stderr.log").unlink()
+            (run_dir / "stderr.log").mkdir()
+            with mock.patch.object(
+                agent_runner, "process_record_state", return_value="stopped"
+            ):
+                receipt = agent_runner.public_receipt(run_dir)
+            self.assertEqual(receipt["status"], "failed")
+            self.assertIsNone(receipt["transport_failure_reason"])
+
+    def test_availability_receipt_requires_clean_runner_and_bound_codex_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            agent_runner.atomic_write_json(
+                run_dir / "request.json",
+                {
+                    "task_name": "clean_search_failure",
+                    "profile_source": "profile.toml",
+                    "auth_mode": "chatgpt",
+                    "search_fallback_source": None,
+                    "profile": {
+                        "name": "openbuild_search_separate",
+                        "model": "gpt-5.3-codex-spark",
+                        "reasoning_effort": "low",
+                        "sandbox": "read-only",
+                    },
+                },
+            )
+            agent_runner.atomic_write_json(
+                run_dir / "worker.json", {"pid": 111, "identity": "worker-id"}
+            )
+            agent_runner.atomic_write_json(
+                run_dir / "codex.json", {"pid": 222, "identity": "codex-id"}
+            )
+            clean_exit = {
+                "success": False,
+                "terminal_event": None,
+                "exit_code": 1,
+                "failure_message": "codex exec exited with code 1",
+                "cleanup_errors": [],
+            }
+            agent_runner.atomic_write_json(run_dir / "exit.json", clean_exit)
+            self.write_events(
+                run_dir / "events.jsonl",
+                {
+                    "type": "error",
+                    "error": {
+                        "code": "model_not_found",
+                        "model": "gpt-5.3-codex-spark",
+                    },
+                },
+            )
+
+            with mock.patch.object(
+                agent_runner, "process_record_state", return_value="stopped"
+            ):
+                missing = agent_runner.public_receipt(run_dir)
+                self.assertEqual(missing["codex_exit_evidence"], "missing")
+                self.assertIsNone(missing["transport_failure_reason"])
+
+                (run_dir / "codex-exit.json").write_text(
+                    "not-json\n", encoding="utf-8", newline="\n"
+                )
+                malformed = agent_runner.public_receipt(run_dir)
+                self.assertEqual(malformed["codex_exit_evidence"], "malformed")
+                self.assertIsNone(malformed["transport_failure_reason"])
+
+                agent_runner.atomic_write_json(
+                    run_dir / "codex-exit.json",
+                    {"pid": 222, "identity": "codex-id", "exit_code": 1},
+                )
+                agent_runner.atomic_write_json(
+                    run_dir / "exit.json",
+                    {**clean_exit, "cleanup_errors": ["runner cleanup failed"]},
+                )
+                cleanup_failed = agent_runner.public_receipt(run_dir)
+                self.assertIsNone(cleanup_failed["transport_failure_reason"])
+
+                request = agent_runner.read_json(run_dir / "request.json")
+                request["search_fallback_binding"] = {
+                    "reason": "model-unavailable",
+                    "source_handle_sha256": "a" * 64,
+                }
+                agent_runner.atomic_write_json(run_dir / "request.json", request)
+                injected_binding = agent_runner.public_receipt(run_dir)
+                self.assertIsNone(injected_binding["transport_failure_reason"])
+                request["search_fallback_binding"] = None
+                agent_runner.atomic_write_json(run_dir / "request.json", request)
+
+                agent_runner.atomic_write_json(
+                    run_dir / "exit.json",
+                    {**clean_exit, "failure_message": "runner cleanup failed"},
+                )
+                runner_failed = agent_runner.public_receipt(run_dir)
+                self.assertIsNone(runner_failed["transport_failure_reason"])
+
+                agent_runner.atomic_write_json(run_dir / "exit.json", clean_exit)
+                eligible = agent_runner.public_receipt(run_dir)
+                self.assertEqual(eligible["codex_exit_evidence"], "valid")
+                self.assertEqual(eligible["transport_failure_reason"], "model-unavailable")
+
+    def test_nonregular_result_artifact_cannot_authorize_availability_fallback(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            agent_runner.atomic_write_json(
+                run_dir / "request.json",
+                {
+                    "task_name": "nonregular_search_result",
+                    "profile_source": "profile.toml",
+                    "auth_mode": "chatgpt",
+                    "search_fallback_source": None,
+                    "profile": {
+                        "name": "openbuild_search_separate",
+                        "model": "gpt-5.3-codex-spark",
+                        "reasoning_effort": "low",
+                        "sandbox": "read-only",
+                    },
+                },
+            )
+            agent_runner.atomic_write_json(
+                run_dir / "worker.json", {"pid": 111, "identity": "worker-id"}
+            )
+            agent_runner.atomic_write_json(
+                run_dir / "codex.json", {"pid": 222, "identity": "codex-id"}
+            )
+            agent_runner.atomic_write_json(
+                run_dir / "exit.json",
+                {"success": False, "failure_message": "codex exec exited with code 1"},
+            )
+            self.write_events(
+                run_dir / "events.jsonl",
+                {
+                    "type": "error",
+                    "error": {
+                        "code": "model_not_found",
+                        "model": "gpt-5.3-codex-spark",
+                    },
+                },
+            )
+            result_path = run_dir / "result.md"
+
+            result_path.mkdir()
+            with mock.patch.object(
+                agent_runner, "process_record_state", return_value="stopped"
+            ):
+                directory_receipt = agent_runner.public_receipt(run_dir)
+            self.assertEqual(directory_receipt["result_evidence"], "invalid")
+            self.assertIsNone(directory_receipt["transport_failure_reason"])
+            result_path.rmdir()
+
+            try:
+                result_path.symlink_to(run_dir / "missing-result-target")
+            except OSError:
+                symlink_metadata = os.stat_result(
+                    (agent_runner.stat.S_IFLNK, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+                )
+                lstat_context = mock.patch.object(
+                    Path, "lstat", return_value=symlink_metadata
+                )
+            else:
+                lstat_context = mock.patch.object(Path, "lstat", wraps=Path.lstat)
+            with lstat_context, mock.patch.object(
+                agent_runner, "process_record_state", return_value="stopped"
+            ):
+                symlink_receipt = agent_runner.public_receipt(run_dir)
+            self.assertEqual(symlink_receipt["result_evidence"], "invalid")
+            self.assertIsNone(symlink_receipt["transport_failure_reason"])
+
+    def test_nonregular_structured_evidence_cannot_authorize_availability_fallback(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            agent_runner.atomic_write_json(
+                run_dir / "request.json",
+                {
+                    "task_name": "nonregular_structured_evidence",
+                    "profile_source": "profile.toml",
+                    "auth_mode": "chatgpt",
+                    "search_fallback_source": None,
+                    "profile": {
+                        "name": "openbuild_search_separate",
+                        "model": "gpt-5.3-codex-spark",
+                        "reasoning_effort": "low",
+                        "sandbox": "read-only",
+                    },
+                },
+            )
+            agent_runner.atomic_write_json(
+                run_dir / "worker.json", {"pid": 111, "identity": "worker-id"}
+            )
+            agent_runner.atomic_write_json(
+                run_dir / "codex.json", {"pid": 222, "identity": "codex-id"}
+            )
+            agent_runner.atomic_write_json(
+                run_dir / "exit.json",
+                {"success": False, "failure_message": "codex exec exited with code 1"},
+            )
+            eligible = {
+                "type": "error",
+                "error": {
+                    "code": "model_not_found",
+                    "model": "gpt-5.3-codex-spark",
+                },
+            }
+            original_lstat = Path.lstat
+
+            def receipt_with_mode(target_name: str, mode: int | None) -> dict[str, object]:
+                events_path = run_dir / "events.jsonl"
+                stderr_path = run_dir / "stderr.log"
+                for path in (events_path, stderr_path):
+                    if path.is_dir():
+                        path.rmdir()
+                    elif path.exists() or path.is_symlink():
+                        path.unlink()
+                target = run_dir / target_name
+                if target_name == "stderr.log":
+                    self.write_events(events_path, eligible)
+                else:
+                    stderr_path.write_text(json.dumps(eligible) + "\n", encoding="utf-8")
+                if mode is None:
+                    target.mkdir()
+                    lstat_context = nullcontext()
+                else:
+                    metadata = os.stat_result((mode, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+
+                    def fake_lstat(path: Path) -> os.stat_result:
+                        if path == target:
+                            return metadata
+                        return original_lstat(path)
+
+                    lstat_context = mock.patch.object(
+                        Path, "lstat", autospec=True, side_effect=fake_lstat
+                    )
+                with lstat_context, mock.patch.object(
+                    agent_runner, "process_record_state", return_value="stopped"
+                ):
+                    return agent_runner.public_receipt(run_dir)
+
+            for target_name in ("events.jsonl", "stderr.log"):
+                for label, mode in (
+                    ("directory", None),
+                    ("broken-symlink", agent_runner.stat.S_IFLNK),
+                    ("fifo", agent_runner.stat.S_IFIFO),
+                ):
+                    with self.subTest(target=target_name, object_type=label):
+                        receipt = receipt_with_mode(target_name, mode)
+                        self.assertEqual(receipt["status"], "failed")
+                        self.assertIsNone(receipt["transport_failure_reason"])
+
+    def test_artifact_readers_reject_regular_file_replacement_between_check_and_open(
+        self,
+    ) -> None:
+        readers = {
+            "events.jsonl": lambda path: agent_runner.read_event_evidence(path)[
+                "event_error"
+            ]
+            is not None,
+            "stderr.log": lambda path: agent_runner._read_structured_stderr(path)[1]
+            is False,
+            "result.md": lambda path: agent_runner.final_result_error(path) is not None,
+        }
+        payloads = {
+            "events.jsonl": json.dumps(
+                {
+                    "type": "error",
+                    "error": {
+                        "code": "model_not_found",
+                        "model": "gpt-5.3-codex-spark",
+                    },
+                }
+            )
+            + "\n",
+            "stderr.log": json.dumps(
+                {
+                    "code": "model_not_found",
+                    "model": "gpt-5.3-codex-spark",
+                }
+            )
+            + "\n",
+            "result.md": "valid-looking result\n",
+        }
+        reader_os = agent_runner.read_regular_file_no_follow.__globals__["os"]
+
+        for name, reader in readers.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                target = root / name
+                replacement = root / f"replacement-{name}"
+                original = root / f"original-{name}"
+                target.write_text(payloads[name], encoding="utf-8", newline="\n")
+                replacement.write_text(payloads[name], encoding="utf-8", newline="\n")
+                real_open = reader_os.open
+                swapped = False
+
+                def swap_before_open(
+                    path: object,
+                    flags: int,
+                    *args: object,
+                ) -> int:
+                    nonlocal swapped
+                    if not swapped and Path(path) == target:
+                        swapped = True
+                        target.replace(original)
+                        replacement.replace(target)
+                    return real_open(path, flags, *args)
+
+                with mock.patch.object(
+                    reader_os,
+                    "open",
+                    side_effect=swap_before_open,
+                ):
+                    self.assertTrue(reader(target))
+                self.assertTrue(swapped)
 
     def test_completed_receipt_requires_creation_bound_zero_exit_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -9,7 +9,9 @@ max_steps = 1
 escalation_mode = "after-evidence"
 escalation_triggers = ["insufficient-evidence", "ambiguous-ownership", "cross-file-gap"]
 stop_on_success = true
-transport_failure = "block"
+transport_failure = "availability-fallback"
+availability_fallback_agent = "openbuild_search_balanced"
+availability_fallback_triggers = ["model-unavailable", "quota-exhausted"]
 fallback = "targeted-root"
 critical_confirmed = false
 

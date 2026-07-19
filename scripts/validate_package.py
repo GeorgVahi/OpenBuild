@@ -21,6 +21,7 @@ REVIEW_PROTOCOL = SKILL / "references" / "review-protocol.md"
 AGENT_RUNNER = SKILL / "scripts" / "agent_runner.py"
 RECOVERY_STATE = SKILL / "scripts" / "recovery_state.py"
 MODEL_MAP_RESOLVER = SKILL / "scripts" / "model_map.py"
+DISCOVERY_CONTRACT = SKILL / "scripts" / "discovery_contract.py"
 PACKAGED_MODEL_MAP = SKILL / "profiles" / "openbuild_model_map.toml"
 MODEL_MAP_INTERVIEW = SKILL / "references" / "model-map-interview.md"
 PACKAGED_SEARCH_MODEL = "gpt-5.3-codex-spark"
@@ -59,10 +60,14 @@ PACKAGED_SEARCH_INSTRUCTIONS = (
     "When code discovery, broad rg, route or symbol lookup, owner mapping, or cross-file evidence gathering is needed:\n"
     "- perform repository search, rg, rg --files, Get-Content, and local file reading yourself;\n"
     "- do not edit files, write configuration, make product or architecture decisions, commit, push, or answer the user;\n"
-    "- return only a compact evidence map with path:line, symbol or route, a short snippet/signature, and why it matters;\n"
-    "- include relevant negative results, confidence, and the search stop condition;\n"
-    "- keep raw logs and large file dumps out of the result.\n\n"
-    "The main process will do targeted reads only after your result, for verification before edits.\n"
+    "- return exactly one UTF-8 JSON object and no Markdown fences or surrounding prose;\n"
+    "- use schema openbuild.discovery.v1 with exactly these fields: schema, worktree_fingerprint, summary, owners, couplings, tests, flows, constraints, uncertainties;\n"
+    "- copy the runtime-provided worktree_fingerprint object exactly; it is owner-verified before and after the run;\n"
+    "- make owners, couplings, tests, and flows flat arrays whose items directly use exactly path, line_start, line_end, symbol, reason and optional kind/related_path; make owners and tests non-empty;\n"
+    "- make constraints and uncertainties arrays of bounded strings, never evidence objects or nested structures;\n"
+    "- keep every path repository-relative and every line range tight: line_end - line_start + 1 must be at most 200, and one item must never combine distant symbols; include relevant constraints, uncertainties, negative results, and the search stop condition in the bounded fields;\n"
+    "- never cite generated build-output, vendor, dependency, cache, coverage, or artifact paths; source directories named build remain valid evidence; keep raw logs and large file dumps out of the result.\n\n"
+    "The main process validates the strict JSON, paths, ranges, owner/test evidence, and fingerprint before consuming it.\n"
 )
 
 REQUIRED = [
@@ -88,6 +93,7 @@ REQUIRED = [
     AGENT_RUNNER,
     RECOVERY_STATE,
     MODEL_MAP_RESOLVER,
+    DISCOVERY_CONTRACT,
     PACKAGED_MODEL_MAP,
     *PACKAGED_AGENT_PROFILES.values(),
     SKILL / "references" / "tdd-workflow.md",
@@ -96,6 +102,7 @@ REQUIRED = [
     ROOT / "scripts" / "test_agent_runner.py",
     ROOT / "scripts" / "test_recovery_state.py",
     ROOT / "scripts" / "test_model_map.py",
+    ROOT / "scripts" / "test_discovery_contract.py",
 ]
 
 TEXT_SUFFIXES = {".md", ".json", ".yaml", ".yml", ".toml", ".py"}
@@ -3128,6 +3135,8 @@ def validate_implementation_delegation_contract(
     protocol_text: str,
     model_routing: str,
     tdd_workflow: str,
+    review_protocol: str,
+    versioning_text: str,
     readme: str,
     readme_ru: str,
     runner_text: str,
@@ -3267,6 +3276,16 @@ def validate_implementation_delegation_contract(
             "implementation-delegation.md recovery autonomy: missing exact abandonment cause",
         ),
         (
+            skill_text,
+            "terminal-abandonment-v2",
+            "SKILL.md recovery overlap: missing v2 terminal outcome",
+        ),
+        (
+            protocol_text,
+            "exact sorted pair `[outside-set-drift, preexisting-dirty-overlap]`",
+            "implementation-delegation.md recovery overlap: missing recovery-target-only exact pair",
+        ),
+        (
             protocol_text,
             "required_action=provide-decision",
             "implementation-delegation.md recovery autonomy: missing decision outcome boundary",
@@ -3278,8 +3297,13 @@ def validate_implementation_delegation_contract(
         ),
         (
             model_routing,
-            "Exact `[outside-set-drift]` is terminally abandoned through the current owner lifecycle",
+            "Exact `[outside-set-drift]` uses terminal abandonment v1",
             "model-routing.md recovery autonomy: missing same-lifecycle routing boundary",
+        ),
+        (
+            model_routing,
+            "exact `[outside-set-drift, preexisting-dirty-overlap]` uses terminal abandonment v2 only for a recovery-target",
+            "model-routing.md recovery overlap: missing recovery-target-only routing boundary",
         ),
         (
             model_routing,
@@ -3292,6 +3316,21 @@ def validate_implementation_delegation_contract(
             "tdd-workflow.md recovery autonomy: missing abandonment fixture contract",
         ),
         (
+            tdd_workflow,
+            "terminal-abandonment-v2",
+            "tdd-workflow.md recovery overlap: missing v2 fixture contract",
+        ),
+        (
+            review_protocol,
+            "recovery-target-only exact `[outside-set-drift, preexisting-dirty-overlap]`",
+            "review-protocol.md recovery overlap: missing exact review boundary",
+        ),
+        (
+            versioning_text,
+            "first durable write by the new owner raises the floor to 2.2.5",
+            "versioning.md recovery overlap: missing reader-floor rollout contract",
+        ),
+        (
             readme,
             "continues observing automatically within one immutable 15-minute budget",
             "README.md automatic orchestration: missing immutable 15-minute continuation",
@@ -3302,6 +3341,11 @@ def validate_implementation_delegation_contract(
             "README.md automatic orchestration: missing new-writer authority boundary",
         ),
         (
+            readme,
+            "Version 2.3.0 closes the supplied recovery deadlock",
+            "README.md recovery overlap: missing operator outcome",
+        ),
+        (
             readme_ru,
             "автоматически продолжает наблюдение в пределах одного неизменяемого 15-минутного бюджета",
             "README.ru.md automatic orchestration: missing immutable 15-minute continuation",
@@ -3310,6 +3354,11 @@ def validate_implementation_delegation_contract(
             readme_ru,
             "Только новый checkpoint-bound recovery target writer требует явного разрешения пользователя",
             "README.ru.md automatic orchestration: missing new-writer authority boundary",
+        ),
+        (
+            readme_ru,
+            "Версия 2.3.0 закрывает описанное recovery-зависание",
+            "README.ru.md recovery overlap: missing operator outcome",
         ),
     ]
     for text, token, error in automatic_contracts:
@@ -3409,11 +3458,13 @@ def validate_usage_routing_contract(
         "pinned to `gpt-5.3-codex-spark`, low reasoning, and read-only sandbox",
         "explicitly confirmed project or user map",
         "canonical Explorer instructions and read-only sandbox remain fixed",
-        "compact evidence map with `path:line`, symbol/route, snippet/signature, and why it matters",
+        "bounded `openbuild.discovery.v1` JSON result",
+        "owner-captured content fingerprint",
         "Do not call a native Explorer or any other agent API",
         "completed semantic search",
         "listed evidence trigger",
-        "create no replacement agent",
+        "one narrow transport exception",
+        "create no further agent",
         "minimum targeted root search",
     ]:
         if token not in explicit_discovery:
@@ -3430,7 +3481,9 @@ def validate_usage_routing_contract(
         "scripts/agent_runner.py",
         "codex exec -m <model> -c model_reasoning_effort=<effort>",
         "before the root runs `rg`",
-        "transport failure permits only the disclosed targeted root route",
+        "availability fallback fields",
+        "--search-fallback-source <Spark-run-handle>",
+        "Otherwise the transport failure permits only disclosed targeted root recovery",
     ]:
         if token not in search_preflight:
             category = (
@@ -3451,7 +3504,8 @@ def validate_usage_routing_contract(
         "resolve the effective discovery map",
         "dispatch its first exact agent",
         "configured evidence trigger",
-        "create no replacement agent",
+        "one-shot Terra availability fallback",
+        "create no further discovery agent",
         "minimum targeted root search",
     ]:
         if token not in skill_discovery:
@@ -3474,32 +3528,40 @@ def validate_usage_routing_contract(
         "model_map.py",
         "openbuild_search_separate",
         "gpt-5.3-codex-spark",
-        "canonical Explorer instructions and read-only sandbox",
+        "strict `openbuild.discovery.v1`",
         "**Semantic escalation:**",
+        "**Availability fallback:**",
         "configured evidence gap",
         "max_steps",
         "**Root recovery:**",
-        "open a circuit breaker",
-        "without retrying another model for every grep",
+        "opens the circuit breaker",
+        "single fallback claim",
         "Do not scrape or infer remaining quota",
         "Do not silently skip it",
-        "Do not create another search agent for transport recovery",
+        "No third search agent exists",
         "profile-not-discoverable",
         "model-unavailable",
         "quota-exhausted",
         "spawn-failed",
-        "routing receipt",
+        "terminal receipt",
         "agent_runner.py",
         "codex-exec-explicit-model",
         "turn.completed",
-        "configured_model",
-        "observed_model",
-        "fallback_reason",
-        "unactivated `running` routing receipt",
-        "only then consume the evidence",
-        "exit code of zero",
+        "creation-bound exit zero",
+        "strict JSON validation",
+        "Availability receipts",
         "Project/user overrides may change exact model and effort",
-        "search overrides keep the canonical instructions immutable",
+        "search overrides keep canonical instructions immutable",
+        "coherent pre-turn",
+        "complete JSONL/stderr collection",
+        "every explicit error record",
+        "raw top-level `code`",
+        "unrecognized error-bearing event",
+        "present JSONL, stderr, and result read",
+        "verified regular non-reparse descriptor identity",
+        "conflicting `code`/`type` values",
+        "JSONL and stderr evidence",
+        "Source-time Spark/Terra",
     ]:
         if token not in search_order:
             if token in SEARCH_DISPATCH_FAILURES:
@@ -3509,10 +3571,23 @@ def validate_usage_routing_contract(
             else:
                 category = "search usage-pool order"
             errors.append(f"model-routing.md {category}: missing {token}")
-    ordered_search_tokens = ["**Configured exact route:**", "**Semantic escalation:**", "**Root recovery:**"]
+    ordered_search_tokens = [
+        "**Configured exact route:**",
+        "**Semantic escalation:**",
+        "**Availability fallback:**",
+        "**Root recovery:**",
+    ]
     search_positions = [search_order.find(token) for token in ordered_search_tokens]
     if any(position < 0 for position in search_positions) or search_positions != sorted(search_positions):
         errors.append("model-routing.md search order: configured route and semantic escalation must precede root recovery")
+    for token in [
+        "rung metadata is validated after profile precedence resolves",
+        "same-OS-account confirmation plus exact legacy binding/commit/remediation/Git evidence",
+        "diagnostic root review cannot close an exact-review or release gate",
+        "completed semantically insufficient result with a listed trigger",
+    ]:
+        if token not in model_routing:
+            errors.append(f"model-routing.md preserved lifecycle safeguard: missing {token}")
 
     implementation_route = markdown_section(model_routing, "## Implementation worker routing")
     for token in [
@@ -3634,11 +3709,11 @@ def validate_usage_routing_contract(
         "scripts/model_map.py",
         "new grep or lookup",
         "circuit breaker",
-        "do not pay for repeated failed attempts",
+        "one-shot Terra availability fallback",
         "before the root runs any new repository search command",
-        "Advance exactly one configured route step",
+        "Advance exactly one configured semantic route step",
         "listed evidence trigger",
-        "create no replacement agent",
+        "All other transport/exact-selection/result failures",
         "agent_runner.py",
         "codex-exec-explicit-model",
         "turn.completed",
@@ -3654,12 +3729,26 @@ def validate_usage_routing_contract(
     if "call `activate`" in mandatory_search:
         errors.append("code-discovery.md exact agent dispatch: ordinary orchestration must not require manual activation")
 
+    evidence_contract = markdown_section(code_discovery, "## Evidence map")
+    for token in [
+        "literal backslashes fail closed",
+        "`.pytest_cache`",
+        "`artifacts`",
+        "`target`",
+        "legitimate source directories named `build` remain valid",
+        "symlink/reparse escapes",
+        "same-object identity checks",
+        "Checked-out gitlinks contribute a bounded nested tracked plus untracked/nonignored content fingerprint",
+    ]:
+        if token not in evidence_contract:
+            errors.append(f"code-discovery.md evidence contract: missing {token}")
+
     model_claims = markdown_section(code_discovery, "## Model and savings claims")
     for token in [
         "effective project, user, or packaged model map is mandatory",
-        "packaged default is `openbuild_search_separate` on Spark/low",
-        "transport or exact selection fails",
-        "create no other discovery agent",
+        "packaged default is Spark/low first",
+        "canonical Terra/medium",
+        "Legacy complete maps",
         "targeted root recovery",
     ]:
         if token not in model_claims:
@@ -3682,11 +3771,15 @@ def validate_usage_routing_contract(
         "pool:",
         "dispatch_result:",
         "fallback_reason:",
+        "unactivated `run_status: running`",
         "search-agent-activated",
+        "agent-cancellation-confirmed",
         "search-evidence-consumed",
-        "A failed run never emits `search-evidence-consumed`",
+        "Failed or unusable evidence never emits `search-evidence-consumed`",
         "codex_exit_evidence:",
         "result_evidence:",
+        "transport_failure_reason:",
+        "search_fallback_profile_sequence_sha256:",
         "usage dashboard as secondary evidence",
     ]:
         if token not in routing_receipt:
@@ -4252,11 +4345,83 @@ def public_text_files() -> list[Path]:
     return result
 
 
+def validate_search_availability_classifier_contract(runner_text: str) -> list[str]:
+    """Keep the fail-closed complete-stream classifier visible to package validation."""
+    errors: list[str] = []
+    for token in [
+        "def classify_search_availability_failure(",
+        "for value in structured_objects:",
+        "code_field != type_field",
+        "return next(iter(reasons)) if len(reasons) == 1 else None",
+        "RAW_SEARCH_ERROR_TYPES",
+        "NON_ERROR_JSONL_EVENT_TYPES",
+        'elif "code" in event or event_type in RAW_SEARCH_ERROR_TYPES:',
+        "event_type not in NON_ERROR_JSONL_EVENT_TYPES",
+        'evidence.get("structured_stderr_valid", True) is True',
+        'codex_exit_status == "valid"',
+        'termination.get("cleanup_errors") == []',
+        'termination.get("failure_message") == expected_failure',
+        'source_receipt.get("codex_exit_evidence") != "valid"',
+        'source_receipt.get("result_evidence") != "missing"',
+        'source_request.get("search_fallback_binding") is not None',
+        'request.get("search_fallback_source") is None',
+    ]:
+        if token not in runner_text:
+            errors.append(f"agent_runner.py search availability classifier: missing {token}")
+    return errors
+
+
+def validate_safe_artifact_reader_contract(
+    runner_text: str,
+    discovery_text: str,
+) -> list[str]:
+    """Require descriptor-bound, no-follow, same-object reads for routing artifacts."""
+    errors: list[str] = []
+    for token in [
+        "read_regular_file_no_follow,",
+        "raw = read_regular_file_no_follow(path)",
+        "except DiscoveryContractError:",
+    ]:
+        if token not in runner_text:
+            errors.append(f"agent_runner.py safe artifact reader: missing {token}")
+    if runner_text.count("raw = read_regular_file_no_follow(path)") < 3:
+        errors.append(
+            "agent_runner.py safe artifact reader: JSONL, stderr, and result collectors must share the descriptor-bound reader"
+        )
+    for token in [
+        "def read_regular_file_no_follow(",
+        'getattr(os, "O_NOFOLLOW", 0)',
+        "opened_before = os.fstat(descriptor)",
+        "chunk = os.read(descriptor, 1024 * 1024)",
+        "opened_after = os.fstat(descriptor)",
+        "_is_link_or_reparse(opened_before)",
+        "_file_identity(before) != _file_identity(opened_before)",
+        "_file_identity(opened_after) != _file_identity(after)",
+        "raw = read_regular_file_no_follow(",
+    ]:
+        if token not in discovery_text:
+            errors.append(f"discovery_contract.py safe artifact reader: missing {token}")
+    if "result_path.read_bytes()" in discovery_text:
+        errors.append(
+            "discovery_contract.py safe artifact reader: result validation must not reopen the path"
+        )
+    return errors
+
+
 def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> list[str]:
     errors: list[str] = []
     recovery_contract = [
-        ('READER_FLOOR = "2.2.3"', "reader floor"),
-        ('_LEGACY_READER_FLOORS = {"2.2.0", "2.2.1", "2.2.2"}', "legacy reader compatibility"),
+        ('READER_FLOOR = "2.2.5"', "reader floor"),
+        ('_LEGACY_READER_FLOORS = {"2.2.0", "2.2.1", "2.2.2", "2.2.3"}', "legacy reader compatibility"),
+        (
+            "state = self._read_registry_for_write_locked(rebarrier=True)",
+            "pending abandonment reader floor before source replay",
+        ),
+        ("_read_registry_for_write_locked", "reader floor before source write"),
+        (
+            "private source write requires a durable current reader floor",
+            "reader floor before source write",
+        ),
         ('"terminal-root-completion-v1"', "post-commit terminal schema"),
         ('"remediation-scope-v1"', "post-commit remediation scope"),
         ("finalize_post_commit_root_completion", "atomic post-commit finalization"),
@@ -4312,8 +4477,11 @@ def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> lis
         ("record_terminal_abandonment", "terminal abandonment transition"),
         ("complete_terminal_abandonment", "terminal abandonment completion"),
         ('"terminal-abandonment-v1"', "terminal abandonment schema"),
+        ('"terminal-abandonment-v2"', "recovery overlap abandonment schema"),
         ('"outside-set-drift"', "terminal abandonment cause"),
+        ('"outside-set-drift-with-preexisting-dirty-overlap"', "recovery overlap abandonment cause"),
         ('"terminal-abandoned-outside-set-drift"', "terminal abandonment invalidation"),
+        ('"terminal-abandoned-recovery-overlap"', "recovery overlap abandonment invalidation"),
         ("invalidate_source_checkpoint", "semantic checkpoint invalidation"),
         (
             "complete_source_checkpoint_invalidation",
@@ -4398,7 +4566,7 @@ def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> lis
     abandon_end = recovery_text.find("def complete_terminal_abandonment", abandon_owner)
     abandon_dry_revalidation = recovery_text.find("persist=False", abandon_owner, abandon_end)
     abandon_exact_reason = recovery_text.find(
-        'candidate_checkpoint.get("reasons") != ["outside-set-drift"]',
+        'reasons = candidate_checkpoint.get("reasons")',
         abandon_owner,
         abandon_end,
     )
@@ -4588,6 +4756,11 @@ def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> lis
         ("_match_terminal_binding", "terminal binding compatibility match"),
         ("registry.record_terminal_abandonment", "runner terminal abandonment binding"),
         ("registry.complete_terminal_abandonment", "runner terminal abandonment completion"),
+        ('"terminal-abandonment-v2"', "runner recovery overlap public result"),
+        (
+            '"outside-set-drift-with-preexisting-dirty-overlap"',
+            "runner recovery overlap public cause",
+        ),
         ("registry.materialize_handoff", "runner handoff materialization"),
         ("registry.release_contained_terminal", "runner contained release"),
         ("success_verification_digest", "root-verified success gate"),
@@ -4838,6 +5011,7 @@ def main() -> int:
         fail(errors, "agents/openai.yaml: default prompt must be invocation-neutral and select auto mode")
 
     runner_text = read_text(AGENT_RUNNER, errors)
+    errors.extend(validate_search_availability_classifier_contract(runner_text))
     for token in [
         "ROUTING_RUNG_BY_AGENT",
         "KNOWN_MODEL_EFFORT_RUNG",
@@ -4881,6 +5055,17 @@ def main() -> int:
         "prompt.md",
         "Python 3.11",
         "startup cleanup is unconfirmed",
+        "prepare_search_fallback_claim",
+        "--search-fallback-source",
+        "--expected-map-sha256",
+        "search-fallback-claim.json",
+        "_windows_move_claim_write_through",
+        "after private claim metadata barrier",
+        "profile_sequence_sha256",
+        "validate_discovery_result",
+        "openbuild-search-route-binding-v1",
+        "discovery_route_binding",
+        "turn_started",
     ]:
         if token not in runner_text:
             fail(errors, f"agent_runner.py: missing explicit-model contract {token}")
@@ -4933,6 +5118,9 @@ def main() -> int:
         "critical-only profile",
         "cannot start on Sol",
         "contiguous reasoning-first segment",
+        "availability_fallback_agent",
+        "availability_fallback_triggers",
+        "availability-fallback",
     ]:
         if token not in resolver_text:
             fail(errors, f"model_map.py: missing model-map contract {token}")
@@ -4951,6 +5139,37 @@ def main() -> int:
         if map_validation.returncode != 0:
             detail = (map_validation.stderr or map_validation.stdout).strip()
             fail(errors, f"openbuild_model_map.toml: validation failed ({detail})")
+
+    discovery_contract_text = read_text(DISCOVERY_CONTRACT, errors)
+    errors.extend(
+        validate_safe_artifact_reader_contract(
+            runner_text,
+            discovery_contract_text,
+        )
+    )
+    for token in [
+        "openbuild.discovery.v1",
+        "git-tracked-untracked-nonignored-v1",
+        "MAX_RESULT_BYTES",
+        "MAX_FILES",
+        "MAX_BYTES",
+        "MAX_SECONDS",
+        "compute_worktree_fingerprint",
+        "validate_discovery_result",
+        "gitlink",
+        "symlink",
+        "line_start",
+        "line_end",
+        "owners",
+        "tests",
+        "fingerprint-unavailable",
+        "line_counts",
+        "O_NOFOLLOW",
+        "FILE_ATTRIBUTE_REPARSE_POINT",
+        "_file_identity",
+    ]:
+        if token not in discovery_contract_text:
+            fail(errors, f"discovery_contract.py: missing strict discovery contract {token}")
 
     interview_text = read_text(MODEL_MAP_INTERVIEW, errors)
     for token in [
@@ -5009,6 +5228,7 @@ def main() -> int:
     code_discovery_text = read_text(SKILL / "references" / "code-discovery.md", errors)
     model_routing_text = read_text(SKILL / "references" / "model-routing.md", errors)
     tdd_workflow_text = read_text(SKILL / "references" / "tdd-workflow.md", errors)
+    versioning_text = read_text(SKILL / "references" / "versioning.md", errors)
     errors.extend(validate_auto_routing_contract(skill_text, blindspot_text, metadata_text, readme, readme_ru))
     errors.extend(validate_blindspot_contract(skill_text, blindspot_text, template_text, readme, readme_ru))
     errors.extend(
@@ -5017,6 +5237,8 @@ def main() -> int:
             implementation_delegation_text,
             model_routing_text,
             tdd_workflow_text,
+            review_protocol_text,
+            versioning_text,
             readme,
             readme_ru,
             runner_text,
@@ -5067,7 +5289,6 @@ def main() -> int:
         if token not in contributing:
             fail(errors, f"CONTRIBUTING.md: missing versioning contract {token}")
 
-    versioning_text = read_text(SKILL / "references" / "versioning.md", errors)
     for token in [
         "Version impact",
         "every Build-created commit",

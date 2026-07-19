@@ -26,8 +26,8 @@ from typing import Any, Iterator, Mapping, Sequence
 
 REGISTRY_SCHEMA = 1
 IDENTITY_VERSION = 2
-READER_FLOOR = "2.2.3"
-_LEGACY_READER_FLOORS = {"2.2.0", "2.2.1", "2.2.2"}
+READER_FLOOR = "2.2.5"
+_LEGACY_READER_FLOORS = {"2.2.0", "2.2.1", "2.2.2", "2.2.3"}
 DEFAULT_MAX_RECORDS = 100_000
 DEFAULT_MAX_BYTES = 2 * 1024 * 1024 * 1024
 
@@ -430,6 +430,7 @@ def _validate_public_checkpoint(value: Any) -> None:
         "preexisting-dirty-overlap",
         "semantic-needs-escalation",
         "terminal-abandoned-outside-set-drift",
+        "terminal-abandoned-recovery-overlap",
         "post-commit-root-completed",
     }
     if any(reason not in allowed_reasons for reason in reasons):
@@ -835,9 +836,15 @@ def _validate_semantic_disposition(value: Any) -> None:
             },
             {"checkpoint_digest"},
         )
+        expected = {
+            ("terminal-abandonment-v1", "outside-set-drift"),
+            (
+                "terminal-abandonment-v2",
+                "outside-set-drift-with-preexisting-dirty-overlap",
+            ),
+        }
         if (
-            semantic["schema"] != "terminal-abandonment-v1"
-            or semantic["cause"] != "outside-set-drift"
+            (semantic["schema"], semantic["cause"]) not in expected
             or semantic["checkpoint_allowed"] is not False
             or semantic["checkpoint_invalidation"] not in {"pending", "completed"}
         ):
@@ -2077,6 +2084,11 @@ class RecoveryRegistry:
         if semantic.get("disposition") == "abandoned":
             if semantic.get("lease_id") != lease.get("lease_id"):
                 raise RecoveryStateError("terminal abandonment lease binding drifted")
+            if (
+                semantic.get("schema") == "terminal-abandonment-v2"
+                and lease.get("lease_kind") != "recovery-target"
+            ):
+                raise RecoveryStateError("terminal abandonment v2 requires a recovery target lease")
             recorded = [
                 event
                 for event in state.get("history", [])
@@ -2146,7 +2158,12 @@ class RecoveryRegistry:
                     or checkpoint.get("disposition") != "recovery-ineligible"
                     or checkpoint.get("checkpoint_digest") != semantic.get("checkpoint_digest")
                     or not isinstance(invalidation, Mapping)
-                    or invalidation.get("reason") != "terminal-abandoned-outside-set-drift"
+                    or invalidation.get("reason")
+                    != (
+                        "terminal-abandoned-recovery-overlap"
+                        if semantic.get("schema") == "terminal-abandonment-v2"
+                        else "terminal-abandoned-outside-set-drift"
+                    )
                     or invalidation.get("evidence_digest") != semantic.get("evidence_digest")
                 ):
                     raise RecoveryStateError("terminal abandonment source invalidation is not authoritative")
@@ -2482,6 +2499,22 @@ class RecoveryRegistry:
         if rebarrier:
             _rebarrier(self.path, state["digest"], fault=self.fault)
             state = self._validate_registry(json.loads(self.path.read_text(encoding="utf-8")))
+        return state
+
+    def _read_registry_for_write_locked(
+        self,
+        *,
+        rebarrier: bool = True,
+        allow_quarantine: bool = False,
+    ) -> dict[str, Any]:
+        """Make the current reader floor durable before any owner-state write."""
+        existed = self.path.exists()
+        state = self._read_registry_locked(
+            rebarrier=rebarrier and existed,
+            allow_quarantine=allow_quarantine,
+        )
+        if not existed or state.get("reader_floor") != READER_FLOOR:
+            state = self._commit_registry_locked(state, resolve_visible_commit=True)
         return state
 
     def _commit_registry_locked(
@@ -2853,6 +2886,7 @@ class RecoveryRegistry:
             if invalidation["reason"] not in {
                 "semantic-needs-escalation",
                 "terminal-abandoned-outside-set-drift",
+                "terminal-abandoned-recovery-overlap",
                 "post-commit-root-completed",
             }:
                 raise RecoveryStateError("private checkpoint invalidation reason is unsupported")
@@ -2975,6 +3009,11 @@ class RecoveryRegistry:
         return state
 
     def _commit_source_locked(self, state: dict[str, Any]) -> dict[str, Any]:
+        registry = self._read_registry_locked(rebarrier=False)
+        if not self.path.exists() or registry.get("reader_floor") != READER_FLOOR:
+            raise RecoveryStateError(
+                "private source write requires a durable current reader floor"
+            )
         state = dict(state)
         state["previous_generation_digest"] = state.get("digest")
         state["generation"] = int(state.get("generation", 0)) + 1
@@ -3570,7 +3609,7 @@ class RecoveryRegistry:
     ) -> dict[str, Any]:
         key = secrets.token_bytes(32)
         with self._lock():
-            self._read_registry_locked(rebarrier=self.path.exists())
+            self._read_registry_for_write_locked(rebarrier=self.path.exists())
             pre = self._capture_snapshot(key=key, allowed_paths=allowed_paths)
             source_binding = {
                 "source_id": source_id,
@@ -3625,7 +3664,7 @@ class RecoveryRegistry:
         if not isinstance(source_state_id, str):
             raise RecoveryStateError("source preflight state ID is missing")
         with self._lock():
-            registry = self._read_registry_locked(rebarrier=True)
+            registry = self._read_registry_for_write_locked(rebarrier=True)
             source = self._read_source_locked(source_state_id)
             stored_preflight = source.get("public_preflight")
             if not isinstance(stored_preflight, dict) or preflight.get("preflight_digest") != stored_preflight.get("preflight_digest"):
@@ -3763,7 +3802,7 @@ class RecoveryRegistry:
         if not isinstance(source_state_id, str):
             raise RecoveryStateError("checkpoint source state ID is missing")
         with self._lock():
-            registry = self._read_registry_locked(rebarrier=True)
+            registry = self._read_registry_for_write_locked(rebarrier=True)
             if any(
                 event.get("event") == "semantic-handoff-rejected"
                 and event.get("source_state_id") == source_state_id
@@ -3794,7 +3833,7 @@ class RecoveryRegistry:
         if not isinstance(source_state_id, str):
             raise RecoveryStateError("checkpoint source state ID is missing")
         with self._lock():
-            registry = self._read_registry_locked(rebarrier=True)
+            registry = self._read_registry_for_write_locked(rebarrier=True)
             source = self._read_source_locked(source_state_id)
             stored = source["public_checkpoint"]
             if checkpoint.get("checkpoint_digest") != stored.get("checkpoint_digest"):
@@ -3871,7 +3910,7 @@ class RecoveryRegistry:
         _require_hex(source_state_id, "authorization retirement source state ID")
         _require_hex(grant_id, "authorization retirement grant ID")
         with self._lock():
-            registry = self._read_registry_locked(rebarrier=True)
+            registry = self._read_registry_for_write_locked(rebarrier=True)
             if not self._is_vacant(registry):
                 raise RecoveryStateError(
                     "authorization retirement requires an exactly vacant registry"
@@ -3953,7 +3992,7 @@ class RecoveryRegistry:
             _require_hex(target_plan["prompt_snapshot_id"], "prompt_snapshot_id")
         _require_hex(target_plan["launch_token"], "launch_token")
         with self._lock():
-            registry = self._read_registry_locked(rebarrier=True)
+            registry = self._read_registry_for_write_locked(rebarrier=True)
             if not self._is_vacant(registry):
                 raise RecoveryStateError("workspace is not vacant")
             if any(item.get("grant_id") == grant_id for item in registry["consumed_grants"]):
@@ -4616,7 +4655,7 @@ class RecoveryRegistry:
         if hashlib.sha256(_canonical(snapshot)).hexdigest() != action_snapshot_sha256:
             raise RecoveryStateError("post-commit action snapshot digest drifted")
         with self._lock():
-            registry = self._read_registry_locked(rebarrier=True)
+            registry = self._read_registry_for_write_locked(rebarrier=True)
             _lease, source, _manifest, tuple_basis = self._post_commit_action_context_locked(
                 registry,
                 run_id=run_id,
@@ -4679,8 +4718,8 @@ class RecoveryRegistry:
                     )
             source["post_commit_root_completion"] = {"action": action, "authorization": None}
             self._commit_source_locked(source)
-            # The source addition is the first 2.2.3 durable shape; raise the
-            # registry reader floor in the same owner lock before returning it.
+            # The write preflight made the current reader floor durable before
+            # the source shape became visible; retain the existing registry event.
             self._commit_registry_locked(registry)
             return {
                 "action_handle": action["action_id"],
@@ -4696,7 +4735,7 @@ class RecoveryRegistry:
         _require_hex(action_handle, "post-commit action handle")
         _require_hex(action_digest, "post-commit action digest")
         with self._lock():
-            registry = self._read_registry_locked(rebarrier=True)
+            registry = self._read_registry_for_write_locked(rebarrier=True)
             lease = registry.get("lease")
             if not isinstance(lease, Mapping) or not isinstance(lease.get("source_state_id"), str):
                 raise RecoveryStateError("post-commit authorization requires an active source")
@@ -5207,7 +5246,17 @@ class RecoveryRegistry:
             source, candidate_checkpoint = self._revalidate_source_locked(
                 source, checkpoint, persist=False
             )
-            if candidate_checkpoint.get("reasons") != ["outside-set-drift"]:
+            reasons = candidate_checkpoint.get("reasons")
+            if reasons == ["outside-set-drift"]:
+                schema = "terminal-abandonment-v1"
+                cause = "outside-set-drift"
+            elif (
+                lease.get("lease_kind") == "recovery-target"
+                and reasons == ["outside-set-drift", "preexisting-dirty-overlap"]
+            ):
+                schema = "terminal-abandonment-v2"
+                cause = "outside-set-drift-with-preexisting-dirty-overlap"
+            else:
                 raise RecoveryStateError("terminal abandonment requires exact outside-set-drift")
             candidate_snapshot = candidate_checkpoint.get("candidate_snapshot")
             if not isinstance(candidate_snapshot, Mapping):
@@ -5218,8 +5267,8 @@ class RecoveryRegistry:
             zero_digest = _terminal_part_digest("zero", lease["zero_proof"])
             candidate_digest = _domain_digest(_DOMAIN_CHECKPOINT, candidate_snapshot)
             evidence_basis = {
-                "schema": "terminal-abandonment-v1",
-                "cause": "outside-set-drift",
+                "schema": schema,
+                "cause": cause,
                 "run_id": run_id,
                 "lease_id": lease_id,
                 "source_state_id": source_state_id,
@@ -5247,7 +5296,7 @@ class RecoveryRegistry:
     def complete_terminal_abandonment(self, lease_id: str) -> dict[str, Any]:
         """Complete the source invalidation bound by a recorded abandonment."""
         with self._lock():
-            state = self._read_registry_locked(rebarrier=True)
+            state = self._read_registry_for_write_locked(rebarrier=True)
             lease = state.get("lease")
             semantic = lease.get("semantic_disposition") if isinstance(lease, dict) else None
             if (
@@ -5302,11 +5351,16 @@ class RecoveryRegistry:
                         "terminal abandonment recovery authorization binding drifted"
                     )
             invalidation = source.get("checkpoint_invalidation")
+            invalidation_reason = (
+                "terminal-abandoned-recovery-overlap"
+                if semantic.get("schema") == "terminal-abandonment-v2"
+                else "terminal-abandoned-outside-set-drift"
+            )
             if (
-                checkpoint.get("reasons") == ["terminal-abandoned-outside-set-drift"]
+                checkpoint.get("reasons") == [invalidation_reason]
                 and invalidation
                 == {
-                    "reason": "terminal-abandoned-outside-set-drift",
+                    "reason": invalidation_reason,
                     "evidence_digest": evidence_digest,
                 }
             ):
@@ -5331,7 +5385,12 @@ class RecoveryRegistry:
                 )
                 candidate_snapshot = candidate_checkpoint.get("candidate_snapshot")
                 if (
-                    candidate_checkpoint.get("reasons") != ["outside-set-drift"]
+                    candidate_checkpoint.get("reasons")
+                    != (
+                        ["outside-set-drift", "preexisting-dirty-overlap"]
+                        if semantic.get("schema") == "terminal-abandonment-v2"
+                        else ["outside-set-drift"]
+                    )
                     or not isinstance(candidate_snapshot, Mapping)
                     or _domain_digest(_DOMAIN_CHECKPOINT, candidate_snapshot)
                     != semantic.get("candidate_snapshot_digest")
@@ -5339,11 +5398,11 @@ class RecoveryRegistry:
                     raise RecoveryStateError("terminal abandonment source checkpoint drifted")
                 invalidated = dict(candidate_checkpoint)
                 invalidated["disposition"] = "recovery-ineligible"
-                invalidated["reasons"] = ["terminal-abandoned-outside-set-drift"]
+                invalidated["reasons"] = [invalidation_reason]
                 invalidated["checkpoint_digest"] = self._checkpoint_digest(invalidated)
                 source["public_checkpoint"] = invalidated
                 source["checkpoint_invalidation"] = {
-                    "reason": "terminal-abandoned-outside-set-drift",
+                    "reason": invalidation_reason,
                     "evidence_digest": evidence_digest,
                 }
                 if retirement_event is not None:
@@ -5436,11 +5495,13 @@ class RecoveryRegistry:
         if reason not in {
             "semantic-needs-escalation",
             "terminal-abandoned-outside-set-drift",
+            "terminal-abandoned-recovery-overlap",
             "post-commit-root-completed",
         }:
             raise RecoveryStateError("checkpoint invalidation reason is unsupported")
         _require_hex(evidence_digest, "checkpoint invalidation evidence digest")
         with self._lock():
+            self._read_registry_for_write_locked(rebarrier=True)
             source = self._read_source_locked(source_state_id)
             checkpoint = source.get("public_checkpoint")
             if not isinstance(checkpoint, dict):

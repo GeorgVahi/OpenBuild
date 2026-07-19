@@ -4,6 +4,33 @@ OpenBuild follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-07-19
+
+### Added
+
+- Added strict `openbuild.discovery.v1` results for every packaged search profile: bounded JSON, safe repository-relative paths, tight line ranges, required owner/test evidence, and a full Git tracked plus untracked/non-ignored content fingerprint verified before and after the read-only scout.
+- Added a discovery-only, one-shot Spark availability route. Exact structured `model-unavailable` or model-specific `quota-exhausted` evidence from a stopped `gpt-5.3-codex-spark` process may dispatch canonical Terra through `openbuild_search_balanced`; all other failures retain targeted root recovery.
+- Added replay-safe source claims bound to the failed receipt, map hash, resolved Spark/Terra profile descriptors, canonical instruction digest, immutable prompt ID/SHA, fingerprint, reason, and target run. Public receipts expose only normalized reasons and privacy-safe digests.
+
+### Changed
+
+- Packaged and explicit model maps may use paired discovery-only `availability_fallback_agent` and `availability_fallback_triggers` fields with `transport_failure = "availability-fallback"`. Complete legacy project/user maps without them remain valid and keep `block` plus targeted-root behavior without inheritance.
+- Strengthened the existing Spark scout by adapting the fresh read-only, structured evidence, fingerprint, and root-verification ideas from [di-sukharev/code-scout-skill](https://github.com/di-sukharev/code-scout-skill) to OpenBuild's exact runner and model map; no upstream code or runtime dependency is vendored.
+- Made the canonical search instructions mirror the strict validator grammar explicitly: owner/coupling/test/flow evidence is flat, constraints and uncertainties are bounded strings, and every line range is arithmetically limited without combining distant symbols.
+- Updated English/Russian documentation, configuration guidance, contributor checks, package validation, and release pins for 2.3.0.
+- Preserved the packaged defaults, `codex-exec-explicit-model`, project → user → packaged precedence, and the ban on unknown-model agent routes; both README files pin the same release.
+
+### Fixed
+
+- Rejected malformed, unknown, conflicting, post-turn, completed, cancelled, timed-out, runner/cleanup-failed, or result-bearing Spark failure streams before availability classification; complete JSONL/stderr collection and valid creation-bound `codex-exit.json` evidence must succeed, the clean runner exit must exactly rederive from the event stream, every explicit error record—including raw top-level `code` and exact raw availability `type` records—must normalize to the same eligible reason, and unknown non-protocol `type` records, unrecognized error-bearing events, unreadable/malformed/nonregular JSONL or structured stderr, conflicting `code`/`type` values, JSONL/stderr disagreement, or any existing non-regular/unreadable/empty/malformed result artifact fail closed. Only initial no-follow absence counts as missing; every present JSONL, stderr, and result read stays bound to one verified regular non-reparse descriptor identity through EOF and rejects check/open/read replacement. Discovery maps with availability fallback must start with the exact Spark profile, the persisted source route binds both Spark and Terra descriptor identities before the source process starts, and a Spark source carrying any preinjected fallback binding is rejected before claim or receipt publication.
+- Applied ancestor reparse rejection and before/after object-identity checks to symlink and gitlink fingerprint branches, closing the remaining no-follow path-swap boundary.
+- Made one-shot Spark fallback claims crash-durable before target request or process creation: POSIX now fsyncs the parent directory, while Windows publishes the exclusive claim through a write-through, no-replace move.
+- Validated fingerprint constants, lowercase digest, and non-boolean nonnegative counters before equality; checked-out gitlinks now contribute bounded nested tracked plus untracked/nonignored content and count it against the global limits.
+- Made the 2.2.5 registry reader-floor promotion durable before every new private-source generation, including the first recovery-capable source preflight and completion of an abandonment already pending on a legacy floor.
+- Recovery targets whose only terminal revalidation reasons are the exact sorted pair `[outside-set-drift, preexisting-dirty-overlap]` now close through owner-derived `terminal-abandonment-v2` instead of retaining an unreleasable lease. The transition uses a distinct checkpoint invalidation, retires the consumed recovery authorization, and reuses the existing identity, zero-proof, guardian, archive, and release gates.
+- V2 accepts no handoff, retry, escalation, grant, writer, or diff and creates no root-completion authority. Normal leases, additional/unknown/control-plane reasons, live or ambiguous process state, quarantine, and binding drift remain fail-closed without mutation or force-unlock; root completion remains a separate post-vacancy audit.
+- The first durable write by the new recovery owner raises the reader floor to 2.2.5. Exact 2.2.0–2.2.3 floors remain readable without rewrite, while an older reader cannot open a non-vacant floor-2.2.5 registry before explicit vacant retirement.
+
 ## [2.2.4] - 2026-07-18
 
 ### Fixed

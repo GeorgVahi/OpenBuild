@@ -83,6 +83,11 @@ Ask:
    - **All three canonical gaps (Recommended)** — `insufficient-evidence`, `ambiguous-ownership`, and `cross-file-gap`.
    - **Only insufficient evidence** — narrower escalation.
    - **Custom subset** — choose only from the canonical gaps.
+4. Should an unavailable or exhausted packaged Spark route use Terra?
+   - **Exact Spark availability fallback (Recommended)** — write `transport_failure = "availability-fallback"`, `availability_fallback_agent = "openbuild_search_balanced"`, and triggers `model-unavailable`/`quota-exhausted`; runtime still requires exact structured model-bound evidence and a one-shot source claim.
+   - **Targeted root only** — keep `transport_failure = "block"` and omit both availability fields.
+
+The availability fields are a paired discovery-only option. Never add them to critic, implementation, or review routes; never infer them into a complete project/user map from packaged defaults. The fallback additionally requires the resolved source to remain exact Spark/low/read-only and the target exact Terra/medium/read-only.
 
 Every `openbuild_search_separate`, `openbuild_search_balanced`, `openbuild_search_strong`, and `openbuild_search_strongest` override must copy the canonical Explorer developer instructions exactly. Only model and reasoning effort may change; the sandbox remains read-only.
 
@@ -140,7 +145,7 @@ Ask:
    - **I confirm these critical routes** — writes `critical_confirmed = true` for every critical route.
    - **Do not configure critical routes yet** — stop without writing any partial map.
 
-Also confirm the non-negotiable global values: `writer_policy = "single"`, `failure_policy = "block"`, `transport_failure = "block"`, and no production action is authorized by this interview.
+Also confirm the non-negotiable global values: `writer_policy = "single"`, `failure_policy = "block"`, critic/implementation/review `transport_failure = "block"`, and no production action is authorized by this interview. Discovery is either legacy `block` or the exact paired availability fallback above.
 
 ## Block 7 — Final preview and permission
 
@@ -150,6 +155,7 @@ Build a final preview containing:
 - a plain-language table for every discovery/critic/implementation/review risk route;
 - each ordered profile, exact model, reasoning effort, sandbox, and profile source;
 - `max_steps`, escalation mode, and escalation triggers;
+- discovery `transport_failure`, availability target/triggers, and legacy-map behavior;
 - all critical confirmations and fixed failure rules;
 - exact target paths and the exact diff for the complete map and profile overrides;
 - redundant overrides omitted from the proposal;

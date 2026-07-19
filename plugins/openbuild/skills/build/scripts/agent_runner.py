@@ -42,6 +42,12 @@ from recovery_state import (
     durable_write_private_bytes,
     durable_write_private_json,
 )
+from discovery_contract import (
+    DiscoveryContractError,
+    compute_worktree_fingerprint,
+    read_regular_file_no_follow,
+    validate_discovery_result,
+)
 
 
 SUPPORTED_AGENTS = {
@@ -71,6 +77,20 @@ PROVIDER_ENVIRONMENT_OVERRIDES = {
     "OPENAI_BASE_URL",
 }
 TERMINAL_EVENTS = {"turn.completed", "turn.failed"}
+RAW_SEARCH_ERROR_TYPES = {
+    "model_not_found",
+    "model_not_available",
+    "model_access_denied",
+    "usage_limit_exceeded",
+}
+NON_ERROR_JSONL_EVENT_TYPES = {
+    "thread.started",
+    "turn.started",
+    "item.started",
+    "item.updated",
+    "item.completed",
+    "message",
+}
 SCHEMA_VERSION = 1
 OBSERVATION_BUDGET_SECONDS = 900
 RUN_HANDLE = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{10}$")
@@ -80,10 +100,14 @@ SEARCH_DEVELOPER_INSTRUCTIONS = (
     "When code discovery, broad rg, route or symbol lookup, owner mapping, or cross-file evidence gathering is needed:\n"
     "- perform repository search, rg, rg --files, Get-Content, and local file reading yourself;\n"
     "- do not edit files, write configuration, make product or architecture decisions, commit, push, or answer the user;\n"
-    "- return only a compact evidence map with path:line, symbol or route, a short snippet/signature, and why it matters;\n"
-    "- include relevant negative results, confidence, and the search stop condition;\n"
-    "- keep raw logs and large file dumps out of the result.\n\n"
-    "The main process will do targeted reads only after your result, for verification before edits."
+    "- return exactly one UTF-8 JSON object and no Markdown fences or surrounding prose;\n"
+    "- use schema openbuild.discovery.v1 with exactly these fields: schema, worktree_fingerprint, summary, owners, couplings, tests, flows, constraints, uncertainties;\n"
+    "- copy the runtime-provided worktree_fingerprint object exactly; it is owner-verified before and after the run;\n"
+    "- make owners, couplings, tests, and flows flat arrays whose items directly use exactly path, line_start, line_end, symbol, reason and optional kind/related_path; make owners and tests non-empty;\n"
+    "- make constraints and uncertainties arrays of bounded strings, never evidence objects or nested structures;\n"
+    "- keep every path repository-relative and every line range tight: line_end - line_start + 1 must be at most 200, and one item must never combine distant symbols; include relevant constraints, uncertainties, negative results, and the search stop condition in the bounded fields;\n"
+    "- never cite generated build-output, vendor, dependency, cache, coverage, or artifact paths; source directories named build remain valid evidence; keep raw logs and large file dumps out of the result.\n\n"
+    "The main process validates the strict JSON, paths, ranges, owner/test evidence, and fingerprint before consuming it."
 )
 ACTIVE_WORKER_CHILD: Any | None = None
 ACTIVE_WINDOWS_JOB: Any | None = None
@@ -179,6 +203,452 @@ def _canonical_json_bytes(value: Mapping[str, Any]) -> bytes:
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
+
+
+def discovery_profile_with_fingerprint(
+    profile: AgentProfile,
+    fingerprint: Mapping[str, Any],
+) -> AgentProfile:
+    """Bind one owner-captured fingerprint into otherwise canonical search instructions."""
+    if not profile.name.startswith("openbuild_search_"):
+        return profile
+    runtime = json.dumps(
+        dict(fingerprint),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return profile._replace(
+        developer_instructions=(
+            f"{profile.developer_instructions.rstrip()}\n\n"
+            "Runtime owner snapshot: copy this exact JSON object into "
+            f"worktree_fingerprint: {runtime}"
+        )
+    )
+
+
+def profile_descriptor(profile: AgentProfile) -> dict[str, Any]:
+    descriptor = {
+        "name": profile.name,
+        "source_sha256": sha256_file(profile.source) if profile.source.is_file() else None,
+        "model": profile.model,
+        "reasoning_effort": profile.reasoning_effort,
+        "service_tier": None,
+        "sandbox": profile.sandbox,
+        "read_only": profile.sandbox == "read-only",
+        "instructions_sha256": sha256_bytes(profile.developer_instructions.encode("utf-8")),
+    }
+    return {
+        "descriptor": descriptor,
+        "sha256": sha256_bytes(_canonical_json_bytes(descriptor)),
+    }
+
+
+def _discovery_route_binding(
+    route: Mapping[str, Any],
+    *,
+    repo: Path,
+    codex_home: Path,
+    fingerprint: Mapping[str, Any],
+) -> dict[str, Any]:
+    agents = route.get("agents")
+    if not isinstance(agents, list) or not agents:
+        raise RunnerError("effective discovery route lacks an exact source agent")
+    names = [agent.get("name") for agent in agents if isinstance(agent, dict)]
+    if len(names) != len(agents) or any(not isinstance(name, str) for name in names):
+        raise RunnerError("effective discovery route has malformed agent bindings")
+    source_profile = discovery_profile_with_fingerprint(
+        load_agent_profile(names[0], repo=repo, codex_home=codex_home),
+        fingerprint,
+    )
+    fallback_name = route.get("availability_fallback_agent")
+    source_descriptor = profile_descriptor(source_profile)
+    fallback_descriptor: dict[str, Any] | None = None
+    if fallback_name is not None:
+        if not isinstance(fallback_name, str):
+            raise RunnerError("effective discovery route has a malformed fallback profile")
+        fallback_profile = discovery_profile_with_fingerprint(
+            load_agent_profile(fallback_name, repo=repo, codex_home=codex_home),
+            fingerprint,
+        )
+        fallback_descriptor = profile_descriptor(fallback_profile)
+    profile_sequence = [source_descriptor["sha256"]]
+    if fallback_descriptor is not None:
+        profile_sequence.append(fallback_descriptor["sha256"])
+    profile_sequence_sha256 = sha256_bytes(
+        _canonical_json_bytes({"profiles": profile_sequence})
+    )
+    binding = {
+        "schema": "openbuild-search-route-binding-v1",
+        "map_sha256": route.get("map_sha256"),
+        "map_scope": route.get("map_scope"),
+        "transport_failure": route.get("transport_failure"),
+        "fallback": route.get("fallback"),
+        "availability_fallback_agent": route.get("availability_fallback_agent"),
+        "availability_fallback_triggers": route.get("availability_fallback_triggers"),
+        "agents": names,
+        "source_profile_sha256": source_descriptor["sha256"],
+        "availability_fallback_profile_sha256": (
+            fallback_descriptor["sha256"] if fallback_descriptor is not None else None
+        ),
+        "profile_sequence_sha256": profile_sequence_sha256,
+    }
+    if not isinstance(binding["map_sha256"], str):
+        raise RunnerError("effective discovery route lacks a map SHA-256")
+    return binding
+
+
+def resolve_discovery_route_binding(
+    *,
+    repo: Path,
+    codex_home: Path,
+    fingerprint: Mapping[str, Any],
+) -> dict[str, Any]:
+    try:
+        import model_map
+
+        route = model_map.resolve_model_route(
+            repo=repo,
+            codex_home=codex_home,
+            use_case="discovery",
+            risk="default",
+        )
+    except Exception as exc:
+        raise RunnerError(f"cannot resolve discovery route binding: {exc}") from exc
+    return _discovery_route_binding(
+        route,
+        repo=repo,
+        codex_home=codex_home,
+        fingerprint=fingerprint,
+    )
+
+
+def search_availability_event_stream_is_eligible(
+    evidence: Mapping[str, Any],
+    *,
+    exit_record: Mapping[str, Any] | None = None,
+    result_status: str = "missing",
+    codex_exit_status: str = "missing",
+    codex_exit_code: int | None = None,
+) -> bool:
+    """Accept only a coherent pre-turn failure stream as availability evidence."""
+    termination = exit_record or {}
+    failure_message = termination.get("failure_message")
+    timed_out = isinstance(failure_message, str) and any(
+        token in failure_message.casefold() for token in ("timed out", "timeout")
+    )
+    exact_exit_code = type(codex_exit_code) is int
+    expected_failure = (
+        execution_failure_message(codex_exit_code, evidence) if exact_exit_code else None
+    )
+    return (
+        exit_record is not None
+        and evidence.get("event_error") is None
+        and evidence.get("turn_started") is not True
+        and evidence.get("completed") is not True
+        and evidence.get("terminal_event") != "turn.completed"
+        and evidence.get("structured_stderr_valid", True) is True
+        and codex_exit_status == "valid"
+        and exact_exit_code
+        and type(termination.get("exit_code")) is int
+        and termination.get("exit_code") == codex_exit_code
+        and termination.get("success") is False
+        and termination.get("terminal_event") == evidence.get("terminal_event")
+        and termination.get("failure_message") == expected_failure
+        and termination.get("cleanup_errors") == []
+        and termination.get("cancelled") is not True
+        and not timed_out
+        and result_status == "missing"
+    )
+
+
+def _classify_structured_search_error(
+    value: Mapping[str, Any],
+    *,
+    exact_model: str,
+) -> str | None:
+    code_field = value.get("code")
+    type_field = value.get("type")
+    if code_field is not None and not isinstance(code_field, str):
+        return None
+    if type_field is not None and not isinstance(type_field, str):
+        return None
+    if code_field is not None and type_field is not None and code_field != type_field:
+        return None
+    code = code_field or type_field
+    model = value.get("model")
+    rate_limits = value.get("rate_limits")
+    limit_name = rate_limits.get("limit_name") if isinstance(rate_limits, dict) else None
+    if model == exact_model and code in {
+        "model_not_found",
+        "model_not_available",
+        "model_access_denied",
+    }:
+        return "model-unavailable"
+    if (
+        code == "usage_limit_exceeded"
+        and limit_name == exact_model
+        and (model is None or model == exact_model)
+    ):
+        return "quota-exhausted"
+    return None
+
+
+def classify_search_availability_failure(
+    structured_objects: list[Mapping[str, Any]],
+    *,
+    exact_model: str,
+) -> str | None:
+    """Normalize only the closed, model-bound structured vocabulary from R-006."""
+    reasons: set[str] = set()
+    for value in structured_objects:
+        if not isinstance(value, dict):
+            return None
+        nested = value.get("error")
+        if "error" in value:
+            if (
+                not isinstance(nested, dict)
+                or value.get("code") is not None
+                or value.get("type") not in {"error", "turn.failed"}
+            ):
+                return None
+            candidate = nested
+        else:
+            candidate = value
+        reason = _classify_structured_search_error(candidate, exact_model=exact_model)
+        if reason is None:
+            return None
+        reasons.add(reason)
+    return next(iter(reasons)) if len(reasons) == 1 else None
+
+
+def _read_structured_stderr(path: Path) -> tuple[list[Mapping[str, Any]], bool]:
+    try:
+        raw = read_regular_file_no_follow(path)
+    except DiscoveryContractError:
+        return [], False
+    if raw is None:
+        return [], True
+    try:
+        lines = raw.decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        return [], False
+    result: list[Mapping[str, Any]] = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            return [], False
+        if not isinstance(value, dict):
+            return [], False
+        result.append(value)
+    return result, True
+
+
+def _windows_move_claim_write_through(source: Path, target: Path) -> None:
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.MoveFileExW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32]
+    kernel32.MoveFileExW.restype = ctypes.c_int
+    if kernel32.MoveFileExW(str(source), str(target), 0x8):
+        return
+    error = ctypes.get_last_error()
+    if error in {80, 183}:
+        raise FileExistsError(f"private claim already exists: {target.name}")
+    raise RunnerError(f"write-through private claim create failed: {ctypes.WinError(error)}")
+
+
+def durable_create_private_json(
+    path: Path,
+    value: Mapping[str, Any],
+    *,
+    fault: str | None = None,
+) -> None:
+    """Exclusively create and metadata-commit one JSON authority record."""
+    temporary = (
+        path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+        if os.name == "nt"
+        else None
+    )
+    target = temporary or path
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    descriptor = os.open(target, flags, 0o600)
+    try:
+        if hasattr(os, "fchmod"):
+            os.fchmod(descriptor, 0o600)
+        payload = _canonical_json_bytes(value) + b"\n"
+        with os.fdopen(descriptor, "wb", closefd=True) as handle:
+            descriptor = -1
+            if fault == "before-write":
+                raise RunnerError("injected failure before private claim write")
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if fault == "after-file-fsync":
+            raise RunnerError("injected failure after private claim file fsync")
+        if fault == "before-metadata-barrier":
+            raise RunnerError("injected failure before private claim metadata barrier")
+        if temporary is not None:
+            _windows_move_claim_write_through(temporary, path)
+        else:
+            parent = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(parent)
+            finally:
+                os.close(parent)
+        if fault == "after-metadata-barrier":
+            raise RunnerError("injected failure after private claim metadata barrier")
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
+
+
+def _create_private_claim(path: Path, value: Mapping[str, Any]) -> None:
+    try:
+        durable_create_private_json(path, value)
+    except FileExistsError as exc:
+        raise RunnerError("search availability fallback source was already claimed") from exc
+
+
+def prepare_search_fallback_claim(
+    *,
+    source_reference: str,
+    expected_map_sha256: str,
+    repo: Path,
+    codex_home: Path,
+    target_profile: AgentProfile,
+    task_name: str,
+    target_run_dir: Path,
+) -> dict[str, Any]:
+    """Validate and atomically consume one Spark availability fallback source."""
+    if not RUN_HANDLE.fullmatch(source_reference):
+        raise RunnerError("search fallback source must be an owner-issued run handle")
+    source_dir = resolve_run_reference(source_reference)
+    source_request = read_json(source_dir / "request.json")
+    if Path(source_request.get("repo", "")).resolve() != repo.resolve():
+        raise RunnerError("search fallback source repository binding drifted")
+    if source_request.get("task_name") != task_name.strip():
+        raise RunnerError("search fallback task binding drifted")
+    if source_request.get("search_fallback_source") is not None:
+        raise RunnerError("a search fallback run cannot authorize a third agent")
+    if source_request.get("search_fallback_binding") is not None:
+        raise RunnerError("a Spark source must not carry a fallback binding")
+    source_profile_data = source_request.get("profile", {})
+    if (
+        source_profile_data.get("name") != "openbuild_search_separate"
+        or source_profile_data.get("model") != "gpt-5.3-codex-spark"
+        or source_profile_data.get("reasoning_effort") != "low"
+        or source_profile_data.get("sandbox") != "read-only"
+    ):
+        raise RunnerError("search fallback source is not the exact Spark profile")
+    source_route = source_request.get("discovery_route_binding")
+    if not isinstance(source_route, dict):
+        raise RunnerError("search fallback source lacks its discovery route binding")
+    source_receipt = public_receipt(source_dir)
+    if (
+        source_receipt.get("status") != "failed"
+        or source_receipt.get("process_tree_stopped") is not True
+        or source_receipt.get("codex_started") is not True
+        or source_receipt.get("codex_exit_evidence") != "valid"
+        or source_receipt.get("result_evidence") != "missing"
+        or source_receipt.get("cancelled") is not False
+        or source_receipt.get("completion_recovered_during_cancel") is not False
+    ):
+        raise RunnerError("search fallback requires an exact stopped failed Spark process")
+    reason = source_receipt.get("transport_failure_reason")
+    if reason not in {"model-unavailable", "quota-exhausted"}:
+        raise RunnerError("Spark failure is not eligible for availability fallback")
+    expected_fingerprint = source_request.get("discovery_fingerprint")
+    if not isinstance(expected_fingerprint, dict):
+        raise RunnerError("search fallback source lacks a discovery fingerprint")
+    try:
+        current = compute_worktree_fingerprint(repo)
+    except DiscoveryContractError as exc:
+        raise RunnerError(str(exc)) from exc
+    if current.public != expected_fingerprint:
+        raise RunnerError("search fallback source worktree fingerprint drifted")
+
+    current_route = resolve_discovery_route_binding(
+        repo=repo,
+        codex_home=codex_home,
+        fingerprint=expected_fingerprint,
+    )
+    if (
+        source_route != current_route
+        or source_route.get("map_sha256") != expected_map_sha256
+        or source_route.get("transport_failure") != "availability-fallback"
+        or source_route.get("availability_fallback_agent") != "openbuild_search_balanced"
+        or reason not in source_route.get("availability_fallback_triggers", [])
+        or not source_route.get("agents")
+        or source_route["agents"][0] != "openbuild_search_separate"
+        or target_profile.name != "openbuild_search_balanced"
+    ):
+        raise RunnerError("effective discovery fallback route or map binding drifted")
+
+    source_static = load_agent_profile(
+        "openbuild_search_separate", repo=repo, codex_home=codex_home
+    )
+    source_effective = discovery_profile_with_fingerprint(source_static, expected_fingerprint)
+    source_descriptor = profile_descriptor(source_effective)
+    target_descriptor = profile_descriptor(target_profile)
+    expected_sequence_sha256 = sha256_bytes(
+        _canonical_json_bytes(
+            {"profiles": [source_descriptor["sha256"], target_descriptor["sha256"]]}
+        )
+    )
+    if (
+        source_request.get("profile_descriptor_sha256") != source_descriptor["sha256"]
+        or source_route.get("source_profile_sha256") != source_descriptor["sha256"]
+        or source_route.get("availability_fallback_profile_sha256")
+        != target_descriptor["sha256"]
+        or source_route.get("profile_sequence_sha256") != expected_sequence_sha256
+        or source_descriptor["descriptor"]["instructions_sha256"]
+        != target_descriptor["descriptor"]["instructions_sha256"]
+        or target_profile.model != "gpt-5.6-terra"
+        or target_profile.reasoning_effort != "medium"
+        or target_profile.sandbox != "read-only"
+    ):
+        raise RunnerError("search fallback profile descriptor binding drifted")
+    sequence_sha256 = expected_sequence_sha256
+    binding = {
+        "schema": "openbuild-search-fallback-claim-v1",
+        "source_receipt_sha256": sha256_bytes(
+            _canonical_json_bytes(
+                {
+                    key: source_receipt.get(key)
+                    for key in (
+                        "run_handle",
+                        "agent_name",
+                        "configured_model",
+                        "terminal_event",
+                        "codex_exit_evidence",
+                        "codex_exit_code",
+                        "process_tree_stopped",
+                        "transport_failure_reason",
+                        "prompt_sha256",
+                    )
+                }
+            )
+        ),
+        "source_handle_sha256": sha256_bytes(source_reference.encode("utf-8")),
+        "target_run_handle": public_run_handle(target_run_dir),
+        "reason": reason,
+        "map_sha256": expected_map_sha256,
+        "profile_sequence_sha256": sequence_sha256,
+        "source_profile_sha256": source_descriptor["sha256"],
+        "target_profile_sha256": target_descriptor["sha256"],
+        "instructions_sha256": target_descriptor["descriptor"]["instructions_sha256"],
+        "prompt_snapshot_id": source_request.get("prompt_snapshot_id"),
+        "prompt_sha256": source_request.get("prompt_sha256"),
+        "claimed_at": utc_now(),
+    }
+    _create_private_claim(source_dir / "search-fallback-claim.json", binding)
+    return binding
 
 
 def sign_guardian_message(
@@ -1394,12 +1864,19 @@ def read_event_evidence(path: Path) -> dict[str, Any]:
         "terminal_event": None,
         "thread_id": None,
         "usage": None,
+        "structured_errors": [],
+        "turn_started": False,
     }
-    if not path.is_file():
+    try:
+        raw = read_regular_file_no_follow(path)
+    except DiscoveryContractError:
+        evidence["event_error"] = "events artifact is unreadable or unstable"
+        return evidence
+    if raw is None:
         return evidence
 
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = raw.decode("utf-8").splitlines()
     except UnicodeDecodeError as exc:
         evidence["event_error"] = f"events are not UTF-8: {exc}"
         return evidence
@@ -1418,6 +1895,8 @@ def read_event_evidence(path: Path) -> dict[str, Any]:
             break
         event_type = event.get("type")
         last_event_type = event_type if isinstance(event_type, str) else None
+        if event_type == "turn.started":
+            evidence["turn_started"] = True
         if event_type == "thread.started" and isinstance(event.get("thread_id"), str):
             evidence["thread_id"] = event["thread_id"]
         if event_type in TERMINAL_EVENTS:
@@ -1427,12 +1906,29 @@ def read_event_evidence(path: Path) -> dict[str, Any]:
                 evidence["usage"] = event.get("usage")
             else:
                 error = event.get("error")
+                if not evidence["turn_started"]:
+                    evidence["structured_errors"].append(event)
                 if isinstance(error, dict) and isinstance(error.get("message"), str):
                     evidence["failure_message"] = error["message"]
         elif event_type == "error" and not evidence["failure_message"]:
+            if not evidence["turn_started"]:
+                evidence["structured_errors"].append(event)
             message = event.get("message")
             if isinstance(message, str):
                 evidence["failure_message"] = message
+        elif event_type == "error":
+            if not evidence["turn_started"]:
+                evidence["structured_errors"].append(event)
+        elif "code" in event or event_type in RAW_SEARCH_ERROR_TYPES:
+            if not evidence["turn_started"]:
+                evidence["structured_errors"].append(event)
+        elif "error" in event or (
+            isinstance(event_type, str) and event_type.endswith(".failed")
+        ) or event_type not in NON_ERROR_JSONL_EVENT_TYPES:
+            evidence["event_error"] = (
+                f"unrecognized error-bearing JSONL event at line {line_number}"
+            )
+            break
 
     if evidence["event_error"] is None and evidence["terminal_event_count"] > 1:
         evidence["event_error"] = (
@@ -1458,11 +1954,15 @@ def read_event_evidence(path: Path) -> dict[str, Any]:
 
 
 def final_result_error(path: Path) -> str | None:
-    if not path.is_file():
+    try:
+        raw = read_regular_file_no_follow(path)
+    except DiscoveryContractError as exc:
+        return f"invalid final result artifact: {exc}"
+    if raw is None:
         return "missing final result artifact"
     try:
-        value = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
+        value = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
         return f"invalid final result artifact: {exc}"
     if not value.strip():
         return "final result artifact is empty"
@@ -3388,17 +3888,25 @@ def classify_recovery_outcome(
             "writer_action": "none",
         }
     assert terminal_abandonment is not None
+    schema = terminal_abandonment.get("schema")
+    cause = terminal_abandonment.get("cause")
     if (
         terminal_abandonment.get("outcome") != "terminal-abandoned"
-        or terminal_abandonment.get("schema") != "terminal-abandonment-v1"
-        or terminal_abandonment.get("cause") != "outside-set-drift"
+        or (schema, cause)
+        not in {
+            ("terminal-abandonment-v1", "outside-set-drift"),
+            (
+                "terminal-abandonment-v2",
+                "outside-set-drift-with-preexisting-dirty-overlap",
+            ),
+        }
         or terminal_abandonment.get("checkpoint_invalidation") != "completed"
     ):
-        raise RunnerError("terminal-abandoned report requires completed exact v1 evidence")
+        raise RunnerError("terminal-abandoned report requires completed exact evidence")
     return {
         "outcome": "terminal-abandoned",
-        "schema": "terminal-abandonment-v1",
-        "cause": "outside-set-drift",
+        "schema": schema,
+        "cause": cause,
         "required_action": "none",
         "writer_action": "none",
     }
@@ -4446,12 +4954,31 @@ def public_receipt(run_dir: Path) -> dict[str, Any]:
         ):
             process_tree_stopped = False
     result_error = final_result_error(run_dir / "result.md") if evidence["completed"] else None
+    if (
+        result_error is None
+        and evidence["completed"]
+        and profile.get("name", "").startswith("openbuild_search_")
+    ):
+        expected_fingerprint = request.get("discovery_fingerprint")
+        if not isinstance(expected_fingerprint, dict):
+            result_error = "discovery result lacks an owner fingerprint"
+        else:
+            try:
+                validate_discovery_result(
+                    run_dir / "result.md",
+                    repo=Path(request["repo"]),
+                    expected_public=expected_fingerprint,
+                )
+            except DiscoveryContractError as exc:
+                result_error = str(exc)
     codex_exit_code, codex_exit_status = codex_exit_evidence_status(
         run_dir,
         expected_pid=codex_process.get("pid"),
         expected_identity=codex_process.get("identity"),
     )
     result_status = result_evidence_status(run_dir / "result.md")
+    if evidence["completed"] and result_error is not None and result_status == "valid":
+        result_status = "invalid"
 
     if exit_record is not None and not process_tree_stopped:
         status = "running"
@@ -4469,6 +4996,41 @@ def public_receipt(run_dir: Path) -> dict[str, Any]:
         )
     else:
         status = "failed" if process_tree_stopped else "running"
+
+    structured_errors = list(evidence.get("structured_errors", []))
+    structured_stderr_valid = True
+    if not evidence.get("turn_started"):
+        stderr_errors, structured_stderr_valid = _read_structured_stderr(
+            run_dir / "stderr.log"
+        )
+        structured_errors.extend(stderr_errors)
+    evidence["structured_stderr_valid"] = structured_stderr_valid
+    transport_failure_reason = None
+    if (
+        status == "failed"
+        and process_tree_stopped
+        and bool(codex_process.get("pid"))
+        and profile.get("name") == "openbuild_search_separate"
+        and profile.get("model") == "gpt-5.3-codex-spark"
+        and request.get("search_fallback_source") is None
+        and search_availability_event_stream_is_eligible(
+            evidence,
+            exit_record=exit_record,
+            result_status=result_status,
+            codex_exit_status=codex_exit_status,
+            codex_exit_code=codex_exit_code,
+        )
+    ):
+        transport_failure_reason = classify_search_availability_failure(
+            structured_errors,
+            exact_model="gpt-5.3-codex-spark",
+        )
+    fallback_binding = request.get("search_fallback_binding")
+    if (
+        request.get("search_fallback_source") is None
+        or not isinstance(fallback_binding, dict)
+    ):
+        fallback_binding = {}
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -4491,6 +5053,16 @@ def public_receipt(run_dir: Path) -> dict[str, Any]:
         "auth_mode": request["auth_mode"],
         "prompt_source_classification": "owner-private-snapshot",
         "prompt_sha256": request.get("prompt_sha256"),
+        "instructions_sha256": (request.get("profile_descriptor") or {}).get(
+            "instructions_sha256"
+        ),
+        "profile_descriptor_sha256": request.get("profile_descriptor_sha256"),
+        "transport_failure_reason": transport_failure_reason
+        or fallback_binding.get("reason"),
+        "search_fallback_source_digest": fallback_binding.get("source_handle_sha256"),
+        "search_fallback_profile_sequence_sha256": fallback_binding.get(
+            "profile_sequence_sha256"
+        ),
         "worker_pid": worker.get("pid"),
         "worker_process_identity": worker.get("identity"),
         "worker_process_group_id": worker.get("process_group_id"),
@@ -4574,8 +5146,18 @@ def start_run(args: argparse.Namespace) -> int:
     prompt_file = Path(prompt_file_value).expanduser() if prompt_file_value else None
     staged_snapshot_id = getattr(args, "prompt_snapshot_id", None)
     staged_prompt_sha256 = getattr(args, "prompt_sha256", None)
+    search_fallback_source = getattr(args, "search_fallback_source", None)
+    expected_map_sha256 = getattr(args, "expected_map_sha256", None)
     if not repo.is_dir():
         raise RunnerError(f"repository/workspace directory does not exist: {repo}")
+    if bool(search_fallback_source) != bool(expected_map_sha256):
+        raise RunnerError("search fallback source and expected map SHA-256 must be provided together")
+    if search_fallback_source and (
+        prompt_file is not None or staged_snapshot_id or staged_prompt_sha256
+    ):
+        raise RunnerError("search fallback reuses the source prompt; no replacement prompt is allowed")
+    if search_fallback_source and args.agent != "openbuild_search_balanced":
+        raise RunnerError("search availability fallback target must be openbuild_search_balanced")
     lease_id = validate_lease_id(args.agent, args.lease_id)
     allowed_files, specification_revision, recovery_target_milestone = validate_recovery_start_options(
         args.agent,
@@ -4602,6 +5184,7 @@ def start_run(args: argparse.Namespace) -> int:
             else:
                 raise RunnerError("workspace recovery registry rejected start: workspace is not vacant")
     prompt_owner = registry or RecoveryRegistry(repo)
+    fallback_source_request: dict[str, Any] | None = None
     if recovery_target_lease is not None:
         target_plan = recovery_target_lease.get("plan", {})
         try:
@@ -4616,6 +5199,21 @@ def start_run(args: argparse.Namespace) -> int:
             "prompt_snapshot_id": target_plan["prompt_snapshot_id"],
             "prompt_sha256": target_plan["prompt_sha256"],
         }
+    elif search_fallback_source:
+        if not RUN_HANDLE.fullmatch(search_fallback_source):
+            raise RunnerError("search fallback source must be an owner-issued run handle")
+        source_dir = resolve_run_reference(search_fallback_source)
+        fallback_source_request = read_json(source_dir / "request.json")
+        prompt_binding = {
+            "prompt_snapshot_id": fallback_source_request.get("prompt_snapshot_id"),
+            "prompt_sha256": fallback_source_request.get("prompt_sha256"),
+        }
+        if not all(isinstance(value, str) and value for value in prompt_binding.values()):
+            raise RunnerError("search fallback source prompt binding is incomplete")
+        task_prompt = read_prompt_snapshot(
+            source_dir / "prompt.md",
+            prompt_binding["prompt_sha256"],
+        )
     else:
         if staged_snapshot_id or staged_prompt_sha256:
             if not staged_snapshot_id or not staged_prompt_sha256:
@@ -4643,9 +5241,46 @@ def start_run(args: argparse.Namespace) -> int:
     codex_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).expanduser().resolve()
     validate_subscription_configuration(codex_home, repo)
     profile = load_agent_profile(args.agent, repo=repo, codex_home=codex_home)
+    discovery_fingerprint: dict[str, Any] | None = None
+    discovery_route_binding: dict[str, Any] | None = None
+    if profile.name.startswith("openbuild_search_"):
+        try:
+            current_fingerprint = compute_worktree_fingerprint(repo)
+        except DiscoveryContractError as exc:
+            raise RunnerError(str(exc)) from exc
+        if fallback_source_request is not None:
+            expected_fingerprint = fallback_source_request.get("discovery_fingerprint")
+            if not isinstance(expected_fingerprint, dict) or current_fingerprint.public != expected_fingerprint:
+                raise RunnerError("search fallback source worktree fingerprint drifted")
+            discovery_fingerprint = expected_fingerprint
+        else:
+            discovery_fingerprint = current_fingerprint.public
+        profile = discovery_profile_with_fingerprint(profile, discovery_fingerprint)
+        if profile.name == "openbuild_search_separate" and not search_fallback_source:
+            discovery_route_binding = resolve_discovery_route_binding(
+                repo=repo,
+                codex_home=codex_home,
+                fingerprint=discovery_fingerprint,
+            )
+            if discovery_route_binding["agents"][0] != profile.name:
+                raise RunnerError(
+                    "exact Spark profile does not match the effective discovery route source"
+                )
+    descriptor = profile_descriptor(profile)
     codex_bin = resolve_codex_binary(args.codex_bin)
     environment = scrub_api_credentials(os.environ)
     auth_mode = require_chatgpt_login(codex_bin, environment)
+    search_fallback_binding: dict[str, Any] | None = None
+    if search_fallback_source:
+        search_fallback_binding = prepare_search_fallback_claim(
+            source_reference=search_fallback_source,
+            expected_map_sha256=expected_map_sha256,
+            repo=repo,
+            codex_home=codex_home,
+            target_profile=profile,
+            task_name=args.task_name,
+            target_run_dir=run_dir,
+        )
     result_file = run_dir / "result.md"
     command = build_codex_command(
         codex_bin=codex_bin,
@@ -4677,6 +5312,12 @@ def start_run(args: argparse.Namespace) -> int:
             "sandbox": profile.sandbox,
             "developer_instructions": profile.developer_instructions,
         },
+        "profile_descriptor": descriptor["descriptor"],
+        "profile_descriptor_sha256": descriptor["sha256"],
+        "discovery_fingerprint": discovery_fingerprint,
+        "discovery_route_binding": discovery_route_binding,
+        "search_fallback_source": search_fallback_source,
+        "search_fallback_binding": search_fallback_binding,
         "auth_mode": auth_mode,
         "activation_timeout": args.activation_timeout,
         "command": command,
@@ -5796,10 +6437,12 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--agent", required=True, choices=sorted(SUPPORTED_AGENTS))
     start.add_argument("--task-name", required=True)
     start.add_argument("--repo", required=True)
-    start_prompt = start.add_mutually_exclusive_group(required=True)
+    start_prompt = start.add_mutually_exclusive_group(required=False)
     start_prompt.add_argument("--prompt-file")
     start_prompt.add_argument("--prompt-snapshot-id")
     start.add_argument("--prompt-sha256")
+    start.add_argument("--search-fallback-source")
+    start.add_argument("--expected-map-sha256")
     start.add_argument("--run-dir")
     start.add_argument("--lease-id")
     start.add_argument("--allowed-file", action="append", default=[])
@@ -5816,10 +6459,12 @@ def build_parser() -> argparse.ArgumentParser:
     dispatch.add_argument("--agent", required=True, choices=sorted(SUPPORTED_AGENTS))
     dispatch.add_argument("--task-name", required=True)
     dispatch.add_argument("--repo", required=True)
-    dispatch_prompt = dispatch.add_mutually_exclusive_group(required=True)
+    dispatch_prompt = dispatch.add_mutually_exclusive_group(required=False)
     dispatch_prompt.add_argument("--prompt-file")
     dispatch_prompt.add_argument("--prompt-snapshot-id")
     dispatch.add_argument("--prompt-sha256")
+    dispatch.add_argument("--search-fallback-source")
+    dispatch.add_argument("--expected-map-sha256")
     dispatch.add_argument("--run-dir")
     dispatch.add_argument("--lease-id")
     dispatch.add_argument("--allowed-file", action="append", default=[])
