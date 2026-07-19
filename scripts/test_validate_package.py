@@ -146,7 +146,7 @@ class RecoveryControlPlanePackageTests(unittest.TestCase):
         self.assertEqual(validate_recovery_control_plane(self.runner, self.recovery), [])
 
         mutations = [
-            ("recovery", 'READER_FLOOR = "2.2.5"', 'READER_FLOOR = "1"', "reader floor"),
+            ("recovery", 'READER_FLOOR = "2.3.2"', 'READER_FLOOR = "1"', "reader floor"),
             (
                 "recovery",
                 "state = self._read_registry_for_write_locked(rebarrier=True)",
@@ -257,12 +257,20 @@ class RecoveryControlPlanePackageTests(unittest.TestCase):
             ("runner", "return 0 if args.soft_timeout_exit_zero else 3", "return 3", "soft observation timeout"),
             ("recovery", "terminal-abandonment-v1", "terminal-abandonment-v0", "terminal abandonment schema"),
             ("recovery", "terminal-abandonment-v2", "terminal-abandonment-v0", "recovery overlap abandonment schema"),
+            ("recovery", "terminal-abandonment-v3", "terminal-abandonment-v0", "legacy normal overlap abandonment schema"),
             ("runner", "terminal-abandonment-v2", "terminal-abandonment-v0", "runner recovery overlap public result"),
+            ("runner", "terminal-abandonment-v3", "terminal-abandonment-v0", "runner legacy normal overlap public result"),
             (
                 "recovery",
                 "terminal-abandoned-recovery-overlap",
                 "terminal-abandoned-recovery-overlap-v0",
                 "recovery overlap abandonment invalidation",
+            ),
+            (
+                "recovery",
+                "terminal-abandoned-legacy-normal-overlap",
+                "terminal-abandoned-legacy-normal-overlap-v0",
+                "legacy normal overlap abandonment invalidation",
             ),
             ("recovery", "record_terminal_abandonment", "record_generic_abandonment", "terminal abandonment transition"),
             ("recovery", "persist=False", "persist=True", "terminal abandonment no-mutation gate"),
@@ -962,20 +970,27 @@ class ImplementationDelegationContractTests(unittest.TestCase):
             any("v2 terminal outcome" in error for error in self.validate(skill_text=skill))
         )
 
+        skill = self.skill_text.replace(
+            "terminal-abandonment-v3", "manual-recovery-v3"
+        )
+        self.assertTrue(
+            any("v3 terminal outcome" in error for error in self.validate(skill_text=skill))
+        )
+
         protocol = self.protocol_text.replace(
             "exact sorted pair `[outside-set-drift, preexisting-dirty-overlap]`",
             "generic mixed reasons",
         )
         self.assertTrue(
-            any("recovery-target-only exact pair" in error for error in self.validate(protocol_text=protocol))
+            any("missing exact pair" in error for error in self.validate(protocol_text=protocol))
         )
 
         routing = self.model_routing.replace(
-            "exact `[outside-set-drift, preexisting-dirty-overlap]` uses terminal abandonment v2 only for a recovery-target",
+            "Exact `[outside-set-drift, preexisting-dirty-overlap]` uses terminal abandonment v2 for a recovery-target and v3 for a legacy `normal-contained` lease",
             "mixed reasons resume routing",
         )
         self.assertTrue(
-            any("recovery-target-only routing" in error for error in self.validate(model_routing=routing))
+            any("v2/v3 routing" in error for error in self.validate(model_routing=routing))
         )
 
         tdd = self.tdd_workflow.replace(
@@ -985,16 +1000,23 @@ class ImplementationDelegationContractTests(unittest.TestCase):
             any("v2 fixture" in error for error in self.validate(tdd_workflow=tdd))
         )
 
+        tdd = self.tdd_workflow.replace(
+            "terminal-abandonment-v3", "manual-recovery-v3"
+        )
+        self.assertTrue(
+            any("v3 fixture" in error for error in self.validate(tdd_workflow=tdd))
+        )
+
         review = self.review_protocol.replace(
-            "recovery-target-only exact `[outside-set-drift, preexisting-dirty-overlap]`",
+            "legacy `normal-contained` v3",
             "generic mixed recovery",
         )
         self.assertTrue(
-            any("exact review boundary" in error for error in self.validate(review_protocol=review))
+            any("v3 review boundary" in error for error in self.validate(review_protocol=review))
         )
 
         versioning = self.versioning_text.replace(
-            "first durable write by the new owner raises the floor to 2.2.5",
+            "first durable write by the new owner raises the floor to 2.3.2",
             "reader floor remains unchanged",
         )
         self.assertTrue(
@@ -1004,19 +1026,19 @@ class ImplementationDelegationContractTests(unittest.TestCase):
 class ChangelogContractTests(unittest.TestCase):
     def test_release_manifest_version_and_latest_release_are_documented(self) -> None:
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-        self.assertEqual(validate_changelog_contract(changelog, "2.3.1"), [])
+        self.assertEqual(validate_changelog_contract(changelog, "2.3.2"), [])
         self.assertNotIn("## [2.1.1]", changelog)
 
-        mutated = changelog.replace("## [2.3.1]", "## [next]", 1)
-        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "2.3.1")))
+        mutated = changelog.replace("## [2.3.2]", "## [next]", 1)
+        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "2.3.2")))
 
     def test_released_version_is_pinned_in_both_install_channels(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         readme_ru = (ROOT / "README.ru.md").read_text(encoding="utf-8")
-        self.assertEqual(validate_release_docs_contract(readme, readme_ru, "2.3.1"), [])
+        self.assertEqual(validate_release_docs_contract(readme, readme_ru, "2.3.2"), [])
 
-        mutated = readme.replace("--ref v2.3.1", "--ref main")
-        self.assertTrue(any("README.md" in error for error in validate_release_docs_contract(mutated, readme_ru, "2.3.1")))
+        mutated = readme.replace("--ref v2.3.2", "--ref main")
+        self.assertTrue(any("README.md" in error for error in validate_release_docs_contract(mutated, readme_ru, "2.3.2")))
 
 
 class DecisionAuthorityTraceTests(unittest.TestCase):

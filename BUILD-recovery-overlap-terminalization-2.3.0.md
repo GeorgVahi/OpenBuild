@@ -1,23 +1,23 @@
 # Build: безопасная финализация recovery-target с preexisting overlap
 
-- Status: In progress
-- Last updated: 2026-07-19
-- Original request: Исправить реальный OpenBuild 2.2.4 incident, в котором успешно остановленный recovery-writer изменил уже грязные разрешённые файлы и одновременно создал новый файл вне lease. Комбинация `preexisting-dirty-overlap + outside-set-drift` оставила registry non-vacant без штатного terminal outcome; нужен полноценный новый релиз.
-- Primary signal: end-to-end fixture воспроизводит recovery-target поверх сохранённого partial diff, получает exact reasons `[outside-set-drift, preexisting-dirty-overlap]` и доказуемо завершает тот же lifecycle через no-handoff abandonment, checkpoint invalidation, authorization retirement, guardian/archive close и registry vacancy; обычный writer и любой другой mixed-набор остаются byte-for-byte fail-closed.
-- Review baseline: `main@7f92d4603f2eb3a2e434415c20bcf48b879dd3a3`; исходный status clean (`## main...origin/main [ahead 2]`).
+- Status: Ready for final exact-tree review and publication
+- Last updated: 2026-07-20
+- Original request: Исправить реальный OpenBuild 2.2.4 incident, в котором успешно остановленный recovery-writer изменил уже грязные разрешённые файлы и одновременно создал новый файл вне lease. Комбинация `preexisting-dirty-overlap + outside-set-drift` оставила registry non-vacant без штатного terminal outcome; нужен полноценный новый релиз. Follow-up: OpenBuild 2.3.1 не освободил сохранившийся lifecycle, потому что проблемный writer был зарегистрирован как `normal-contained`, а v2 принимал эту пару только для `recovery-target`; нужен безопасный migration/reconciliation и новый релиз без force-unlock.
+- Primary signal: owner- и runner-level fixtures воспроизводят обе формы сохранённого partial diff, получают exact reasons `[outside-set-drift, preexisting-dirty-overlap]` и доказуемо завершают тот же lifecycle через v2 для `recovery-target` либо v3 для legacy `normal-contained`; handoff/diff/root authority не принимаются, Git/index/worktree остаются неизменны, а все остальные mixed-наборы и lease kinds остаются fail-closed.
+- Review baseline: `main@150f586e7338b4ace92614ab6643c71d5f2f0eda`; исходный status clean (`## main...origin/main`).
 - Workflow target: Complete
 - Starting phase: discovery
-- Specification revision: R-013
+- Specification revision: R-015
 - Complexity: high — меняются durable recovery state, downgrade boundary, single-writer release и автоматическая authority boundary.
 - Implementation mode: TDD-first — меняются state-machine contracts и наблюдаемое recovery-поведение.
-- Version impact: authoritative uncommitted candidate `2.2.4` → `2.3.0` уже содержит отдельно авторизованную minor discovery-функцию; recovery fix входит в тот же ещё не опубликованный release без отката или второго конфликтующего tag. Manifest, changelog и обе README синхронны; первый любой durable registry/source write нового recovery owner поднимает reader floor до `2.2.5`.
+- Version impact: immutable `2.3.0` and `2.3.1` are published; the backward-compatible legacy-normal reconciliation advances the authoritative package to patch `2.3.2` and raises the first-write reader floor from `2.2.5` to `2.3.2` while preserving no-rewrite reads of 2.2.0–2.2.3 and 2.2.5 generations.
 - Routing mode: `codex-exec-explicit-model`
 - Discovery mode: mixed — exact read-only discovery transport завершился успешно, но вернул несуществующие repository paths; результат классифицирован `unusable-evidence`, затем выполнен один targeted root-recovery без второго search agent.
 - Search usage route: separate-pool → targeted root-recovery; circuit breaker открыт для повторного discovery dispatch в этом Build-run.
 - Search routing receipt: packaged map `OpenBuild defaults`, SHA-256 `fce8589a24dd2dd4fb8b538c91e306f7883bb3a5511f3e4b9605b031191b5e03`, step 1/1, exact `openbuild_search_separate`, configured/observed `gpt-5.3-codex-spark`/low/read-only, `turn.completed`, exit 0, valid result, stopped tree; semantic outcome `unusable-evidence`.
 - Implementation model route: packaged `implementation.high`; старт `openbuild_implementation_balanced`, дальнейшие steps только по валидному pre-edit trigger.
 - Implementation routing receipt: packaged map SHA-256 `fce8589a24dd2dd4fb8b538c91e306f7883bb3a5511f3e4b9605b031191b5e03`, implementation/high; A-007 exact step 1 `openbuild_implementation_balanced` (`gpt-5.6-terra`/medium/workspace-write) completed transport-success under the six-file lease, then exact outside-only drift was terminal-abandoned and the byte-identical six-file checkpoint continued through the existing root-completion authority; no model escalation occurred.
-- Review routing receipt: packaged `critic.high`; A-008 exact Balanced and A-009/A-010 exact Strong closed the recovery-specific findings, with A-010 `ACCEPT` 94/100. Combined A-015 accepted recovery-v2 while finding discovery blockers. A-016 accepted recovery AC-01–AC-12/14 and found a result-object gap. A-017 accepted most combined behavior but found pending legacy-v1 completion lacked pre-source floor promotion and structured JSONL had the same non-regular boundary. A-018 accepted recovery-v2 again and found that raw code-bearing JSONL records could bypass the discovery error union. Discovery A-025/A-026 then closed unknown failure types and missing runner/Codex-exit binding. Combined A-019 accepted recovery-v2 but invalidated the review after external drift and found a descriptor TOCTOU gap in JSONL/stderr/result reads; R-012 closed it. Discovery A-028 then found and R-022 closed a source-side fallback-binding injection gap. Fresh combined Sol/high acceptance remains required.
+- Review routing receipt: packaged `critic.high`; A-008 exact Balanced and A-009/A-010 exact Strong closed the recovery-specific findings, with A-010 `ACCEPT` 94/100. Combined A-015 accepted recovery-v2 while finding discovery blockers. A-016 accepted recovery AC-01–AC-12/14 and found a result-object gap. A-017 accepted most combined behavior but found pending legacy-v1 completion lacked pre-source floor promotion and structured JSONL had the same non-regular boundary. A-018 accepted recovery-v2 again and found that raw code-bearing JSONL records could bypass the discovery error union. Discovery A-025/A-026 then closed unknown failure types and missing runner/Codex-exit binding. Combined A-019 accepted recovery-v2 but invalidated the review after external drift and found a descriptor TOCTOU gap in JSONL/stderr/result reads; R-012 closed it. Discovery A-028 then found and R-022 closed a source-side fallback-binding injection gap. Combined A-020 accepted the exact 2.3.0 tree 97/100 and it was published. A-031 accepted the zero-exit correction, and immutable 2.3.1 was published at `150f586`. R-015 adds the narrow v3 lifecycle; A-032 exact Balanced independently returned `ACCEPT` 96/100 with high confidence and no finding. A-033 confirmed the required staged tree and no safety finding but rejected publication because the prompt did not bind the `--full-index` flags used for the recorded digest; the canonical digest command is now explicit and a fresh exact-tree review remains required.
 
 ## 1. Outcome
 
@@ -30,26 +30,27 @@ OpenBuild 2.2.4 разрешает автоматический `terminal-abando
 ### Desired behavior
 
 1. Existing exact outside-only `terminal-abandonment-v1` остаётся без изменений.
-2. Отдельный `terminal-abandonment-v2` разрешает только recovery-target и только exact sorted reasons `[outside-set-drift, preexisting-dirty-overlap]`.
-3. V2 никогда не принимает handoff, не создаёт retry/escalation/grant/new writer и не расширяет producer allowlist. Он только завершает уже остановленный producer lifecycle через существующие identity/zero/invalidation/guardian/archive/release gates.
-4. Normal-contained writer с тем же mixed reason set, любой `git-control-plane-drift`, unknown/additional reason, live/unknown tree, quarantine, binding mismatch, handoff/outbox или authorization ambiguity остаются no-mutation blocked.
-5. После vacancy существующая root-completion authority оценивается отдельно. V2 не создаёт root-completion audit, не принимает diff и не меняет Git/workspace; только отдельный root-owned вызов после exact vacancy может независимо доказать same revision/milestone/scope, attribution и risk floor.
-6. Public outcome явно различает v1 outside-only и v2 recovery overlap, не раскрывая raw paths, prompt, registry или capability data.
-7. Release 2.3.0 публикуется только после full validation объединённого authoritative candidate, clean install/forward smoke и независимого high-risk `ACCEPT` точного staged tree.
+2. `terminal-abandonment-v2` остаётся разрешён только для recovery-target и только при exact sorted reasons `[outside-set-drift, preexisting-dirty-overlap]`.
+3. Новый append-only `terminal-abandonment-v3` разрешает эту exact pair только для legacy `normal-contained` lease, зарегистрированного старым runner без recovery-target kind.
+4. V2/V3 никогда не принимают handoff, не создают retry/escalation/grant/new writer и не расширяют producer allowlist. Они только завершают уже остановленный producer lifecycle через существующие identity/zero/invalidation/guardian/archive/release gates; v2 завершает использованную recovery-авторизацию, v3 не фабрикует её.
+5. `normal-legacy`, `normal-fallback`, любой `git-control-plane-drift`, unknown/additional reason, live/unknown tree, quarantine, binding mismatch, handoff/outbox или authorization ambiguity остаются no-mutation blocked.
+6. После vacancy существующая root-completion authority оценивается отдельно. Abandonment не создаёт root-completion audit, не принимает diff и не меняет Git/workspace; только отдельный root-owned вызов после exact vacancy может независимо доказать same revision/milestone/scope, attribution и risk floor.
+7. Public outcome явно различает v1 outside-only, v2 recovery overlap и v3 legacy-normal overlap, не раскрывая raw paths, prompt, registry или capability data.
+8. Release 2.3.2 публикуется только после full validation authoritative candidate, clean install/forward smoke и независимого high-risk `ACCEPT` точного staged tree.
 
 ### In scope
 
-- Exact v2 semantic disposition, evidence binding, invalidation reason и reader floor.
-- Recovery-target-only reason classifier и no-mutation negative matrix.
+- Exact v3 semantic disposition, evidence binding, distinct invalidation reason и reader-floor migration при сохранении v1/v2.
+- Lease-kind-specific v2/v3 reason classifier и no-mutation negative matrix.
 - End-to-end/fault/replay/schema/forward tests в существующих runner/registry owners.
 - SKILL, delegation/model/TDD/review/version contracts, validator и mutation tests.
-- Manifest 2.3.0, changelog, English/Russian README, contributor/release validation.
-- Scoped commit объединённого authoritative candidate, push, immutable annotated `v2.3.0` tag и GitHub Release после acceptance gate.
+- Manifest 2.3.2, changelog, English/Russian README, contributor/release validation.
+- Scoped commit authoritative candidate, push, immutable annotated `v2.3.2` tag и GitHub Release после acceptance gate.
 
 ### Out of scope
 
 - Generic mixed-reason abandonment или force-unlock.
-- Automatic abandonment обычного writer с `preexisting-dirty-overlap`.
+- Generic abandonment любого normal writer: v3 ограничен legacy `normal-contained` exact pair и не применим к `normal-legacy`/`normal-fallback`.
 - Принятие partial/ambiguous recovery handoff.
 - Автоматический replacement recovery writer или расширение writer lease.
 - Откат/перезапись пользовательских или внешних workspace changes.
@@ -69,7 +70,7 @@ OpenBuild 2.2.4 разрешает автоматический `terminal-abando
 | Existing negative | `scripts/test_recovery_state.py:2883-2920` | `git-control-plane-drift + outside-set-drift` отклоняется byte-for-byte. | Этот mixed-case и post-commit owner path остаются неизменны. |
 | Overlap detection | `scripts/test_recovery_state.py:1724-1750` | Отдельный тест доказывает preexisting dirty overlap. | Не хватает recovery-target end-to-end terminal fixture. |
 | Static owner | `scripts/validate_package.py:3206-3292,4258-4317,4397-4410,4589-4597` | Validator фиксирует exact outside-only prose/runtime tokens и floor 2.2.3. | Release обязан синхронно обновить contracts и floor. |
-| Release policy | `CONTRIBUTING.md:14-31,87-96`; `plugins/openbuild/.codex-plugin/plugin.json:1-4` | Manifest authoritative; каждый commit повышает версию и синхронизирует changelog/READMEs; tag/Release immutable. | Target — один reviewed 2.3.0 release commit с recovery fix и уже авторизованным discovery candidate. |
+| Release policy | `CONTRIBUTING.md:14-31,87-96`; `plugins/openbuild/.codex-plugin/plugin.json:1-4` | Manifest authoritative; каждый commit повышает версию и синхронизирует changelog/READMEs; tag/Release immutable. | Target — один reviewed 2.3.2 patch commit/tag/Release без изменения опубликованных v2.3.0/v2.3.1. |
 
 ### Source of truth
 
@@ -79,7 +80,7 @@ OpenBuild 2.2.4 разрешает автоматический `terminal-abando
 
 | Source | Authority/owner | Status/revision | Normative scope and decisions | Outgoing normative links | Editable | Reconciliation |
 |---|---|---|---|---|---|---|
-| `BUILD-recovery-overlap-terminalization-2.3.0.md` | current user + repository root spec | R-006 In progress | D-001–D-010, T-010–T-014, AC-01–AC-14 | all current owners below | yes | root |
+| `BUILD-recovery-overlap-terminalization-2.3.0.md` | current user + repository root spec | R-015 In progress | D-001–D-011, T-010–T-016, AC-01–AC-16 | all current owners below | yes | root |
 | `BUILD-recovery-autonomy-2.2.2.md` | accepted historical user decision record | Complete R-005 | D-001–D-004; no useless prompt/new writer/force-unlock, exact outside-only v1 | its closed source graph at Sections 2–3; current editable owners mapped below | no | conflict narrowed by new evidence and D-009 |
 | `BUILD-terminal-finalization-2.2.3.md` | accepted historical user decision record | Complete R-008 | D-005–D-008; v1 exact outside-only, explicit post-commit mixed path | its closed source graph; current editable owners mapped below | no | aligned: git-control-plane mixed path unchanged |
 | `plugins/openbuild/skills/build/SKILL.md` | packaged workflow owner | package 2.2.4 | lifecycle/authority/reporting | implementation/model/TDD/minimality/review/version references | yes | gap: v2 recovery-overlap route absent |
@@ -103,7 +104,7 @@ Repository and installed 2.2.4 copies of `SKILL.md` and all mapped references ha
 
 ### Gap
 
-Нет append-only terminal outcome для exact recovery-target `[outside-set-drift, preexisting-dirty-overlap]`. Evidence достаточно, чтобы безопасно закрыть остановленный producer без handoff, но текущий exact v1 отклоняет набор и навсегда удерживает registry.
+Опубликованный v2 закрывает exact recovery-target `[outside-set-drift, preexisting-dirty-overlap]`, но legacy 2.3.1 registry может содержать тот же доказанный stopped lifecycle как `normal-contained`. Evidence достаточно, чтобы безопасно закрыть producer без handoff, однако v2 lease-kind gate отклоняет его и удерживает registry. Нужен отдельный v3 outcome, а не ослабление v2 или ручной unlock.
 
 ## 3. Decision memory
 
@@ -113,14 +114,15 @@ Repository and installed 2.2.4 copies of `SKILL.md` and all mapped references ha
 |---|---|---|---|---|---|
 | D-001 | `automation.failure.root-remediation` | resolved/preserved | original Build request даёт bounded root-only same-scope authority после vacancy | accepted 2.2.2 record | не разрешает replacement writer |
 | D-002 | `authorization.recovery-writer` | resolved/preserved | новый recovery writer остаётся explicit one-shot opt-in, eligible/vacant only | accepted 2.2.2 record | terminalization не создаёт writer |
-| D-003 | `automation.fail-closed-boundary` | resolved/reconciled | unknown mixed reasons, live/containment/ownership ambiguity и force-unlock запрещены; exact recovery-target pair из D-009 является отдельным доказанным outcome | accepted 2.2.2 record + current incident | no generic mixed unlock |
+| D-003 | `automation.fail-closed-boundary` | resolved/reconciled | unknown mixed reasons, live/containment/ownership ambiguity и force-unlock запрещены; exact pair имеет отдельные lease-kind-bound v2/v3 outcomes из D-009/D-011 | accepted 2.2.2 record + оба incident trace | no generic mixed unlock |
 | D-004 | `workspace.orchestration-artifacts` | resolved/preserved | owner-private artifacts outside workspace | accepted 2.2.2 record | no prompt/private data leak |
 | D-005 | `compatibility.terminal-binding-upgrade` | resolved/preserved | prior released formats read safely without rewrite | accepted 2.2.3 record | v1/current paths remain compatible |
 | D-006 | `recovery.completed-postcommit` | resolved/preserved | git-control-plane + outside post-commit state uses separate explicit owner path | accepted 2.2.3 record | v2 does not absorb post-commit flow |
 | D-007 | `authorization.postcommit-remediation-entrypoint` | resolved/preserved | exact private capability flow for post-commit only | accepted 2.2.3 record | unrelated to recovery-target v2 |
 | D-008 | `authorization.local-owner-principal` | resolved/preserved | current OS account is owner principal within documented threat model | accepted 2.2.3 record | no stronger chat-provenance claim |
-| D-009 | `automation.recovery-target-overlap-abandonment` | resolved | exact stopped recovery-target pair `[outside-set-drift, preexisting-dirty-overlap]` automatically closes without handoff/new writer; normal writer and all other reason sets remain blocked | current request and supplied real trace | fixes non-vacant registry without weakening generic fail-closed boundary |
+| D-009 | `automation.recovery-target-overlap-abandonment` | resolved/preserved | exact stopped recovery-target pair `[outside-set-drift, preexisting-dirty-overlap]` closes through v2 without handoff/new writer | initial incident and published 2.3.0 behavior | v2 remains recovery-target-only |
 | D-010 | `release.publish-authoritative-candidate` | resolved/reconciled | after green validation and independent exact-tree ACCEPT, publish the current authoritative 2.3.0 main commit, immutable annotated tag `v2.3.0` and GitHub Release | current request: “сделать полноценный новый релиз”; concurrent user-authorized 2.3.0 candidate on disk | no rollback to 2.2.5 and no publication of an unreviewed mixed tree |
+| D-011 | `automation.legacy-normal-overlap-reconciliation` | resolved | exact stopped `normal-contained` pair `[outside-set-drift, preexisting-dirty-overlap]` closes through distinct v3 without diff acceptance, fabricated recovery authorization or force-unlock; publish immutable 2.3.2 after full gates | 2.3.1 follow-up incident and explicit request for another release | unblocks the retained legacy lease while preserving v2 and generic fail-closed behavior |
 
 ### Technical decision ledger
 
@@ -130,9 +132,11 @@ Repository and installed 2.2.4 copies of `SKILL.md` and all mapped references ha
 | T-011 | Add exact invalidation reason `terminal-abandoned-recovery-overlap`; the first durable registry/source commit performed by 2.2.5 code raises reader floor to 2.2.5, matching the existing owner-wide `_commit_*` policy, while 2.2.0–2.2.3 floors load without rewrite. | selected | Pending v2 cannot be safely completed by 2.2.4 code; a mixed-only floor would contradict the current shared durable owner. | Explicit downgrade failure is safer than implicit partial interpretation. |
 | T-012 | Root completion remains a separate post-vacancy audit; v2 terminal evidence never becomes diff acceptance or scope expansion and cannot itself create `root-completion-authorized`, mutate Git/workspace or invoke the audit owner. | selected | Existing `_record-root-completion` owner is callable only after vacancy; explicit absence/ordering coverage prevents an implementation from silently coupling it to abandonment. | D-001–D-003/D-009 and user changes preserved. |
 | T-013 | One 2.3.0 release commit synchronizes the authoritative combined runtime/tests/contracts/manifest/changelog/READMEs; publication uses repository-native tag and GitHub Release after clean candidate validation. | selected/reconciled R-004 | A separate 2.2.5 commit would overwrite or strand the current authorized minor candidate; no new dependency or provider is introduced by this recovery fix. | D-010 and immutable tag policy preserved. |
-| T-014 | Final publication binds review to one exact staged Git tree: root stages only task-owned paths, records `git write-tree` plus a canonical staged-diff digest, runs a fresh final reviewer over that exact snapshot, forbids any post-review file/index mutation, creates the commit from the unchanged index, then proves `commit^{tree}` equals the reviewed tree and tag/Release resolve to that commit. | selected | Tag→commit alone does not prove review→commit identity. A final exact-tree review after all specification/log reconciliation closes the publication chain. | D-010, immutable tags and all reviewed acceptance evidence are preserved. |
+| T-014 | Final publication binds review to one exact staged Git tree: root stages only task-owned paths, records `git write-tree` plus the canonical digest from `git diff --cached --binary --no-ext-diff | git hash-object --stdin`, runs a fresh final reviewer over that exact snapshot, forbids any post-review file/index mutation, creates the commit from the unchanged index, then proves `commit^{tree}` equals the reviewed tree and tag/Release resolve to that commit. | selected | Tag→commit alone does not prove review→commit identity. A final exact-tree review after all specification/log reconciliation closes the publication chain. | D-010, immutable tags and all reviewed acceptance evidence are preserved. |
+| T-015 | Add append-only `terminal-abandonment-v3` with cause `legacy-normal-outside-set-drift-with-preexisting-dirty-overlap`, selectable only for `normal-contained` plus the exact sorted pair; bind it to distinct invalidation `terminal-abandoned-legacy-normal-overlap`. | selected | Reclassifying the lease as recovery-target would fabricate ownership/authorization evidence; widening v2 would erase the durable lease-kind distinction. | D-003/D-011; v1/v2 and post-commit paths unchanged. |
+| T-016 | Read exact floors 2.2.0–2.2.3 and 2.2.5 without rewrite, then promote to reader floor 2.3.2 before the first new registry/source write. | selected | Existing 2.3.1 stuck registries advertise 2.2.5; v3 state must fail closed under older readers and must never expose a new source generation behind a legacy advertised floor. | D-011, no force-unlock and durable forward-only migration. |
 
-Pending proposals: none. D-009 and D-010 are explicitly resolved by the current request; no blocking product choice remains.
+Pending proposals: none. D-011 is explicitly resolved by the current follow-up request; no blocking product choice remains.
 
 ## 4. Scenarios and edge cases
 
@@ -148,31 +152,34 @@ Pending proposals: none. D-009 and D-010 are explicitly resolved by the current 
 
 ### Errors
 
-- Same pair on `normal-contained` → blocked, registry/source byte-identical.
+- Same pair on a stopped, fully bound legacy `normal-contained` → v3 invalidation/guardian/archive/release with no handoff, diff acceptance or root authority.
+- Same pair on `normal-legacy` or `normal-fallback` → blocked without mutation.
 - Pair plus `git-control-plane-drift` or any unknown/additional reason → blocked, no mutation.
 - Outside-only → unchanged v1.
 - Git-control-plane + outside post-commit legacy state → unchanged explicit `terminal-root-completion-v1`.
 - Preexisting overlap without outside drift → blocked; no reason to abandon producer through this path.
 - Live/unknown tree, quarantine, binding/guardian/source/authorization mismatch or outbox/handoff → blocked.
 - Crash after v2 pending, source invalidation, completion or guardian close → exact replay resumes once.
-- Downgrade a non-vacant floor-2.2.5 state → fail-closed; legacy floors load without rewrite.
+- Downgrade a non-vacant floor-2.3.2 state → fail-closed; exact 2.2.0–2.2.3 and 2.2.5 floors load without rewrite.
 
 ## 5. Acceptance criteria
 
 - [x] AC-01: End-to-end runner fixture reproduces the supplied recovery-target partial-diff + outside-file trace and reaches registry vacancy without handoff, new writer or user prompt.
-- [x] AC-02: V2 registration requires `lease_kind=recovery-target` and exact sorted reasons `[outside-set-drift, preexisting-dirty-overlap]`; caller cannot provide cause/reasons/digest/force.
-- [x] AC-03: The same pair on normal-contained, or any additional/unknown/git-control-plane reason, rejects before mutation with registry/source bytes unchanged.
+- [x] AC-02: V2 registration requires `lease_kind=recovery-target`; v3 requires `lease_kind=normal-contained`; both require exact sorted reasons `[outside-set-drift, preexisting-dirty-overlap]`, and caller cannot provide cause/reasons/digest/force.
+- [x] AC-03: The same pair on `normal-legacy`/`normal-fallback`, or any additional/unknown/git-control-plane reason, rejects before mutation with registry/source bytes unchanged.
 - [x] AC-04: V1 exact outside-only behavior, evidence, invalidation and public outcome remain green and byte-compatible.
 - [x] AC-05: V2 changes terminal success to false, creates no handoff/outbox/retry/escalation/grant, permanently invalidates the checkpoint with the v2 reason and retires the consumed recovery authorization.
 - [x] AC-06: V2 uses existing exact run/lease/source/allowed-set/terminal/zero/candidate identity bindings, guardian close and validated terminal archive before release.
-- [x] AC-07: Exact-schema mutation and fault/reload tests cover wrong schema/cause/lease kind/reason tuple/digest/binding and every durable phase with one event/invalidation/archive/release.
-- [x] AC-08: Public closed result distinguishes completed v1 and v2 through allowlisted schema/cause tokens and leaks no private path/prompt/registry/capability data.
-- [x] AC-09: Reader fixtures load exact 2.2.0–2.2.3 floors without rewrite, raise to 2.2.5 on the first new write, reject unsafe downgrade and replay a pending v2 transition exactly once.
-- [x] AC-10: Static validator and mutation tests require the same recovery-target-only boundary across runtime, SKILL, implementation/model/TDD/review/version contracts.
-- [x] AC-11: Manifest, changelog and both READMEs agree at 2.3.0, document the new recovery cause and floor-2.2.5 downgrade implication, and preserve existing 2.2.4 behavior plus the concurrent authorized discovery release notes.
+- [x] AC-07: Exact-schema mutation and fault/reload tests cover wrong v2/v3 schema/cause/lease kind/reason tuple/digest/binding and every durable phase with one event/invalidation/archive/release.
+- [x] AC-08: Public closed result distinguishes completed v1, v2 and v3 through allowlisted schema/cause tokens and leaks no private path/prompt/registry/capability data.
+- [x] AC-09: Reader fixtures load exact 2.2.0–2.2.3 and 2.2.5 floors without rewrite, raise to 2.3.2 on the first new write, reject unsafe downgrade and replay a pending abandonment exactly once.
+- [x] AC-10: Static validator and mutation tests require the same lease-kind-specific v2/v3 boundary across runtime, SKILL, implementation/model/TDD/review/version contracts.
+- [x] AC-11: Manifest, changelog and both READMEs agree at 2.3.2, document v3 and the floor-2.3.2 downgrade implication, preserve v1/v2 and zero-exit behavior, and do not rewrite v2.3.0/v2.3.1 history.
 - [x] AC-12: Focused tests, full suite, package validator, diff/commit gate, clean plugin install and realistic forward smoke pass.
 - [ ] AC-13: Fresh high-risk progressive review returns `ACCEPT` with complete coverage and no actionable finding. After all final spec/log reconciliation, one fresh reviewer accepts the exact staged tree/diff identity; no file/index mutation occurs before commit, `commit^{tree}` equals the reviewed tree, and push/tag/GitHub Release are verified against that commit.
 - [x] AC-14: V2 end-to-end reconciliation leaves no `root-completion-authorized` record/artifact, accepted diff, Git/index/worktree mutation or root workspace write. The existing separate root-owned audit fails before vacancy; after vacancy a fixture supplies a canonical independently computed verification/diff-attribution receipt digest and proves the owner records exactly those hashes, without claiming that runtime recomputes repository attribution.
+- [x] AC-15: V3 owner/runner fixtures start from a legacy floor-2.2.5 `normal-contained` lifecycle, produce the exact distinct schema/cause/invalidation, preserve workspace contents and Git status/binary diff/index bytes, create no handoff/root authority, close the guardian/archive, and release the registry.
+- [ ] AC-16: Exact reviewed 2.3.2 commit is pushed, annotated tag and public GitHub Release resolve to it, and a clean remote-tag install is source/cache byte-equal.
 
 ### Invariants
 
@@ -190,10 +197,10 @@ Pending proposals: none. D-009 and D-010 are explicitly resolved by the current 
 - Static: `scripts/validate_package.py`, `scripts/test_validate_package.py`.
 - Workflow docs: `SKILL.md`, implementation/model/TDD/review/version references.
 - Release: manifest, changelog, README/README.ru and this specification.
-- Data migration: owner-private forward transition only; no workspace schema/backfill.
-- Security/privacy: v2 narrows by exact lease kind and reason set; all current containment, stable-object, private-state and output boundaries remain.
+- Data migration: owner-private forward transition from legacy floor 2.2.5 to 2.3.2 on the first durable write only; no rewrite-on-read, workspace schema or backfill.
+- Security/privacy: v2/v3 narrow by exact lease kind and reason set; all current containment, stable-object, private-state and output boundaries remain.
 - Performance/concurrency: existing bounded registry/source locks and idempotent phases; no polling/service/dependency.
-- Rollback: code rollback is safe only before a 2.2.5 durable write or after exact vacant retirement; a non-vacant floor-2.2.5 registry must not be opened by 2.2.4.
+- Rollback: code rollback is safe only before a 2.3.2 durable write or after exact vacant retirement; a non-vacant floor-2.3.2 registry must not be opened by 2.3.1 or earlier.
 
 ## 7. Validation and review
 
@@ -221,11 +228,19 @@ Pending proposals: none. D-009 and D-010 are explicitly resolved by the current 
 
 ### M2. Contracts, version, docs and release
 
-- Status: In progress
+- Status: Complete for immutable 2.3.0/2.3.1 publication
 - Implementation mode: Direct for synchronized prose/version; TDD-first for any validator correction.
 - Delegation: root-only after M1 exact vacancy; reviewers read-only.
 - Scope: workflow docs, R-009 spec reconciliation, authoritative manifest 2.3.0, changelog, README parity, full combined validation, clean install/forward smoke, exact-tree review, commit/push/tag/Release.
 - Acceptance: AC-10–AC-14.
+
+### M3. Legacy normal v3 migration and 2.3.2 release
+
+- Status: Ready for final exact-tree review
+- Implementation mode: TDD-first owner/runner behavior; direct synchronized contracts/version/docs.
+- Delegation: native root implementation; fresh read-only review required before publication.
+- Scope: v3 owner transition, normal-contained runner reproduction, 2.2.5 no-rewrite migration, static mutation contracts, manifest/changelog/README parity, full validation, clean local/remote install, exact-tree commit/push/tag/Release.
+- Acceptance: AC-02–AC-12, AC-15–AC-16.
 
 ## 9. Coverage and risks
 
@@ -252,9 +267,9 @@ Pending proposals: none. D-009 and D-010 are explicitly resolved by the current 
 
 | Risk | Likelihood/impact | Mitigation | Status |
 |---|---|---|---|
-| V2 becomes generic mixed force-unlock | medium/critical | exact recovery-target kind + exact reason tuple + mutation negatives | planned AC-02/03/07 |
+| V2/V3 become generic mixed force-unlock | medium/critical | exact lease-kind routing + exact reason tuple + mutation negatives | planned AC-02/03/07/15 |
 | Root accepts preexisting user diff after release | medium/critical | separate post-vacancy attribution gate; no handoff/outbox | planned AC-05/T-012 |
-| Old reader partially interprets pending v2 | medium/high | floor 2.2.5 and downgrade tests | planned AC-09 |
+| Old reader partially interprets pending v3 | medium/high | floor 2.3.2, promotion-before-source and downgrade tests | planned AC-09/15 |
 | V1/post-commit paths regress | medium/high | byte-compatible v1 and mixed-git regression tests | planned AC-03/04 |
 | Prose/runtime/version diverge | medium/high | validator mutations, same-commit sync, clean install | planned AC-10–AC-12 |
 | Release points to unreviewed commit | low/critical | tag/Release only after exact review and commit/tag SHA verification | planned AC-13 |
@@ -266,6 +281,7 @@ Pending proposals: none. D-009 and D-010 are explicitly resolved by the current 
 | D-001–D-008 | accepted historical specifications | outcome, boundaries, scenarios, ACs, invariants | no writer/force/private leak/post-commit changes | none |
 | D-009 | current supplied incident and explicit fix request | desired behavior, T-010–T-012, AC-01–AC-10, M1, risks | D-001–D-008 and generic fail-closed boundary | none |
 | D-010 | current “полноценный новый релиз” request | scope, T-013, AC-11–AC-13, M2 | immutable tags and validation/review gates | none |
+| D-011 | current 2.3.1 legacy-normal incident and new-release request | desired behavior, T-015/T-016, AC-02–AC-12/15/16, M3 | v1/v2, no handoff/root authority/force-unlock and immutable prior tags | none |
 
 ### Readiness critic log
 
@@ -288,7 +304,7 @@ Non-blocking assumptions:
 
 ## 11. Agent activity ledger
 
-Created logical agent runs: `19`.
+Created logical agent runs: `20`.
 
 | Run | Role/task | Actual model | Effort | Status/outcome | Work/mapping |
 |---|---|---|---|---|---|
@@ -311,6 +327,9 @@ Created logical agent runs: `19`.
 | A-017 | review / combined-release-230-r017-sol-closure | `gpt-5.6-sol` | high | completed / REVISE 79/100, high confidence | exact tree `7a401342242413bee48f9ce01257f2bd13eff220`; found non-regular structured JSONL and floor-2.2.3 pending-v1 replay gaps; both remediated in R-009/R-018 |
 | A-018 | review / combined-release-230-r018-sol-closure | `gpt-5.6-sol` | high | completed / REVISE 88/100, high confidence | exact tree `3f2358f57cf57f1b2ba450345d92798b34645177`; accepted recovery-v2 and found that a code-bearing non-error JSONL event could be omitted from the discovery error union; concurrent index drift invalidated the reviewed release tree |
 | A-019 | review / combined-release-230-r011-sol-closure | `gpt-5.6-sol` | high | completed / REVISE 76/100, high confidence | exact tree `c6dfca15df11bc6616ceb20e0bcf67be696b2f96`; accepted recovery-v2 and found JSONL/stderr/result check/open/read replacement could bypass no-follow checks; external test drift independently invalidated the review identity |
+| A-020 | review / release-230-exact-tree-final | `gpt-5.6-sol` | high | completed / ACCEPT 97/100, high confidence | exact tree `d2488c4306edad96acf88643f8d75db5e1c6b4a1`; no recovery, discovery, validation, documentation or publication blocker; immutable 2.3.0 publication followed |
+| A-032 | review / legacy-normal-v3-pre-final-review | `gpt-5.6-terra` | medium | completed / ACCEPT 96/100, high confidence | independently reviewed the full 2.3.2 diff; confirmed exact v3 kind/cause/invalidation, floor promotion, no fabricated authorization/handoff/root authority, v1/v2 preservation, docs/version parity and no actionable finding; read-only sandbox could not create temp fixtures, so root full-suite evidence remains authoritative |
+| A-033 | review / legacy-normal-v3-exact-tree-final | `gpt-5.6-terra` | medium | completed / REJECT 0/100, high confidence; `release-identity` | independently reconstructed and matched staged tree `0da592e9ea55757694c7e75fbb298f8d2e8850f3`, confirmed no unstaged task change or additional safety finding, but rejected because the required digest used undocumented `--full-index` while the reviewer derived the canonical no-ext-diff digest; T-014 now fixes the exact command and requires a fresh snapshot |
 
 Pre-spawn dispatch failures: one combined-review dispatch was rejected because `--specification-revision` is implementation-only; the same owner-private prompt was then dispatched without that option, creating A-015 and no extra agent.
 
@@ -436,3 +455,15 @@ Pre-spawn dispatch failures: one combined-review dispatch was rejected because `
 - Discovery Sol/high A-028 found that a Spark source could carry an injected fallback binding and republish its reason after the clean eligibility predicate failed. Discovery R-022 now rejects such a source at the claim gate and suppresses the injected binding in public source receipts.
 - Recovery-v2 runtime semantics remain unchanged: the exact recovery-only overlap pair, floor promotion, terminal invalidation and no-handoff/no-root-authority boundary retain their previously accepted behavior.
 - Focused source receipt, claim-gate and package mutation tests pass. The complete repository suite passes all 403 tests with 4 expected platform skips; package, official plugin and official skill validators pass; the exact 30-file combined commit gate and both whitespace checks pass with no unstaged path; and the clean enabled 2.3.0 install is byte-equal across all 46 source/cache files. AC-12 is closed; fresh unchanged-tree Sol/high acceptance remains before publication.
+
+### 2026-07-19 — R-014 immutable 2.3.0 and zero-exit patch reconciliation
+
+- Combined A-020 accepted exact tree `d2488c4306edad96acf88643f8d75db5e1c6b4a1` at 97/100. Commit `7e7f247`, annotated tag `v2.3.0`, the public GitHub Release and remote tag installation all resolve to that tree; published history remains immutable.
+- Concurrent discovery A-030 subsequently found that `codex_exit_code=0` could satisfy a forged failed-run envelope, and task-only A-031 accepted the correction. The owner now requires non-zero creation-bound exit evidence and advances only the package patch version to 2.3.1.
+- Recovery-v2 behavior, reader floor 2.2.5 and legacy no-rewrite reads are unchanged. The affected suite passes 99 tests with 3 expected platform skips; the complete suite passes all 403 tests with 4 expected skips; package, official plugin and official skill validators pass; the clean enabled 2.3.1 install is byte-equal across 46/46 files; and the exact 10-file patch commit gate plus both whitespace checks pass with no unstaged path. AC-12 is closed; AC-13 remains open for fresh exact-tree Sol/high acceptance and immutable 2.3.1 publication.
+
+### 2026-07-20 — R-015 legacy normal lifecycle reconciliation
+
+- Immutable 2.3.1 is published at commit `150f586` and remains unchanged. The supplied follow-up proves that its v2 transition correctly rejected the exact overlap pair because the retained lifecycle was registered as `normal-contained`, not `recovery-target`; repeating authorization cannot change that durable owner evidence.
+- RED changed the exact normal-contained overlap fixture from expected rejection to a v3 outcome and failed at the released `terminal abandonment requires exact outside-set-drift` gate. The owner now selects append-only `terminal-abandonment-v3` only for `normal-contained` plus exact `[outside-set-drift, preexisting-dirty-overlap]`, binds a distinct cause/invalidation and reuses terminal identity, full-tree zero, guardian, archive and release gates without handoff, diff acceptance, fabricated recovery authorization or root authority.
+- Exact 2.2.0–2.2.3 and 2.2.5 registry generations remain readable byte-for-byte without rewrite. The first durable new transition raises the floor to 2.3.2 before any private-source replacement. Focused owner, runner, classifier, package and mutation signals are green; the complete repository suite passes all 404 tests with 4 expected platform skips; package and official plugin/skill validators pass; the enabled local 2.3.2 install is byte-equal across all 46 source/cache files. A-032 returned `ACCEPT` 96/100 with high confidence and no finding. A-033 found no safety defect and matched the staged tree but rejected the ambiguous digest command; T-014 now fixes the exact no-ext-diff command. Fresh staged-tree review, commit gate and immutable 2.3.2 publication remain pending.

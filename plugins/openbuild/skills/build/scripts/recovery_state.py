@@ -26,8 +26,8 @@ from typing import Any, Iterator, Mapping, Sequence
 
 REGISTRY_SCHEMA = 1
 IDENTITY_VERSION = 2
-READER_FLOOR = "2.2.5"
-_LEGACY_READER_FLOORS = {"2.2.0", "2.2.1", "2.2.2", "2.2.3"}
+READER_FLOOR = "2.3.2"
+_LEGACY_READER_FLOORS = {"2.2.0", "2.2.1", "2.2.2", "2.2.3", "2.2.5"}
 DEFAULT_MAX_RECORDS = 100_000
 DEFAULT_MAX_BYTES = 2 * 1024 * 1024 * 1024
 
@@ -431,6 +431,7 @@ def _validate_public_checkpoint(value: Any) -> None:
         "semantic-needs-escalation",
         "terminal-abandoned-outside-set-drift",
         "terminal-abandoned-recovery-overlap",
+        "terminal-abandoned-legacy-normal-overlap",
         "post-commit-root-completed",
     }
     if any(reason not in allowed_reasons for reason in reasons):
@@ -841,6 +842,10 @@ def _validate_semantic_disposition(value: Any) -> None:
             (
                 "terminal-abandonment-v2",
                 "outside-set-drift-with-preexisting-dirty-overlap",
+            ),
+            (
+                "terminal-abandonment-v3",
+                "legacy-normal-outside-set-drift-with-preexisting-dirty-overlap",
             ),
         }
         if (
@@ -2089,6 +2094,11 @@ class RecoveryRegistry:
                 and lease.get("lease_kind") != "recovery-target"
             ):
                 raise RecoveryStateError("terminal abandonment v2 requires a recovery target lease")
+            if (
+                semantic.get("schema") == "terminal-abandonment-v3"
+                and lease.get("lease_kind") != "normal-contained"
+            ):
+                raise RecoveryStateError("terminal abandonment v3 requires a normal contained lease")
             recorded = [
                 event
                 for event in state.get("history", [])
@@ -2162,7 +2172,11 @@ class RecoveryRegistry:
                     != (
                         "terminal-abandoned-recovery-overlap"
                         if semantic.get("schema") == "terminal-abandonment-v2"
-                        else "terminal-abandoned-outside-set-drift"
+                        else (
+                            "terminal-abandoned-legacy-normal-overlap"
+                            if semantic.get("schema") == "terminal-abandonment-v3"
+                            else "terminal-abandoned-outside-set-drift"
+                        )
                     )
                     or invalidation.get("evidence_digest") != semantic.get("evidence_digest")
                 ):
@@ -2887,6 +2901,7 @@ class RecoveryRegistry:
                 "semantic-needs-escalation",
                 "terminal-abandoned-outside-set-drift",
                 "terminal-abandoned-recovery-overlap",
+                "terminal-abandoned-legacy-normal-overlap",
                 "post-commit-root-completed",
             }:
                 raise RecoveryStateError("private checkpoint invalidation reason is unsupported")
@@ -5256,6 +5271,12 @@ class RecoveryRegistry:
             ):
                 schema = "terminal-abandonment-v2"
                 cause = "outside-set-drift-with-preexisting-dirty-overlap"
+            elif (
+                lease.get("lease_kind") == "normal-contained"
+                and reasons == ["outside-set-drift", "preexisting-dirty-overlap"]
+            ):
+                schema = "terminal-abandonment-v3"
+                cause = "legacy-normal-outside-set-drift-with-preexisting-dirty-overlap"
             else:
                 raise RecoveryStateError("terminal abandonment requires exact outside-set-drift")
             candidate_snapshot = candidate_checkpoint.get("candidate_snapshot")
@@ -5354,7 +5375,11 @@ class RecoveryRegistry:
             invalidation_reason = (
                 "terminal-abandoned-recovery-overlap"
                 if semantic.get("schema") == "terminal-abandonment-v2"
-                else "terminal-abandoned-outside-set-drift"
+                else (
+                    "terminal-abandoned-legacy-normal-overlap"
+                    if semantic.get("schema") == "terminal-abandonment-v3"
+                    else "terminal-abandoned-outside-set-drift"
+                )
             )
             if (
                 checkpoint.get("reasons") == [invalidation_reason]
@@ -5388,7 +5413,8 @@ class RecoveryRegistry:
                     candidate_checkpoint.get("reasons")
                     != (
                         ["outside-set-drift", "preexisting-dirty-overlap"]
-                        if semantic.get("schema") == "terminal-abandonment-v2"
+                        if semantic.get("schema")
+                        in {"terminal-abandonment-v2", "terminal-abandonment-v3"}
                         else ["outside-set-drift"]
                     )
                     or not isinstance(candidate_snapshot, Mapping)
@@ -5496,6 +5522,7 @@ class RecoveryRegistry:
             "semantic-needs-escalation",
             "terminal-abandoned-outside-set-drift",
             "terminal-abandoned-recovery-overlap",
+            "terminal-abandoned-legacy-normal-overlap",
             "post-commit-root-completed",
         }:
             raise RecoveryStateError("checkpoint invalidation reason is unsupported")

@@ -3281,9 +3281,19 @@ def validate_implementation_delegation_contract(
             "SKILL.md recovery overlap: missing v2 terminal outcome",
         ),
         (
+            skill_text,
+            "terminal-abandonment-v3",
+            "SKILL.md legacy normal overlap: missing v3 terminal outcome",
+        ),
+        (
             protocol_text,
             "exact sorted pair `[outside-set-drift, preexisting-dirty-overlap]`",
-            "implementation-delegation.md recovery overlap: missing recovery-target-only exact pair",
+            "implementation-delegation.md recovery overlap: missing exact pair",
+        ),
+        (
+            protocol_text,
+            "legacy `normal-contained` lease",
+            "implementation-delegation.md legacy normal overlap: missing v3 lease boundary",
         ),
         (
             protocol_text,
@@ -3302,8 +3312,8 @@ def validate_implementation_delegation_contract(
         ),
         (
             model_routing,
-            "exact `[outside-set-drift, preexisting-dirty-overlap]` uses terminal abandonment v2 only for a recovery-target",
-            "model-routing.md recovery overlap: missing recovery-target-only routing boundary",
+            "Exact `[outside-set-drift, preexisting-dirty-overlap]` uses terminal abandonment v2 for a recovery-target and v3 for a legacy `normal-contained` lease",
+            "model-routing.md recovery overlap: missing v2/v3 routing boundary",
         ),
         (
             model_routing,
@@ -3321,14 +3331,19 @@ def validate_implementation_delegation_contract(
             "tdd-workflow.md recovery overlap: missing v2 fixture contract",
         ),
         (
+            tdd_workflow,
+            "terminal-abandonment-v3",
+            "tdd-workflow.md legacy normal overlap: missing v3 fixture contract",
+        ),
+        (
             review_protocol,
-            "recovery-target-only exact `[outside-set-drift, preexisting-dirty-overlap]`",
-            "review-protocol.md recovery overlap: missing exact review boundary",
+            "legacy `normal-contained` v3",
+            "review-protocol.md recovery overlap: missing v3 review boundary",
         ),
         (
             versioning_text,
-            "first durable write by the new owner raises the floor to 2.2.5",
-            "versioning.md recovery overlap: missing reader-floor rollout contract",
+            "first durable write by the new owner raises the floor to 2.3.2",
+            "versioning.md legacy normal overlap: missing reader-floor rollout contract",
         ),
         (
             readme,
@@ -3342,8 +3357,8 @@ def validate_implementation_delegation_contract(
         ),
         (
             readme,
-            "Version 2.3.0 closes the supplied recovery deadlock",
-            "README.md recovery overlap: missing operator outcome",
+            "Version 2.3.2 closes the remaining legacy-normal recovery deadlock",
+            "README.md legacy normal overlap: missing operator outcome",
         ),
         (
             readme_ru,
@@ -3357,8 +3372,8 @@ def validate_implementation_delegation_contract(
         ),
         (
             readme_ru,
-            "Версия 2.3.0 закрывает описанное recovery-зависание",
-            "README.ru.md recovery overlap: missing operator outcome",
+            "Версия 2.3.2 закрывает оставшееся recovery-зависание legacy normal lease",
+            "README.ru.md legacy normal overlap: missing operator outcome",
         ),
     ]
     for text, token, error in automatic_contracts:
@@ -4412,8 +4427,8 @@ def validate_safe_artifact_reader_contract(
 def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> list[str]:
     errors: list[str] = []
     recovery_contract = [
-        ('READER_FLOOR = "2.2.5"', "reader floor"),
-        ('_LEGACY_READER_FLOORS = {"2.2.0", "2.2.1", "2.2.2", "2.2.3"}', "legacy reader compatibility"),
+        ('READER_FLOOR = "2.3.2"', "reader floor"),
+        ('_LEGACY_READER_FLOORS = {"2.2.0", "2.2.1", "2.2.2", "2.2.3", "2.2.5"}', "legacy reader compatibility"),
         (
             "state = self._read_registry_for_write_locked(rebarrier=True)",
             "pending abandonment reader floor before source replay",
@@ -4479,10 +4494,19 @@ def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> lis
         ("complete_terminal_abandonment", "terminal abandonment completion"),
         ('"terminal-abandonment-v1"', "terminal abandonment schema"),
         ('"terminal-abandonment-v2"', "recovery overlap abandonment schema"),
+        ('"terminal-abandonment-v3"', "legacy normal overlap abandonment schema"),
         ('"outside-set-drift"', "terminal abandonment cause"),
         ('"outside-set-drift-with-preexisting-dirty-overlap"', "recovery overlap abandonment cause"),
+        (
+            '"legacy-normal-outside-set-drift-with-preexisting-dirty-overlap"',
+            "legacy normal overlap abandonment cause",
+        ),
         ('"terminal-abandoned-outside-set-drift"', "terminal abandonment invalidation"),
         ('"terminal-abandoned-recovery-overlap"', "recovery overlap abandonment invalidation"),
+        (
+            '"terminal-abandoned-legacy-normal-overlap"',
+            "legacy normal overlap abandonment invalidation",
+        ),
         ("invalidate_source_checkpoint", "semantic checkpoint invalidation"),
         (
             "complete_source_checkpoint_invalidation",
@@ -4758,9 +4782,14 @@ def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> lis
         ("registry.record_terminal_abandonment", "runner terminal abandonment binding"),
         ("registry.complete_terminal_abandonment", "runner terminal abandonment completion"),
         ('"terminal-abandonment-v2"', "runner recovery overlap public result"),
+        ('"terminal-abandonment-v3"', "runner legacy normal overlap public result"),
         (
             '"outside-set-drift-with-preexisting-dirty-overlap"',
             "runner recovery overlap public cause",
+        ),
+        (
+            '"legacy-normal-outside-set-drift-with-preexisting-dirty-overlap"',
+            "runner legacy normal overlap public cause",
         ),
         ("registry.materialize_handoff", "runner handoff materialization"),
         ("registry.release_contained_terminal", "runner contained release"),

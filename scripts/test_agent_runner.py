@@ -3161,6 +3161,11 @@ class CodexInvocationTests(unittest.TestCase):
             )
             outside = repo / "orchestrator-artifact.txt"
             outside.write_text("outside drift\n", encoding="utf-8", newline="\n")
+            (run_dir / "result.md").write_text(
+                "NEEDS_ESCALATION: legacy normal overlap requires reconciliation\n",
+                encoding="utf-8",
+                newline="\n",
+            )
             status_before = subprocess.run(
                 ["git", "status", "--porcelain=v2", "-z"],
                 cwd=repo,
@@ -3274,6 +3279,189 @@ class CodexInvocationTests(unittest.TestCase):
             )
             self.assertEqual((repo / ".git" / "index").read_bytes(), index_before)
             self.assertEqual(allowed.read_text(encoding="utf-8"), "recovery writer change\n")
+            self.assertEqual(outside.read_text(encoding="utf-8"), "outside drift\n")
+
+    def test_legacy_normal_overlap_reconciles_v3_without_handoff_or_repo_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "config", "core.autocrlf", "false"], cwd=repo, check=True
+            )
+            subprocess.run(
+                ["git", "config", "user.email", "tests@example.invalid"],
+                cwd=repo,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "Tests"], cwd=repo, check=True
+            )
+            allowed = repo / "allowed.txt"
+            allowed.write_text("seed\n", encoding="utf-8", newline="\n")
+            subprocess.run(["git", "add", "allowed.txt"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "--quiet", "-m", "baseline"],
+                cwd=repo,
+                check=True,
+            )
+            allowed.write_text(
+                "preexisting user change\n", encoding="utf-8", newline="\n"
+            )
+
+            run_dir = root / "legacy-normal-overlap-run"
+            owner = agent_runner.RecoveryRegistry(repo, state_root=root / "state")
+            owner.initialize()
+            preflight = owner.prepare_source_checkpoint(
+                source_id=run_dir.name,
+                source_lease_id="normal-lease",
+                source_milestone="M2-source",
+                target_milestone="M2-recovery",
+                allowed_paths=["allowed.txt"],
+                specification_revision="R-015",
+            )
+            owner.reserve_normal(
+                "normal-lease",
+                allowed_set_digest=preflight["allowed_set_digest"],
+                recovery_capable=True,
+                source_state_id=preflight["source_state_id"],
+                run_id=run_dir.name,
+                prompt_sha256="a" * 64,
+                containment_plan=_containment_plan(),
+            )
+            owner.bind_reserved_source_snapshot("normal-lease", preflight)
+            owner.claim_contained_launch("normal-lease", "contained-token")
+            owner.bind_process_unactivated(
+                "normal-lease",
+                allowed_set_digest=preflight["allowed_set_digest"],
+                provider_receipt=_provider_receipt(),
+                process_receipt=_process_receipt(),
+            )
+            owner.commit_activation(
+                "normal-lease", preflight["allowed_set_digest"]
+            )
+
+            agent_runner.ensure_private_run_dir(run_dir)
+            agent_runner.atomic_write_json(
+                run_dir / "request.json",
+                {
+                    "profile": {"name": "openbuild_implementation_strong"},
+                    "task_name": "M2-source",
+                    "repo": str(repo),
+                    "lease_id": "normal-lease",
+                    "lifecycle_allowed_set_digest": preflight[
+                        "allowed_set_digest"
+                    ],
+                    "recovery_preflight": preflight,
+                    **self.private_run_request_identity(run_dir),
+                },
+            )
+            secret = bytes.fromhex("55" * 32)
+            agent_runner.atomic_write_bytes(run_dir / "guardian.key", secret)
+            agent_runner.write_guardian_message(
+                run_dir / "guardian-zero.json",
+                secret,
+                "guardian-zero",
+                _zero_proof(),
+            )
+            agent_runner.write_guardian_message(
+                run_dir / "guardian-closed.json",
+                secret,
+                "guardian-closed",
+                _guardian_close(),
+            )
+            receipt = {
+                "run_dir": str(run_dir),
+                "status": "completed",
+                "agent_name": "openbuild_implementation_strong",
+                "task_name": "M2-source",
+                "lease_id": "normal-lease",
+                "activated": True,
+                "configured_model": "fixture",
+                "model_reasoning_effort": "xhigh",
+                "sandbox": "workspace-write",
+                "worker_pid": 123,
+                "worker_process_identity": "worker-1",
+                "codex_pid": 456,
+                "codex_process_identity": "codex-1",
+                "terminal_event": "turn.completed",
+                "codex_exit_evidence": "valid",
+                "codex_exit_code": 0,
+                "result_evidence": "valid",
+                "process_tree_stopped": True,
+            }
+            allowed.write_text("writer change\n", encoding="utf-8", newline="\n")
+            outside = repo / "orchestrator-artifact.txt"
+            outside.write_text("outside drift\n", encoding="utf-8", newline="\n")
+            status_before = subprocess.run(
+                ["git", "status", "--porcelain=v2", "-z"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+            ).stdout
+            diff_before = subprocess.run(
+                ["git", "diff", "--binary", "--no-ext-diff"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+            ).stdout
+            index_before = (repo / ".git" / "index").read_bytes()
+
+            with mock.patch.object(
+                agent_runner, "recovery_registry_for_agent", return_value=owner
+            ), mock.patch.object(
+                agent_runner, "audit_guardian_health"
+            ), mock.patch.object(
+                agent_runner, "public_receipt", return_value=receipt
+            ), redirect_stdout(io.StringIO()):
+                agent_runner.reconcile_implementation_registry(run_dir, receipt)
+                checkpoint = agent_runner.read_json(
+                    run_dir / "recovery-checkpoint.json"
+                )
+                self.assertEqual(
+                    checkpoint["reasons"],
+                    ["outside-set-drift", "preexisting-dirty-overlap"],
+                )
+                self.assertEqual(
+                    agent_runner.reconcile_terminal_abandonment_run(
+                        Namespace(run_dir=str(run_dir))
+                    ),
+                    0,
+                )
+
+            state = owner.state()
+            abandonment = agent_runner.read_json(run_dir / "terminal-abandonment.json")
+            self.assertIsNone(state["lease"])
+            self.assertIsNone(state["outbox"])
+            self.assertEqual(abandonment["schema"], "terminal-abandonment-v3")
+            self.assertEqual(
+                abandonment["cause"],
+                "legacy-normal-outside-set-drift-with-preexisting-dirty-overlap",
+            )
+            self.assertFalse(abandonment["checkpoint_allowed"])
+            self.assertFalse((run_dir / "implementation-handoffs.jsonl").exists())
+            self.assertFalse((run_dir / "root-completion-authorized.json").exists())
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "status", "--porcelain=v2", "-z"],
+                    cwd=repo,
+                    check=True,
+                    stdout=subprocess.PIPE,
+                ).stdout,
+                status_before,
+            )
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "diff", "--binary", "--no-ext-diff"],
+                    cwd=repo,
+                    check=True,
+                    stdout=subprocess.PIPE,
+                ).stdout,
+                diff_before,
+            )
+            self.assertEqual((repo / ".git" / "index").read_bytes(), index_before)
+            self.assertEqual(allowed.read_text(encoding="utf-8"), "writer change\n")
             self.assertEqual(outside.read_text(encoding="utf-8"), "outside drift\n")
 
     def test_ac09_ac13_root_completion_audit_is_durable_before_authorization(self) -> None:
@@ -3503,6 +3691,14 @@ class CodexInvocationTests(unittest.TestCase):
                 "checkpoint_invalidation": "completed",
             }
         )
+        legacy_normal_overlap_abandoned = agent_runner.classify_recovery_outcome(
+            terminal_abandonment={
+                "outcome": "terminal-abandoned",
+                "schema": "terminal-abandonment-v3",
+                "cause": "legacy-normal-outside-set-drift-with-preexisting-dirty-overlap",
+                "checkpoint_invalidation": "completed",
+            }
+        )
         audit = agent_runner.root_completion_authorization_record(
             specification_revision="R-005",
             milestone="M2",
@@ -3515,10 +3711,21 @@ class CodexInvocationTests(unittest.TestCase):
         self.assertEqual(exhausted["outcome"], "automation-exhausted")
         self.assertEqual(abandoned["outcome"], "terminal-abandoned")
         self.assertEqual(recovery_overlap_abandoned["schema"], "terminal-abandonment-v2")
+        self.assertEqual(
+            legacy_normal_overlap_abandoned["schema"], "terminal-abandonment-v3"
+        )
         self.assertEqual(audit["event"], "root-completion-authorized")
         self.assertEqual(audit["authority"], "original-build-request")
         self.assertTrue(audit["automatic"])
-        for record in (decision, blocked, exhausted, abandoned, recovery_overlap_abandoned, audit):
+        for record in (
+            decision,
+            blocked,
+            exhausted,
+            abandoned,
+            recovery_overlap_abandoned,
+            legacy_normal_overlap_abandoned,
+            audit,
+        ):
             self.assertEqual(record["writer_action"], "none")
             rendered = json.dumps(record)
             self.assertNotIn(str(ROOT), rendered)

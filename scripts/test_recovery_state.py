@@ -213,7 +213,7 @@ class RegistryContractTests(unittest.TestCase):
                 action_snapshot_id="9" * 64,
                 action_snapshot_sha256=hashlib.sha256(action_snapshot_bytes).hexdigest(),
             )
-            self.assertEqual(owner.state()["reader_floor"], "2.2.5")
+            self.assertEqual(owner.state()["reader_floor"], "2.3.2")
             authorization = owner.issue_post_commit_root_completion_authorization(action)
             issued_source = owner.read_private_source(preflight["source_state_id"])
             issued_action = issued_source["post_commit_root_completion"]["action"]
@@ -1152,7 +1152,7 @@ class RegistryContractTests(unittest.TestCase):
             self.assertEqual(first.workspace_key, second.workspace_key)
             self.assertTrue(first.directory.is_relative_to(state_root))
             self.assertFalse(first.directory.is_relative_to(workspace))
-            self.assertEqual(state["reader_floor"], "2.2.5")
+            self.assertEqual(state["reader_floor"], "2.3.2")
             self.assertEqual(state["identity_version"], 2)
             self.assertEqual(state["workspace_key"], first.workspace_key)
             self.assertIn("git_common_dir_identity", state)
@@ -1202,8 +1202,8 @@ class RegistryContractTests(unittest.TestCase):
                     specification_revision="R-001",
                 )
 
-            self.assertEqual(observed_floors, ["2.2.5"])
-            self.assertEqual(owner.state()["reader_floor"], "2.2.5")
+            self.assertEqual(observed_floors, ["2.3.2"])
+            self.assertEqual(owner.state()["reader_floor"], "2.3.2")
 
     def test_digest_consistent_malformed_registry_generations_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -2983,7 +2983,7 @@ class RegistryContractTests(unittest.TestCase):
 
             replay = self.owner(workspace, root / "state").state()
             self.assertEqual(replay["digest"], released["digest"])
-            self.assertEqual(replay["reader_floor"], "2.2.5")
+            self.assertEqual(replay["reader_floor"], "2.3.2")
 
     def test_ac05_mixed_drift_rejects_terminal_abandonment_without_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -3024,7 +3024,7 @@ class RegistryContractTests(unittest.TestCase):
             self.assertEqual(owner.path.read_bytes(), registry_before)
             self.assertEqual(source_path.read_bytes(), source_before)
 
-    def test_recovery_overlap_pair_rejects_normal_lease_without_mutation(self) -> None:
+    def test_legacy_normal_overlap_pair_reconciles_v3_without_accepting_diff(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             workspace = self.make_git_workspace(root)
@@ -3060,17 +3060,103 @@ class RegistryContractTests(unittest.TestCase):
             owner.prove_contained_tree_empty(
                 "normal-1", self.zero_proof(), preflight["allowed_set_digest"]
             )
-            source_path = owner.source_path(preflight["source_state_id"])
-            registry_before = owner.path.read_bytes()
-            source_before = source_path.read_bytes()
+            legacy = owner.state()
+            legacy["reader_floor"] = "2.2.5"
+            legacy["digest"] = recovery_state._digest(legacy)
+            owner.path.write_text(
+                json.dumps(legacy, sort_keys=True) + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            legacy_bytes = owner.path.read_bytes()
+            owner = self.owner(workspace, root / "state")
+            self.assertEqual(owner.state()["reader_floor"], "2.2.5")
+            self.assertEqual(owner.path.read_bytes(), legacy_bytes)
 
-            with self.assertRaisesRegex(
-                recovery_state.RecoveryStateError, "exact outside-set-drift"
-            ):
-                owner.record_terminal_abandonment("normal-1")
+            pending = owner.record_terminal_abandonment("normal-1")
+            semantic = pending["lease"]["semantic_disposition"]
+            self.assertEqual(pending["reader_floor"], "2.3.2")
+            self.assertEqual(pending["lease"]["lease_kind"], "normal-contained")
+            self.assertEqual(semantic["schema"], "terminal-abandonment-v3")
+            self.assertEqual(
+                semantic["cause"],
+                "legacy-normal-outside-set-drift-with-preexisting-dirty-overlap",
+            )
+            self.assertFalse(semantic["checkpoint_allowed"])
+            self.assertNotIn("handoff_digest", pending["lease"])
+            self.assertIsNone(pending["outbox"])
 
-            self.assertEqual(owner.path.read_bytes(), registry_before)
-            self.assertEqual(source_path.read_bytes(), source_before)
+            pristine = json.loads(json.dumps(pending))
+
+            def abandonment_history(value):
+                return next(
+                    event
+                    for event in value["history"]
+                    if event["event"] == "terminal-abandonment-recorded"
+                )
+
+            def mutate_semantic_and_history(value, field, replacement):
+                value["lease"]["semantic_disposition"][field] = replacement
+                abandonment_history(value)[field] = replacement
+
+            mutations = {
+                "v3 cannot masquerade as v2": lambda value: (
+                    mutate_semantic_and_history(
+                        value, "schema", "terminal-abandonment-v2"
+                    ),
+                    mutate_semantic_and_history(
+                        value,
+                        "cause",
+                        "outside-set-drift-with-preexisting-dirty-overlap",
+                    ),
+                ),
+                "v3 requires legacy normal cause": lambda value: (
+                    mutate_semantic_and_history(value, "cause", "outside-set-drift")
+                ),
+                "v3 requires normal contained lease": lambda value: value[
+                    "lease"
+                ].__setitem__("lease_kind", "recovery-target"),
+            }
+            for name, mutate in mutations.items():
+                with self.subTest(name=name):
+                    malformed = json.loads(json.dumps(pristine))
+                    mutate(malformed)
+                    malformed["digest"] = recovery_state._digest(malformed)
+                    with self.assertRaises(recovery_state.RecoveryStateError):
+                        owner._validate_registry(malformed)
+
+            completed = owner.complete_terminal_abandonment("normal-1")
+            self.assertEqual(
+                completed["lease"]["semantic_disposition"]["checkpoint_invalidation"],
+                "completed",
+            )
+            source = owner.read_private_source(preflight["source_state_id"])
+            self.assertEqual(
+                source["public_checkpoint"]["reasons"],
+                ["terminal-abandoned-legacy-normal-overlap"],
+            )
+            self.assertFalse(
+                any(event["event"] == "authorization-retired" for event in completed["history"])
+            )
+
+            owner.acknowledge_guardian_close("normal-1", self.guardian_close())
+            released = owner.release_contained_terminal("normal-1")
+            self.assertIsNone(released["lease"])
+            self.assertIsNone(released["outbox"])
+            archive = released["history"][-1]
+            self.assertEqual(archive["lease_kind"], "normal-contained")
+            self.assertEqual(archive["semantic_disposition"], "abandoned")
+            self.assertFalse(archive["terminal_success"])
+            self.assertIsNone(archive["handoff_digest"])
+            self.assertIsNone(archive["outbox_digest"])
+            self.assertEqual(
+                (workspace / "allowed" / "seed.txt").read_text(encoding="utf-8"),
+                "writer change\n",
+            )
+            self.assertEqual(
+                (workspace / "outside.txt").read_text(encoding="utf-8"),
+                "outside drift\n",
+            )
 
     def test_recovery_overlap_with_git_drift_rejects_without_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -3526,7 +3612,7 @@ class RegistryContractTests(unittest.TestCase):
                 "normal-1", self.zero_proof(), preflight["allowed_set_digest"]
             )
             legacy: dict[str, object] | None = None
-            for reader_floor in ("2.2.0", "2.2.1", "2.2.2", "2.2.3"):
+            for reader_floor in ("2.2.0", "2.2.1", "2.2.2", "2.2.3", "2.2.5"):
                 with self.subTest(reader_floor=reader_floor):
                     legacy = dict(current)
                     legacy["reader_floor"] = reader_floor
@@ -3545,7 +3631,7 @@ class RegistryContractTests(unittest.TestCase):
                     self.assertEqual(owner.path.read_bytes(), legacy_bytes)
 
             assert legacy is not None
-            legacy["reader_floor"] = "2.2.1"
+            legacy["reader_floor"] = "2.2.5"
             legacy["digest"] = recovery_state._digest(legacy)
             owner.path.write_text(
                 json.dumps(legacy, sort_keys=True) + "\n", encoding="utf-8", newline="\n"
@@ -3553,14 +3639,14 @@ class RegistryContractTests(unittest.TestCase):
             upgraded_owner = self.owner(workspace, root / "state")
 
             pending = upgraded_owner.record_terminal_abandonment("normal-1")
-            self.assertEqual(pending["reader_floor"], "2.2.5")
+            self.assertEqual(pending["reader_floor"], "2.3.2")
             upgraded_owner.complete_terminal_abandonment("normal-1")
             upgraded_owner.acknowledge_guardian_close("normal-1", self.guardian_close())
             released = upgraded_owner.release_contained_terminal("normal-1")
             replay = self.owner(workspace, root / "state").state()
 
             self.assertEqual(replay["digest"], released["digest"])
-            self.assertEqual(replay["reader_floor"], "2.2.5")
+            self.assertEqual(replay["reader_floor"], "2.3.2")
             self.assertEqual(
                 len(
                     [
@@ -3620,7 +3706,7 @@ class RegistryContractTests(unittest.TestCase):
             def assert_promoted_before_source(source: dict[str, object]):
                 self.assertEqual(
                     upgraded._read_registry_locked(rebarrier=False)["reader_floor"],
-                    "2.2.5",
+                    "2.3.2",
                 )
                 return commit_source(source)
 
@@ -3628,7 +3714,7 @@ class RegistryContractTests(unittest.TestCase):
                 upgraded, "_commit_source_locked", side_effect=assert_promoted_before_source
             ):
                 completed = upgraded.complete_terminal_abandonment("normal-1")
-            self.assertEqual(completed["reader_floor"], "2.2.5")
+            self.assertEqual(completed["reader_floor"], "2.3.2")
             self.assertEqual(
                 completed["lease"]["semantic_disposition"]["checkpoint_invalidation"],
                 "completed",

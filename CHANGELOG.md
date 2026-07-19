@@ -4,6 +4,19 @@ OpenBuild follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.3.2] - 2026-07-20
+
+### Fixed
+
+- Added owner-derived `terminal-abandonment-v3` for a legacy `normal-contained` lease whose only terminal revalidation reasons are the exact sorted pair `[outside-set-drift, preexisting-dirty-overlap]`. The transition invalidates the checkpoint with a distinct reason, closes the existing guardian/archive lifecycle, and releases the same registry lease without accepting the diff or creating a handoff, retry, escalation, grant, writer, or root-completion authority.
+- Preserved the recovery-target-only `terminal-abandonment-v2` contract and kept `normal-legacy`, `normal-fallback`, additional/unknown/control-plane reasons, live or ambiguous process state, quarantine, and binding drift fail-closed without mutation or force-unlock.
+- Raised the durable reader floor to 2.3.2 while retaining exact 2.2.0–2.2.3 and 2.2.5 generations as no-rewrite legacy reads. The first new durable registry/source write promotes the floor before source replacement, so an existing 2.3.1 lifecycle can migrate safely and an older reader fails closed after promotion.
+
+### Changed
+
+- Updated both README files, lifecycle/reference contracts, package checks, and release pins for 2.3.2.
+- Preserved the packaged defaults, `codex-exec-explicit-model`, project → user → packaged precedence, and the ban on unknown-model agent routes.
+
 ## [2.3.1] - 2026-07-19
 
 ### Fixed
