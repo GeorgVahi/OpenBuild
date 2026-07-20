@@ -171,6 +171,12 @@ class RecoveryControlPlanePackageTests(unittest.TestCase):
             ("recovery", "DEFAULT_MAX_RECORDS = 100_000", "DEFAULT_MAX_RECORDS = 0", "inventory limits"),
             (
                 "recovery",
+                '_require_hex(allowed_set_digest, "activation allowed-set digest")',
+                'allowed_set_digest = str(allowed_set_digest)',
+                "activation digest format boundary",
+            ),
+            (
+                "recovery",
                 "_validate_public_checkpoint",
                 "trust_public_checkpoint",
                 "public checkpoint schema",
@@ -872,6 +878,30 @@ class ImplementationDelegationContractTests(unittest.TestCase):
         self.assertTrue(any("failed exact writer recovery" in error for error in self.validate(tdd_workflow=tdd_workflow)))
 
     def test_automatic_orchestration_contract_cannot_regress_to_manual_control(self) -> None:
+        skill = self.skill_text.replace(
+            "external controller timeout of at least 120 seconds",
+            "the controller default timeout",
+        )
+        self.assertTrue(
+            any("dispatch controller timeout" in error for error in self.validate(skill_text=skill))
+        )
+
+        routing = self.model_routing.replace(
+            "external controller timeout of at least 120 seconds",
+            "the controller default timeout",
+        )
+        self.assertTrue(
+            any("dispatch controller timeout" in error for error in self.validate(model_routing=routing))
+        )
+
+        protocol = self.protocol_text.replace(
+            "external controller timeout of at least 120 seconds",
+            "the controller default timeout",
+        )
+        self.assertTrue(
+            any("dispatch controller timeout" in error for error in self.validate(protocol_text=protocol))
+        )
+
         skill = self.skill_text.replace("runner-owned `dispatch`", "manual `start`")
         self.assertTrue(
             any("runner-owned dispatch" in error for error in self.validate(skill_text=skill))
@@ -899,6 +929,14 @@ class ImplementationDelegationContractTests(unittest.TestCase):
         runner = self.runner_text.replace("dispatch-unactivated-receipt.json", "manual-receipt")
         self.assertTrue(
             any("durable unactivated receipt" in error for error in self.validate(runner_text=runner))
+        )
+
+        runner = self.runner_text.replace(
+            "def nonrecovery_allowed_set_digest",
+            "def unbound_nonrecovery_paths",
+        )
+        self.assertTrue(
+            any("ordinary activation allowed-set binding" in error for error in self.validate(runner_text=runner))
         )
 
         skill = self.skill_text.replace(
@@ -1026,19 +1064,19 @@ class ImplementationDelegationContractTests(unittest.TestCase):
 class ChangelogContractTests(unittest.TestCase):
     def test_release_manifest_version_and_latest_release_are_documented(self) -> None:
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-        self.assertEqual(validate_changelog_contract(changelog, "2.3.2"), [])
+        self.assertEqual(validate_changelog_contract(changelog, "2.3.3"), [])
         self.assertNotIn("## [2.1.1]", changelog)
 
-        mutated = changelog.replace("## [2.3.2]", "## [next]", 1)
-        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "2.3.2")))
+        mutated = changelog.replace("## [2.3.3]", "## [next]", 1)
+        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "2.3.3")))
 
     def test_released_version_is_pinned_in_both_install_channels(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         readme_ru = (ROOT / "README.ru.md").read_text(encoding="utf-8")
-        self.assertEqual(validate_release_docs_contract(readme, readme_ru, "2.3.2"), [])
+        self.assertEqual(validate_release_docs_contract(readme, readme_ru, "2.3.3"), [])
 
-        mutated = readme.replace("--ref v2.3.2", "--ref main")
-        self.assertTrue(any("README.md" in error for error in validate_release_docs_contract(mutated, readme_ru, "2.3.2")))
+        mutated = readme.replace("--ref v2.3.3", "--ref main")
+        self.assertTrue(any("README.md" in error for error in validate_release_docs_contract(mutated, readme_ru, "2.3.3")))
 
 
 class DecisionAuthorityTraceTests(unittest.TestCase):

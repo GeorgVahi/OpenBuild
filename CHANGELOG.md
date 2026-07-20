@@ -4,6 +4,19 @@ OpenBuild follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.3.3] - 2026-07-20
+
+### Fixed
+
+- Required every exact-runner `dispatch` invocation to use an explicit external controller timeout of at least 120 seconds (`120000` milliseconds for millisecond-based tools), covering authentication preflight, containment startup, creation-bound Codex readiness, and publication of the atomic activated receipt.
+- Kept the controller handshake budget separate from the immutable 900-second post-activation observation budget. A controller timeout before the activated receipt remains a fail-closed transport failure and creates no activation proof, handoff, retry, escalation, or replacement-writer authority inside that lifecycle.
+- Fixed `normal-legacy` activation after recovery checkpoint capture is unavailable, including `checkpoint byte limit exceeded`. Ordinary implementation reservations now carry a domain-separated lowercase SHA-256 of the exact requested allowed set instead of an empty `activation_allowed_set_digest`; the activation owner also rejects empty or malformed digest arguments before any state transition. The binding permits activation without claiming checkpoint recovery capability.
+
+### Changed
+
+- Added runner and package-contract regressions for checkpoint-limit activation and the controller budget, and synchronized the Build skill, model-routing and implementation-delegation contracts, both README files, and release pins for 2.3.3.
+- Preserved registry schema/reader floor 2.3.2, the packaged defaults, `codex-exec-explicit-model`, project → user → packaged precedence, the ban on unknown-model agent routes, single-writer ownership, and all terminal-reconciliation rules.
+
 ## [2.3.2] - 2026-07-20
 
 ### Fixed

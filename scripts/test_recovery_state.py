@@ -1576,6 +1576,31 @@ class RegistryContractTests(unittest.TestCase):
             owner.retire_for_downgrade("2.1.5")
             self.assertTrue(owner.assert_reader_compatible("2.1.5")["retired"])
 
+    def test_legacy_activation_rejects_an_empty_allowed_set_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            owner = self.owner(self.make_git_workspace(root), root / "state")
+            owner.initialize()
+            owner.reserve_normal(
+                "legacy-empty",
+                allowed_set_digest="",
+                recovery_capable=False,
+            )
+            owner.bind_legacy_process_unactivated(
+                "legacy-empty",
+                process_receipt=self.process_receipt(),
+            )
+
+            with self.assertRaisesRegex(
+                recovery_state.RecoveryStateError,
+                "activation allowed-set digest must be a 64-character lowercase hex value",
+            ):
+                owner.commit_activation("legacy-empty", "")
+
+            lease = owner.state()["lease"]
+            self.assertEqual(lease["state"], "ordinary-process-bound-unactivated")
+            self.assertNotIn("activation_allowed_set_digest", lease)
+
     def test_checkpoint_captures_git_and_exposes_only_keyed_opaque_records(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

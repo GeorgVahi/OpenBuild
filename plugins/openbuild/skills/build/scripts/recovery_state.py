@@ -4157,6 +4157,7 @@ class RecoveryRegistry:
             return self._commit_registry_locked(state, resolve_visible_commit=True)
 
     def commit_activation(self, lease_id: str, allowed_set_digest: str) -> dict[str, Any]:
+        _require_hex(allowed_set_digest, "activation allowed-set digest")
         with self._lock():
             state = self._read_registry_locked(rebarrier=True)
             lease = state.get("lease")

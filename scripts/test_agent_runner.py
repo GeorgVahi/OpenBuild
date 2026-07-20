@@ -4006,6 +4006,101 @@ class CodexInvocationTests(unittest.TestCase):
             self.assertFalse(state["lease"]["recovery_capable"])
             self.assertEqual(state["lease"]["state"], "ordinary-process-bound-unactivated")
 
+    def test_checkpoint_byte_limit_uses_a_valid_legacy_activation_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "tests@example.invalid"],
+                cwd=repo,
+                check=True,
+            )
+            subprocess.run(["git", "config", "user.name", "Tests"], cwd=repo, check=True)
+            allowed = repo / "allowed.txt"
+            allowed.write_text("larger than one byte\n", encoding="utf-8", newline="\n")
+            subprocess.run(["git", "add", "allowed.txt"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "--quiet", "-m", "baseline"], cwd=repo, check=True)
+
+            prompt = self.private_prompt(root)
+            run_dir = root / "run"
+            owner = agent_runner.RecoveryRegistry(
+                repo,
+                state_root=root / "state",
+                max_bytes=1,
+            )
+            profile = self.profile()._replace(
+                name="openbuild_implementation_fast",
+                sandbox="workspace-write",
+            )
+            process = mock.Mock(pid=321)
+            process.poll.return_value = None
+            running = {
+                "status": "running",
+                "activated": False,
+                "codex_pid": 456,
+                "codex_process_identity": "codex-created-1",
+            }
+
+            def spawn_worker(*_args: object, **_kwargs: object) -> object:
+                agent_runner.atomic_write_json(
+                    run_dir / "codex.json",
+                    {"pid": 456, "identity": "codex-created-1", "process_group_id": 456},
+                )
+                return process
+
+            args = Namespace(
+                repo=str(repo),
+                prompt_file=str(prompt),
+                agent="openbuild_implementation_fast",
+                lease_id="lease-1",
+                allowed_file=["allowed.txt"],
+                specification_revision="R-029",
+                recovery_target_milestone="M2c-recovery",
+                run_dir=str(run_dir),
+                task_name="M2c-source",
+                activation_timeout=300.0,
+                codex_bin="codex",
+            )
+            with mock.patch.object(agent_runner, "validate_subscription_configuration"), mock.patch.object(
+                agent_runner, "load_agent_profile", return_value=profile
+            ), mock.patch.object(agent_runner, "resolve_codex_binary", return_value="codex"), mock.patch.object(
+                agent_runner, "require_chatgpt_login", return_value="chatgpt"
+            ), mock.patch.object(agent_runner, "is_git_repository", return_value=True), mock.patch.object(
+                agent_runner, "recovery_registry_for_agent", return_value=owner
+            ), mock.patch.object(
+                agent_runner, "_spawn_worker_process", side_effect=spawn_worker
+            ), mock.patch.object(
+                agent_runner, "process_identity_from_popen", return_value="worker-created-1"
+            ), mock.patch.object(
+                agent_runner, "public_receipt", return_value=running
+            ), redirect_stdout(io.StringIO()):
+                self.assertEqual(agent_runner.start_run(args), 0)
+
+            request = agent_runner.read_json(run_dir / "request.json")
+            self.assertEqual(request["recovery_capability_unavailable"], "checkpoint byte limit exceeded")
+            self.assertRegex(request["lifecycle_allowed_set_digest"], r"^[0-9a-f]{64}$")
+            self.assertEqual(
+                owner.state()["lease"]["allowed_set_digest"],
+                request["lifecycle_allowed_set_digest"],
+            )
+
+            activated = running | {"activated": True}
+            with mock.patch.object(
+                agent_runner, "recovery_registry_for_agent", return_value=owner
+            ), mock.patch.object(
+                agent_runner, "public_receipt", side_effect=[running, activated]
+            ), redirect_stdout(io.StringIO()):
+                self.assertEqual(agent_runner.activate_run(Namespace(run_dir=str(run_dir))), 0)
+
+            lease = owner.state()["lease"]
+            self.assertEqual(lease["state"], "legacy-running")
+            self.assertEqual(
+                lease["activation_allowed_set_digest"],
+                request["lifecycle_allowed_set_digest"],
+            )
+
     def test_ambiguous_fallback_faults_are_quarantined_before_release(self) -> None:
         for fault_stage in (
             "before-popen",

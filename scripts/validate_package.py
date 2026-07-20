@@ -3199,6 +3199,21 @@ def validate_implementation_delegation_contract(
             errors.append(f"tdd-workflow.md: failed exact writer recovery contract missing {token}")
 
     automatic_contracts = [
+        (
+            skill_text,
+            "external controller timeout of at least 120 seconds",
+            "SKILL.md automatic orchestration: missing dispatch controller timeout",
+        ),
+        (
+            model_routing,
+            "external controller timeout of at least 120 seconds",
+            "model-routing.md automatic orchestration: missing dispatch controller timeout",
+        ),
+        (
+            protocol_text,
+            "external controller timeout of at least 120 seconds",
+            "implementation-delegation.md automatic orchestration: missing dispatch controller timeout",
+        ),
         (skill_text, "runner-owned `dispatch`", "SKILL.md automatic orchestration: missing runner-owned dispatch"),
         (
             skill_text,
@@ -3357,8 +3372,8 @@ def validate_implementation_delegation_contract(
         ),
         (
             readme,
-            "Version 2.3.2 closes the remaining legacy-normal recovery deadlock",
-            "README.md legacy normal overlap: missing operator outcome",
+            "Version 2.3.3 prevents the host controller's short default timeout",
+            "README.md dispatch controller timeout: missing operator outcome",
         ),
         (
             readme_ru,
@@ -3372,8 +3387,8 @@ def validate_implementation_delegation_contract(
         ),
         (
             readme_ru,
-            "Версия 2.3.2 закрывает оставшееся recovery-зависание legacy normal lease",
-            "README.ru.md legacy normal overlap: missing operator outcome",
+            "Версия 2.3.3 не позволяет короткому default timeout внешнего controller",
+            "README.ru.md dispatch controller timeout: missing operator outcome",
         ),
     ]
     for text, token, error in automatic_contracts:
@@ -3390,6 +3405,7 @@ def validate_implementation_delegation_contract(
 
     for token, label in [
         ("OBSERVATION_BUDGET_SECONDS = 900", "immutable observation budget"),
+        ("def nonrecovery_allowed_set_digest", "ordinary activation allowed-set binding"),
         ("def activation_window", "activation deadline evidence"),
         ("def dispatch_run(args", "runner-owned dispatch"),
         ("dispatch-unactivated-receipt.json", "durable unactivated receipt"),
@@ -4487,6 +4503,10 @@ def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> lis
         ("quarantine_fallback_launch", "ambiguous fallback quarantine"),
         ("bind_fallback_process_unactivated", "ordinary fallback process boundary"),
         ("release_legacy_terminal", "legacy terminal release"),
+        (
+            '_require_hex(allowed_set_digest, "activation allowed-set digest")',
+            "activation digest format boundary",
+        ),
         ("record_terminal_evidence", "contained terminalization"),
         ("prove_contained_tree_empty", "contained zero proof"),
         ("reject_semantic_handoff", "semantic handoff rejection"),

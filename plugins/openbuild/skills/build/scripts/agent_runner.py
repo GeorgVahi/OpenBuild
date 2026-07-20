@@ -93,6 +93,7 @@ NON_ERROR_JSONL_EVENT_TYPES = {
 }
 SCHEMA_VERSION = 1
 OBSERVATION_BUDGET_SECONDS = 900
+NONRECOVERY_ALLOWED_SET_DOMAIN = b"openbuild-nonrecovery-allowed-set-v1\0"
 RUN_HANDLE = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{10}$")
 PACKAGED_PROFILE_DIR = Path(__file__).resolve().parents[1] / "profiles"
 SEARCH_DEVELOPER_INSTRUCTIONS = (
@@ -203,6 +204,15 @@ def _canonical_json_bytes(value: Mapping[str, Any]) -> bytes:
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
+
+
+def nonrecovery_allowed_set_digest(allowed_files: list[str]) -> str:
+    """Bind an ordinary implementation lease to its requested path set."""
+    payload = {
+        "schema": "openbuild.nonrecovery-allowed-set.v1",
+        "paths": sorted(set(allowed_files)),
+    }
+    return sha256_bytes(NONRECOVERY_ALLOWED_SET_DOMAIN + _canonical_json_bytes(payload))
 
 
 def discovery_profile_with_fingerprint(
@@ -5329,7 +5339,9 @@ def start_run(args: argparse.Namespace) -> int:
         "recovery_preflight": None,
         "recovery_parent_checkpoint": None,
         "recovery_capability_unavailable": None,
-        "lifecycle_allowed_set_digest": "",
+        "lifecycle_allowed_set_digest": (
+            nonrecovery_allowed_set_digest(allowed_files) if registry is not None else ""
+        ),
         "recovery_target": False,
         "containment_plan": None,
     }
@@ -5422,7 +5434,7 @@ def start_run(args: argparse.Namespace) -> int:
         try:
             registry.reserve_normal(
                 registry_lease_id,
-                allowed_set_digest=(preflight or {}).get("allowed_set_digest", ""),
+                allowed_set_digest=request["lifecycle_allowed_set_digest"],
                 recovery_capable=preflight is not None,
                 source_state_id=(preflight or {}).get("source_state_id"),
                 run_id=run_dir.name,
