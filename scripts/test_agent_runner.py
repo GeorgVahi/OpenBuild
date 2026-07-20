@@ -3464,6 +3464,26 @@ class CodexInvocationTests(unittest.TestCase):
             self.assertEqual(allowed.read_text(encoding="utf-8"), "writer change\n")
             self.assertEqual(outside.read_text(encoding="utf-8"), "outside drift\n")
 
+    def test_root_completion_source_binding_preserves_descriptive_task_names(self) -> None:
+        for lease_kind in ("normal-legacy", "normal-contained", "recovery-target"):
+            with self.subTest(lease_kind=lease_kind):
+                binding = agent_runner.root_completion_source_binding(
+                    specification_revision="R-029",
+                    milestone="M2 source with spaces",
+                    allowed_set_digest="a" * 64,
+                    lease_kind=lease_kind,
+                    run_id="run-1",
+                )
+                self.assertEqual(binding["milestone"], "M2 source with spaces")
+                self.assertEqual(binding["lease_kind"], lease_kind)
+        audit = agent_runner.root_completion_authorization_record(
+            specification_revision="R-029",
+            milestone="M2 source with spaces",
+            allowed_set_digest="a" * 64,
+            diff_attribution_digest="d" * 64,
+        )
+        self.assertEqual(audit["milestone"], "M2 source with spaces")
+
     def test_ac09_ac13_root_completion_audit_is_durable_before_authorization(self) -> None:
         fault_stages = (
             "before-write",
@@ -3500,7 +3520,12 @@ class CodexInvocationTests(unittest.TestCase):
                             "handoff_digest": None,
                             "outbox_digest": None,
                             "allowed_set_digest": "a" * 64,
-                        }
+                        },
+                        {
+                            "event": "legacy-terminal-released",
+                            "lease_id": "lease-root-audit",
+                            "success": False,
+                        },
                     ],
                 }
                 arguments = Namespace(
@@ -4039,8 +4064,12 @@ class CodexInvocationTests(unittest.TestCase):
             running = {
                 "status": "running",
                 "activated": False,
+                "agent_name": "openbuild_implementation_fast",
+                "lease_id": "lease-1",
+                "task_name": "m2c_r029_source",
                 "codex_pid": 456,
                 "codex_process_identity": "codex-created-1",
+                "process_tree_stopped": False,
             }
 
             def spawn_worker(*_args: object, **_kwargs: object) -> object:
@@ -4059,7 +4088,7 @@ class CodexInvocationTests(unittest.TestCase):
                 specification_revision="R-029",
                 recovery_target_milestone="M2c-recovery",
                 run_dir=str(run_dir),
-                task_name="M2c-source",
+                task_name="m2c_r029_source",
                 activation_timeout=300.0,
                 codex_bin="codex",
             )
@@ -4086,7 +4115,14 @@ class CodexInvocationTests(unittest.TestCase):
                 request["lifecycle_allowed_set_digest"],
             )
 
-            activated = running | {"activated": True}
+            activated = running | {
+                "activated": True,
+                "root_completion_source_binding_digest": agent_runner.sha256_bytes(
+                    agent_runner._canonical_json_bytes(
+                        request["root_completion_source_binding"]
+                    )
+                ),
+            }
             with mock.patch.object(
                 agent_runner, "recovery_registry_for_agent", return_value=owner
             ), mock.patch.object(
@@ -4100,6 +4136,217 @@ class CodexInvocationTests(unittest.TestCase):
                 lease["activation_allowed_set_digest"],
                 request["lifecycle_allowed_set_digest"],
             )
+
+            allowed.write_text("partial writer change\n", encoding="utf-8", newline="\n")
+            terminal = activated | {
+                "status": "failed",
+                "process_tree_stopped": True,
+            }
+            with mock.patch.object(
+                agent_runner, "recovery_registry_for_agent", return_value=owner
+            ):
+                agent_runner.reconcile_implementation_registry(run_dir, terminal)
+
+            released = owner.state()
+            self.assertIsNone(released["lease"])
+            self.assertEqual(released["history"][-1]["event"], "legacy-terminal-released")
+            self.assertFalse(released["history"][-1]["success"])
+
+            reused_lease_registry = mock.Mock()
+            reused_lease_state = json.loads(json.dumps(released))
+            reused_lease_state["history"].append(
+                {
+                    "event": "legacy-terminal-released",
+                    "lease_id": "lease-1",
+                    "success": True,
+                }
+            )
+            reused_lease_registry.state.return_value = reused_lease_state
+            with mock.patch.object(
+                agent_runner,
+                "recovery_registry_for_agent",
+                return_value=reused_lease_registry,
+            ), self.assertRaisesRegex(
+                agent_runner.RunnerError, "one exact legacy failure release"
+            ):
+                agent_runner.record_root_completion_authorization_run(
+                    Namespace(
+                        run_dir=str(run_dir),
+                        specification_revision="R-029",
+                        milestone="m2c_r029_source",
+                        allowed_set_digest=request["lifecycle_allowed_set_digest"],
+                        diff_attribution_digest="d" * 64,
+                    )
+                )
+
+            prior_unactivated_registry = mock.Mock()
+            prior_unactivated_state = json.loads(json.dumps(released))
+            prior_unactivated_state["history"].insert(
+                -1,
+                {
+                    "event": "unactivated-reservation-released",
+                    "lease_id": "lease-1",
+                },
+            )
+            prior_unactivated_registry.state.return_value = prior_unactivated_state
+            with mock.patch.object(
+                agent_runner,
+                "recovery_registry_for_agent",
+                return_value=prior_unactivated_registry,
+            ), self.assertRaisesRegex(
+                agent_runner.RunnerError, "one exact legacy failure release"
+            ):
+                agent_runner.record_root_completion_authorization_run(
+                    Namespace(
+                        run_dir=str(run_dir),
+                        specification_revision="R-029",
+                        milestone="m2c_r029_source",
+                        allowed_set_digest=request["lifecycle_allowed_set_digest"],
+                        diff_attribution_digest="d" * 64,
+                    )
+                )
+
+            audit_output = io.StringIO()
+            with mock.patch.object(
+                agent_runner, "recovery_registry_for_agent", return_value=owner
+            ), mock.patch.object(
+                agent_runner, "public_receipt", return_value=terminal
+            ), redirect_stdout(audit_output):
+                self.assertEqual(
+                    agent_runner.record_root_completion_authorization_run(
+                        Namespace(
+                            run_dir=str(run_dir),
+                            specification_revision="R-029",
+                            milestone="m2c_r029_source",
+                            allowed_set_digest=request["lifecycle_allowed_set_digest"],
+                            diff_attribution_digest="d" * 64,
+                        )
+                    ),
+                    0,
+                )
+            self.assertEqual(
+                json.loads(audit_output.getvalue())["event"],
+                "root-completion-authorized",
+            )
+
+            with mock.patch.object(
+                agent_runner, "recovery_registry_for_agent", return_value=owner
+            ), self.assertRaisesRegex(
+                agent_runner.RunnerError, "legacy source binding drifted"
+            ):
+                agent_runner.record_root_completion_authorization_run(
+                    Namespace(
+                        run_dir=str(run_dir),
+                        specification_revision="R-030",
+                        milestone="m2c_r029_source",
+                        allowed_set_digest=request["lifecycle_allowed_set_digest"],
+                        diff_attribution_digest="d" * 64,
+                    )
+                )
+
+            legacy_request = dict(request)
+            legacy_request.pop("root_completion_source_binding")
+            agent_runner.atomic_write_json(run_dir / "request.json", legacy_request)
+            legacy_activation = agent_runner.read_json(run_dir / "activate.json")
+            legacy_activation.pop("root_completion_source_binding_digest")
+            agent_runner.atomic_write_json(run_dir / "activate.json", legacy_activation)
+            legacy_activated_receipt = agent_runner.read_json(
+                run_dir / "dispatch-activated-receipt.json"
+            )
+            legacy_activated_receipt.pop("root_completion_source_binding_digest")
+            agent_runner.atomic_write_json(
+                run_dir / "dispatch-activated-receipt.json",
+                legacy_activated_receipt,
+            )
+            legacy_terminal = dict(terminal)
+            legacy_terminal.pop("root_completion_source_binding_digest")
+            with mock.patch.object(
+                agent_runner, "recovery_registry_for_agent", return_value=owner
+            ), mock.patch.object(
+                agent_runner, "public_receipt", return_value=legacy_terminal
+            ), redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    agent_runner.record_root_completion_authorization_run(
+                        Namespace(
+                            run_dir=str(run_dir),
+                            specification_revision="R-029",
+                            milestone="m2c_r029_source",
+                            allowed_set_digest=request["lifecycle_allowed_set_digest"],
+                            diff_attribution_digest="d" * 64,
+                        )
+                    ),
+                    0,
+                )
+
+            null_binding_request = dict(request)
+            null_binding_request["root_completion_source_binding"] = None
+            agent_runner.atomic_write_json(run_dir / "request.json", null_binding_request)
+            with mock.patch.object(
+                agent_runner, "recovery_registry_for_agent", return_value=owner
+            ), self.assertRaisesRegex(
+                agent_runner.RunnerError, "source binding is explicitly unavailable"
+            ):
+                agent_runner.record_root_completion_authorization_run(
+                    Namespace(
+                        run_dir=str(run_dir),
+                        specification_revision="R-029",
+                        milestone="m2c_r029_source",
+                        allowed_set_digest=request["lifecycle_allowed_set_digest"],
+                        diff_attribution_digest="d" * 64,
+                    )
+                )
+            agent_runner.atomic_write_json(run_dir / "request.json", legacy_request)
+
+            uppercase_task_request = dict(legacy_request)
+            uppercase_task_request["task_name"] = "m2c_R029_source"
+            agent_runner.atomic_write_json(run_dir / "request.json", uppercase_task_request)
+            with mock.patch.object(
+                agent_runner, "recovery_registry_for_agent", return_value=owner
+            ), self.assertRaisesRegex(
+                agent_runner.RunnerError, "legacy revision binding is unavailable"
+            ):
+                agent_runner.record_root_completion_authorization_run(
+                    Namespace(
+                        run_dir=str(run_dir),
+                        specification_revision="R-029",
+                        milestone="m2c_R029_source",
+                        allowed_set_digest=request["lifecycle_allowed_set_digest"],
+                        diff_attribution_digest="d" * 64,
+                    )
+                )
+            agent_runner.atomic_write_json(run_dir / "request.json", legacy_request)
+
+            for drifted_revision in ("R-030", "R.029", "R_029", "r-029"):
+                with self.subTest(drifted_revision=drifted_revision), mock.patch.object(
+                    agent_runner, "recovery_registry_for_agent", return_value=owner
+                ), self.assertRaisesRegex(
+                    agent_runner.RunnerError, "legacy revision binding is unavailable"
+                ):
+                    agent_runner.record_root_completion_authorization_run(
+                        Namespace(
+                            run_dir=str(run_dir),
+                            specification_revision=drifted_revision,
+                            milestone="m2c_r029_source",
+                            allowed_set_digest=request["lifecycle_allowed_set_digest"],
+                            diff_attribution_digest="d" * 64,
+                        )
+                    )
+
+            (run_dir / "activate.json").unlink()
+            with mock.patch.object(
+                agent_runner, "recovery_registry_for_agent", return_value=owner
+            ), self.assertRaisesRegex(
+                agent_runner.RunnerError, "legacy activation evidence"
+            ):
+                agent_runner.record_root_completion_authorization_run(
+                    Namespace(
+                        run_dir=str(run_dir),
+                        specification_revision="R-029",
+                        milestone="m2c_r029_source",
+                        allowed_set_digest=request["lifecycle_allowed_set_digest"],
+                        diff_attribution_digest="d" * 64,
+                    )
+                )
 
     def test_ambiguous_fallback_faults_are_quarantined_before_release(self) -> None:
         for fault_stage in (

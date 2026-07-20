@@ -94,6 +94,7 @@ NON_ERROR_JSONL_EVENT_TYPES = {
 SCHEMA_VERSION = 1
 OBSERVATION_BUDGET_SECONDS = 900
 NONRECOVERY_ALLOWED_SET_DOMAIN = b"openbuild-nonrecovery-allowed-set-v1\0"
+ROOT_COMPLETION_SOURCE_SCHEMA = "openbuild.root-completion-source.v1"
 RUN_HANDLE = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{10}$")
 PACKAGED_PROFILE_DIR = Path(__file__).resolve().parents[1] / "profiles"
 SEARCH_DEVELOPER_INSTRUCTIONS = (
@@ -3935,12 +3936,15 @@ def root_completion_authorization_record(
     diff_attribution_digest: str,
 ) -> dict[str, Any]:
     """Build the privacy-safe audit record required before root-only completion."""
-    for value, label in (
-        (specification_revision, "specification revision"),
-        (milestone, "milestone"),
+    if not re.fullmatch(r"[A-Za-z0-9_.:-]+", specification_revision):
+        raise RunnerError("root completion specification revision is invalid")
+    if (
+        not isinstance(milestone, str)
+        or not milestone.strip()
+        or len(milestone) > 256
+        or any(ord(character) < 32 or ord(character) == 127 for character in milestone)
     ):
-        if not re.fullmatch(r"[A-Za-z0-9_.:-]+", value):
-            raise RunnerError(f"root completion {label} is invalid")
+        raise RunnerError("root completion milestone is invalid")
     for value, label in (
         (allowed_set_digest, "allowed-set digest"),
         (diff_attribution_digest, "diff-attribution digest"),
@@ -3956,6 +3960,35 @@ def root_completion_authorization_record(
         "diff_attribution_digest": diff_attribution_digest,
         "automatic": True,
         "writer_action": "none",
+    }
+
+
+def root_completion_source_binding(
+    *,
+    specification_revision: str,
+    milestone: str,
+    allowed_set_digest: str,
+    lease_kind: str,
+    run_id: str,
+) -> dict[str, Any]:
+    """Bind root-completion inputs before an implementation process can edit."""
+    if lease_kind not in {"normal-legacy", "normal-contained", "recovery-target"}:
+        raise RunnerError("root completion source lease kind is invalid")
+    if not isinstance(specification_revision, str) or not specification_revision.strip():
+        raise RunnerError("root completion source specification revision is invalid")
+    if not isinstance(milestone, str) or not milestone.strip():
+        raise RunnerError("root completion source milestone is invalid")
+    if not re.fullmatch(r"[0-9a-f]{64}", allowed_set_digest):
+        raise RunnerError("root completion source allowed-set digest must be lowercase SHA-256")
+    if not isinstance(run_id, str) or not run_id or Path(run_id).name != run_id:
+        raise RunnerError("root completion source run ID is invalid")
+    return {
+        "schema": ROOT_COMPLETION_SOURCE_SCHEMA,
+        "lease_kind": lease_kind,
+        "specification_revision": specification_revision,
+        "milestone": milestone,
+        "allowed_set_digest": allowed_set_digest,
+        "run_id": run_id,
     }
 
 
@@ -4695,6 +4728,91 @@ def finalize_post_commit_root_completion_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _validate_legacy_root_completion_release(
+    *,
+    run_dir: Path,
+    request: Mapping[str, Any],
+    release: Mapping[str, Any],
+    specification_revision: str,
+    milestone: str,
+    allowed_set_digest: str,
+) -> None:
+    """Accept only an activated, failed normal-legacy run with no handoff path."""
+    if (
+        release.get("success") is not False
+        or request.get("recovery_target") is not False
+        or request.get("recovery_preflight") is not None
+        or request.get("lifecycle_allowed_set_digest") != allowed_set_digest
+        or request.get("task_name") != milestone
+        or (run_dir / "implementation-handoffs.jsonl").exists()
+        or (run_dir / "terminal-abandonment.json").exists()
+    ):
+        raise RunnerError("root completion audit legacy release binding drifted")
+    if not re.fullmatch(r"[0-9a-f]{64}", allowed_set_digest):
+        raise RunnerError("root completion audit legacy allowed scope is malformed")
+
+    source_binding_present = "root_completion_source_binding" in request
+    source_binding = request.get("root_completion_source_binding")
+    source_binding_digest = None
+    if not source_binding_present:
+        # Version 2.3.3 first emitted the non-empty normal-legacy digest but did
+        # not persist the structured revision binding.  Keep this migration
+        # deliberately limited to its exact checkpoint-limit downgrade shape
+        # and a revision token already bound into the immutable task label.
+        revision_match = re.fullmatch(r"R-([0-9]+)", specification_revision)
+        revision_token = f"r{revision_match.group(1)}" if revision_match else None
+        task_tokens = re.split(r"[^A-Za-z0-9]+", milestone)
+        if (
+            request.get("recovery_capability_unavailable") != "checkpoint byte limit exceeded"
+            or revision_token is None
+            or revision_token not in task_tokens
+        ):
+            raise RunnerError("root completion audit legacy revision binding is unavailable")
+    elif source_binding is None:
+        raise RunnerError("root completion audit legacy source binding is explicitly unavailable")
+    else:
+        expected_source = root_completion_source_binding(
+            specification_revision=specification_revision,
+            milestone=milestone,
+            allowed_set_digest=allowed_set_digest,
+            lease_kind="normal-legacy",
+            run_id=run_dir.name,
+        )
+        if source_binding != expected_source:
+            raise RunnerError("root completion audit legacy source binding drifted")
+        source_binding_digest = sha256_bytes(_canonical_json_bytes(expected_source))
+
+    activation_path = run_dir / "activate.json"
+    activated_receipt_path = run_dir / "dispatch-activated-receipt.json"
+    if not activation_path.is_file() or not activated_receipt_path.is_file():
+        raise RunnerError("root completion audit requires legacy activation evidence")
+    _require_private_run_path_identity(run_dir, run_dir.name)
+    activation = read_json(activation_path)
+    activated_receipt = read_json(activated_receipt_path)
+    terminal_receipt = public_receipt(run_dir)
+    codex_pid = activation.get("codex_pid")
+    codex_identity = activation.get("codex_process_identity")
+    if not isinstance(codex_pid, int) or codex_pid <= 0 or not isinstance(codex_identity, str):
+        raise RunnerError("root completion audit legacy activation identity is malformed")
+    for receipt, expected_status, stopped in (
+        (activated_receipt, "running", False),
+        (terminal_receipt, "failed", True),
+    ):
+        if (
+            receipt.get("status") != expected_status
+            or receipt.get("activated") is not True
+            or receipt.get("lease_id") != request.get("lease_id")
+            or receipt.get("task_name") != milestone
+            or receipt.get("agent_name") != request.get("profile", {}).get("name")
+            or receipt.get("codex_pid") != codex_pid
+            or receipt.get("codex_process_identity") != codex_identity
+            or receipt.get("process_tree_stopped") is not stopped
+            or receipt.get("root_completion_source_binding_digest")
+            != source_binding_digest
+        ):
+            raise RunnerError("root completion audit legacy process evidence drifted")
+
+
 def record_root_completion_authorization_run(args: argparse.Namespace) -> int:
     """Persist the privacy-safe T-004 audit only after exact terminal vacancy."""
     run_dir = resolve_run_reference(args.run_dir)
@@ -4712,25 +4830,58 @@ def record_root_completion_authorization_run(args: argparse.Namespace) -> int:
         or state.get("quarantine") is not None
     ):
         raise RunnerError("root completion audit requires exact registry vacancy")
-    releases = [
+    lease_history = [
         event
         for event in state.get("history", [])
+        if event.get("lease_id") == lease_id
+    ]
+    contained_history = [
+        event
+        for event in lease_history
         if event.get("event") == "contained-terminal-released"
-        and event.get("lease_id") == lease_id
-        and event.get("terminal_success") is False
+    ]
+    contained_releases = [
+        event
+        for event in contained_history
+        if event.get("terminal_success") is False
         and event.get("handoff_digest") is None
         and event.get("outbox_digest") is None
     ]
-    if len(releases) != 1:
-        raise RunnerError("root completion audit requires one no-handoff terminal release")
-    release = releases[0]
-    if release.get("allowed_set_digest") != args.allowed_set_digest:
-        raise RunnerError("root completion audit allowed scope drifted")
+    legacy_history = [
+        event
+        for event in lease_history
+        if event.get("event") == "legacy-terminal-released"
+    ]
     if request.get("task_name") != args.milestone:
         raise RunnerError("root completion audit milestone drifted")
-    preflight = request.get("recovery_preflight") or {}
-    if preflight.get("specification_revision") != args.specification_revision:
-        raise RunnerError("root completion audit specification revision drifted")
+    legacy_mode = (
+        request.get("recovery_preflight") is None
+        and request.get("recovery_target") is False
+    )
+    if not legacy_mode:
+        if len(contained_releases) != 1:
+            raise RunnerError("root completion audit requires one contained no-handoff terminal release")
+        release = contained_releases[0]
+        if release.get("allowed_set_digest") != args.allowed_set_digest:
+            raise RunnerError("root completion audit allowed scope drifted")
+        preflight = request.get("recovery_preflight") or {}
+        if preflight.get("specification_revision") != args.specification_revision:
+            raise RunnerError("root completion audit specification revision drifted")
+    else:
+        if (
+            len(legacy_history) != 1
+            or legacy_history[0].get("success") is not False
+            or len(lease_history) != 1
+        ):
+            raise RunnerError("root completion audit requires one exact legacy failure release")
+        _validate_legacy_root_completion_release(
+            run_dir=run_dir,
+            request=request,
+            release=legacy_history[0],
+            specification_revision=args.specification_revision,
+            milestone=args.milestone,
+            allowed_set_digest=args.allowed_set_digest,
+        )
     record = root_completion_authorization_record(
         specification_revision=args.specification_revision,
         milestone=args.milestone,
@@ -5060,6 +5211,9 @@ def public_receipt(run_dir: Path) -> dict[str, Any]:
         "activated_at": activation.get("activated_at"),
         "observation_started_at": activation.get("observation_started_at"),
         "observation_deadline_at": activation.get("observation_deadline_at"),
+        "root_completion_source_binding_digest": activation.get(
+            "root_completion_source_binding_digest"
+        ),
         "configured_model": profile["model"],
         "model_reasoning_effort": profile["reasoning_effort"],
         "observed_agent": profile["name"] if status == "completed" else None,
@@ -5342,6 +5496,7 @@ def start_run(args: argparse.Namespace) -> int:
         "lifecycle_allowed_set_digest": (
             nonrecovery_allowed_set_digest(allowed_files) if registry is not None else ""
         ),
+        "root_completion_source_binding": None,
         "recovery_target": False,
         "containment_plan": None,
     }
@@ -5418,6 +5573,27 @@ def start_run(args: argparse.Namespace) -> int:
             "fallback_token": secrets.token_hex(32),
             "recovery_target": False,
         }
+    if (
+        registry is not None
+        and allowed_files
+        and specification_revision
+        and recovery_target_milestone
+    ):
+        request["root_completion_source_binding"] = root_completion_source_binding(
+            specification_revision=specification_revision,
+            milestone=request["task_name"],
+            allowed_set_digest=request["lifecycle_allowed_set_digest"],
+            lease_kind=(
+                "recovery-target"
+                if recovery_target_lease is not None
+                else (
+                    "normal-contained"
+                    if request.get("recovery_preflight") is not None
+                    else "normal-legacy"
+                )
+            ),
+            run_id=run_dir.name,
+        )
     try:
         durable_write_private_bytes(prompt_snapshot, source_prompt)
         durable_write_private_json(run_dir / "request.json", request)
@@ -6122,8 +6298,14 @@ def activate_run(args: argparse.Namespace) -> int:
             raise RunnerError("existing activation does not match the live creation-bound Codex process")
     else:
         request_path = run_dir / "request.json"
+        root_completion_binding_digest = None
         if request_path.is_file():
             request = read_json(request_path)
+            source_binding = request.get("root_completion_source_binding")
+            if isinstance(source_binding, Mapping):
+                root_completion_binding_digest = sha256_bytes(
+                    _canonical_json_bytes(source_binding)
+                )
             registry = recovery_registry_for_agent(request["profile"]["name"], Path(request["repo"]))
             lease_id = request.get("lease_id")
             if registry is not None and isinstance(lease_id, str):
@@ -6150,6 +6332,7 @@ def activate_run(args: argparse.Namespace) -> int:
                 **activation_window(),
                 "codex_pid": receipt["codex_pid"],
                 "codex_process_identity": receipt["codex_process_identity"],
+                "root_completion_source_binding_digest": root_completion_binding_digest,
             },
         )
     receipt = public_receipt(run_dir)

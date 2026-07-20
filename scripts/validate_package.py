@@ -3214,6 +3214,21 @@ def validate_implementation_delegation_contract(
             "external controller timeout of at least 120 seconds",
             "implementation-delegation.md automatic orchestration: missing dispatch controller timeout",
         ),
+        (
+            skill_text,
+            "activated `normal-legacy` failure release",
+            "SKILL.md root completion: missing legacy timeout release audit",
+        ),
+        (
+            model_routing,
+            "activated `normal-legacy` failure release",
+            "model-routing.md root completion: missing legacy timeout release audit",
+        ),
+        (
+            protocol_text,
+            "activated `normal-legacy` failure release",
+            "implementation-delegation.md root completion: missing legacy timeout release audit",
+        ),
         (skill_text, "runner-owned `dispatch`", "SKILL.md automatic orchestration: missing runner-owned dispatch"),
         (
             skill_text,
@@ -3372,6 +3387,11 @@ def validate_implementation_delegation_contract(
         ),
         (
             readme,
+            "Version 2.3.4 repairs root completion after an activated `normal-legacy` timeout",
+            "README.md legacy timeout root completion: missing operator outcome",
+        ),
+        (
+            readme,
             "Version 2.3.3 prevents the host controller's short default timeout",
             "README.md dispatch controller timeout: missing operator outcome",
         ),
@@ -3384,6 +3404,11 @@ def validate_implementation_delegation_contract(
             readme_ru,
             "Только новый checkpoint-bound recovery target writer требует явного разрешения пользователя",
             "README.ru.md automatic orchestration: missing new-writer authority boundary",
+        ),
+        (
+            readme_ru,
+            "Версия 2.3.4 восстанавливает root completion после таймаута активированного `normal-legacy`",
+            "README.ru.md legacy timeout root completion: missing operator outcome",
         ),
         (
             readme_ru,
@@ -3406,6 +3431,11 @@ def validate_implementation_delegation_contract(
     for token, label in [
         ("OBSERVATION_BUDGET_SECONDS = 900", "immutable observation budget"),
         ("def nonrecovery_allowed_set_digest", "ordinary activation allowed-set binding"),
+        ("def root_completion_source_binding(", "root completion source binding"),
+        (
+            "def _validate_legacy_root_completion_release(",
+            "legacy timeout root completion audit",
+        ),
         ("def activation_window", "activation deadline evidence"),
         ("def dispatch_run(args", "runner-owned dispatch"),
         ("dispatch-unactivated-receipt.json", "durable unactivated receipt"),
@@ -4833,6 +4863,11 @@ def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> lis
         ("authorize_recovery_run", "explicit recovery authorization gate"),
         ("def classify_recovery_outcome(", "closed recovery outcomes"),
         ("def root_completion_authorization_record(", "root completion audit"),
+        ("def root_completion_source_binding(", "root completion source binding"),
+        (
+            "def _validate_legacy_root_completion_release(",
+            "legacy timeout root completion audit",
+        ),
         (
             "def record_root_completion_authorization_run(",
             "durable root completion audit",

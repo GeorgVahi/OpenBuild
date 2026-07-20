@@ -121,6 +121,8 @@ result_evidence: valid
 
 For every risk tier, a failed exact dispatch or a semantic result other than completed work or a valid configured pre-edit `NEEDS_ESCALATION` blocks further editing. Do not replace transport failure with another agent, label, or root writer under the same milestone.
 
+An activated `normal-legacy` failure release can authorize root completion only after exact registry vacancy when its single unsuccessful `legacy-terminal-released` event is the only registry-history event carrying that lease ID. The owner must reject a successful or unactivated release, any handoff or abandonment artifact, a mismatched run/task/profile/process identity, a non-stopped recomputed terminal receipt, allowed-scope or revision drift, and any mismatch in the pre-activation source-binding digest repeated by the activated and terminal receipts. New requests persist a structured binding for run identity, revision, descriptive milestone, allowed-set digest, and legacy lease kind before activation. Compatibility with 2.3.3 is limited to requests where that field is absent rather than explicit `null`, the exact `checkpoint byte limit exceeded` downgrade, a valid non-recovery allowed-set digest, a canonical `R-<digits>` specification revision, and its exact lowercase `r<digits>` token already bound in the immutable task label. The audit starts no process and accepts no worker result; it only records the original Build request's same-scope root authority after independent partial-diff attribution.
+
 ## Single-writer lease
 
 Before spawning an implementation worker, acquire a single-writer lease in the specification and worker brief:

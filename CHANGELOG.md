@@ -4,6 +4,19 @@ OpenBuild follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.3.4] - 2026-07-20
+
+### Fixed
+
+- Allowed the post-vacancy root-completion audit to recognize exactly one unsuccessful activated `normal-legacy` release after the 900-second deadline, instead of requiring a contained terminal archive that a non-recovery lease cannot produce.
+- Bound new implementation requests to their run identity, specification revision, descriptive milestone, allowed-set digest, and lease kind before activation, then repeated that binding's digest in the durable activated and recomputed failed/stopped terminal receipts. The legacy audit also requires exact vacancy, the failed release to be the only registry-history event carrying that lease ID, and absence of handoff or abandonment artifacts before authorizing root-only continuation.
+- Added a narrow 2.3.3 migration path only when the new binding field is absent rather than explicit `null`, the checkpoint-limit run has a valid non-recovery allowed-set digest, the revision is canonical `R-<digits>`, and its exact lowercase `r<digits>` token is present in the immutable task label. It creates no writer, handoff, retry, escalation, recovery capability, or diff acceptance.
+
+### Changed
+
+- Added positive, reused-lease (including a prior unactivated release), mixed-kind, source-digest, explicit-null, descriptive-task, revision-drift/collision, task-case, and missing-activation regressions for checkpoint-limit timeout release → root completion, plus package-contract checks for the executable owner and all lifecycle documentation surfaces.
+- Synchronized the Build skill, model-routing and implementation-delegation contracts, both README files, manifest, changelog, and release pins for 2.3.4 while preserving registry schema/reader floor 2.3.2, the packaged defaults, `codex-exec-explicit-model`, project → user → packaged precedence, and the ban on unknown-model agent routes.
+
 ## [2.3.3] - 2026-07-20
 
 ### Fixed
