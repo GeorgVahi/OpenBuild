@@ -4465,6 +4465,224 @@ def reconcile_terminal_abandonment_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _containment_loss_reconciliation_result(lease_id: str) -> dict[str, Any]:
+    return {
+        "outcome": "containment-loss-reconciled",
+        "schema": "containment-loss-reconciliation-v1",
+        "lease_id": lease_id,
+        "registry_vacant": True,
+        "checkpoint_invalidated": True,
+        "handoff_accepted": False,
+        "writer_action": "none",
+    }
+
+
+def _containment_loss_release_is_complete(
+    state: Mapping[str, Any], *, lease_id: str, run_id: str
+) -> bool:
+    if (
+        state.get("lease") is not None
+        or state.get("outbox") is not None
+        or state.get("quarantine") is not None
+    ):
+        return False
+    reconciled = [
+        event
+        for event in state.get("history", [])
+        if event.get("event") == "containment-loss-reconciled"
+        and event.get("lease_id") == lease_id
+        and event.get("run_id") == run_id
+    ]
+    recorded = [
+        event
+        for event in state.get("history", [])
+        if event.get("event") == "terminal-abandonment-recorded"
+        and event.get("lease_id") == lease_id
+        and event.get("run_id") == run_id
+        and event.get("disposition") == "abandoned"
+    ]
+    completed = [
+        event
+        for event in state.get("history", [])
+        if event.get("event") == "terminal-abandonment-completed"
+        and event.get("lease_id") == lease_id
+        and event.get("run_id") == run_id
+    ]
+    released = [
+        event
+        for event in state.get("history", [])
+        if event.get("event") == "contained-terminal-released"
+        and event.get("lease_id") == lease_id
+        and event.get("semantic_disposition") == "abandoned"
+        and event.get("terminal_success") is False
+        and event.get("handoff_digest") is None
+        and event.get("outbox_digest") is None
+    ]
+    return len(reconciled) == len(recorded) == len(completed) == len(released) == 1
+
+
+def reconcile_containment_loss_run(args: argparse.Namespace) -> int:
+    """Reconcile exact post-zero guardian loss without accepting a handoff."""
+    run_dir = resolve_run_reference(args.run_dir)
+    request = read_json(run_dir / "request.json")
+    agent_name = request.get("profile", {}).get("name")
+    lease_id = request.get("lease_id")
+    registry = (
+        recovery_registry_for_agent(agent_name, Path(request["repo"]))
+        if isinstance(agent_name, str) and isinstance(request.get("repo"), str)
+        else None
+    )
+    if registry is None or not isinstance(lease_id, str):
+        raise RunnerError("containment-loss reconciliation cannot resolve its registry lease")
+    _require_private_run_path_identity(run_dir, run_dir.name)
+    try:
+        state = registry.state()
+        lease = state.get("lease")
+        if lease is None:
+            if not _containment_loss_release_is_complete(
+                state, lease_id=lease_id, run_id=run_dir.name
+            ):
+                raise RecoveryStateError(
+                    "containment-loss reconciliation has no exact completed release"
+                )
+        else:
+            if (
+                not isinstance(lease, dict)
+                or lease.get("lease_id") != lease_id
+                or _expected_lease_run_id(lease) != run_dir.name
+            ):
+                raise RecoveryStateError(
+                    "containment-loss reconciliation does not own the current lease"
+                )
+            reconciled = [
+                event
+                for event in state.get("history", [])
+                if event.get("event") == "containment-loss-reconciled"
+                and event.get("lease_id") == lease_id
+                and event.get("run_id") == run_dir.name
+            ]
+            semantic = lease.get("semantic_disposition")
+            if reconciled:
+                if (
+                    len(reconciled) != 1
+                    or state.get("quarantine") is not None
+                    or not isinstance(semantic, Mapping)
+                    or semantic.get("disposition") != "abandoned"
+                ):
+                    raise RecoveryStateError(
+                        "containment-loss reconciliation replay is not authoritative"
+                    )
+            else:
+                if (
+                    state.get("quarantine") != "containment-loss-after-boundary"
+                    or lease.get("state") != "stopped-terminal"
+                    or semantic is not None
+                    or state.get("outbox") is not None
+                    or not isinstance(lease.get("zero_proof"), Mapping)
+                    or lease.get("guardian_close") is not None
+                    or (run_dir / "guardian-failure.json").exists()
+                    or (run_dir / "guardian-closed.json").exists()
+                ):
+                    raise RecoveryStateError(
+                        "containment-loss reconciliation requires exact post-zero quarantine"
+                    )
+                secret = _guardian_secret(run_dir)
+                ready = read_guardian_message(
+                    run_dir / "guardian-ready.json", secret, "guardian-ready"
+                )
+                zero = read_guardian_message(
+                    run_dir / "guardian-zero.json", secret, "guardian-zero"
+                )
+                provider = lease.get("provider_receipt")
+                process = lease.get("process_receipt")
+                if not isinstance(provider, Mapping) or not isinstance(process, Mapping):
+                    raise RecoveryStateError(
+                        "containment-loss reconciliation lacks process ownership evidence"
+                    )
+                expected_ready = {
+                    **{key: value for key, value in provider.items() if key != "precommit"},
+                    "worker": dict(process),
+                }
+                if ready != expected_ready or zero != lease.get("zero_proof"):
+                    raise RecoveryStateError(
+                        "containment-loss reconciliation guardian evidence drifted"
+                    )
+                receipt = public_receipt(run_dir)
+                if (
+                    receipt.get("status") != "completed"
+                    or receipt.get("process_tree_stopped") is not True
+                    or receipt.get("lease_id") != lease_id
+                ):
+                    raise RecoveryStateError(
+                        "containment-loss reconciliation requires stopped terminal receipt"
+                    )
+                terminal_binding = lease.get("terminal_receipt", {}).get(
+                    "binding_digest"
+                )
+                if not isinstance(terminal_binding, str):
+                    raise RecoveryStateError(
+                        "containment-loss reconciliation terminal binding is missing"
+                    )
+                _match_terminal_binding(
+                    receipt,
+                    run_dir=run_dir,
+                    run_id=run_dir.name,
+                    stored_digest=terminal_binding,
+                )
+                guardian_state = process_record_state(
+                    {
+                        "pid": provider.get("guardian_pid"),
+                        "identity": provider.get("guardian_identity"),
+                    }
+                )
+                worker_state = process_record_state(process)
+                if guardian_state not in {"stopped", "reused"} or worker_state not in {
+                    "stopped",
+                    "reused",
+                }:
+                    raise RecoveryStateError(
+                        "containment-loss reconciliation original processes are not stopped"
+                    )
+                state = registry.record_containment_loss_abandonment(
+                    lease_id,
+                    {
+                        "schema": "containment-loss-reconciliation-v1",
+                        "guardian_pid": provider["guardian_pid"],
+                        "guardian_identity": provider["guardian_identity"],
+                        "guardian_state": guardian_state,
+                        "worker_pid": process["pid"],
+                        "worker_identity": process["identity"],
+                        "worker_state": worker_state,
+                        "reconciled_at": utc_now(),
+                    },
+                )
+
+            lease = state.get("lease")
+            if not isinstance(lease, Mapping):
+                raise RecoveryStateError(
+                    "containment-loss reconciliation lost its pending lease"
+                )
+            semantic = lease.get("semantic_disposition")
+            if not isinstance(semantic, Mapping) or semantic.get("disposition") != "abandoned":
+                raise RecoveryStateError(
+                    "containment-loss reconciliation did not record abandonment"
+                )
+            if semantic.get("checkpoint_invalidation") != "completed":
+                state = registry.complete_terminal_abandonment(lease_id)
+            lease = state.get("lease")
+            if isinstance(lease, Mapping) and lease.get("guardian_close") is None:
+                state = registry.acknowledge_containment_loss_close(lease_id)
+            registry.release_contained_terminal(lease_id)
+            garbage_collect_owner_prompt_snapshots(registry)
+    except RecoveryStateError as exc:
+        raise RunnerError(f"containment-loss reconciliation failed closed: {exc}") from exc
+
+    result = _containment_loss_reconciliation_result(lease_id)
+    atomic_write_json(run_dir / "containment-loss-reconciliation.json", result)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
 def _post_commit_root_completion_blocked() -> dict[str, Any]:
     return {
         "outcome": "blocked",
@@ -6723,6 +6941,11 @@ def build_parser() -> argparse.ArgumentParser:
     abandon = subparsers.add_parser("_reconcile-terminal-abandonment", help=argparse.SUPPRESS)
     abandon.add_argument("--run-dir", required=True)
     abandon.set_defaults(handler=reconcile_terminal_abandonment_run)
+    containment_loss = subparsers.add_parser(
+        "_reconcile-containment-loss", help=argparse.SUPPRESS
+    )
+    containment_loss.add_argument("--run-dir", required=True)
+    containment_loss.set_defaults(handler=reconcile_containment_loss_run)
     post_commit_action = subparsers.add_parser(
         "_stage-post-commit-root-completion-action", help=argparse.SUPPRESS
     )

@@ -26,8 +26,8 @@ from typing import Any, Iterator, Mapping, Sequence
 
 REGISTRY_SCHEMA = 1
 IDENTITY_VERSION = 2
-READER_FLOOR = "2.3.2"
-_LEGACY_READER_FLOORS = {"2.2.0", "2.2.1", "2.2.2", "2.2.3", "2.2.5"}
+READER_FLOOR = "2.3.5"
+_LEGACY_READER_FLOORS = {"2.2.0", "2.2.1", "2.2.2", "2.2.3", "2.2.5", "2.3.2"}
 DEFAULT_MAX_RECORDS = 100_000
 DEFAULT_MAX_BYTES = 2 * 1024 * 1024 * 1024
 
@@ -48,6 +48,7 @@ _DOMAIN_GRANT = b"openbuild-authorization-v1\0"
 _DOMAIN_NONCE = b"openbuild-authorization-nonce-v1\0"
 _DOMAIN_TERMINAL_ARCHIVE = b"openbuild-terminal-archive-v1\0"
 _DOMAIN_TERMINAL_ABANDONMENT = b"openbuild-terminal-abandonment-v1\0"
+_DOMAIN_CONTAINMENT_LOSS_RECONCILIATION = b"openbuild-containment-loss-reconciliation-v1\0"
 _DOMAIN_REMEDIATION_SCOPE = b"openbuild-remediation-scope-v1\0"
 _DOMAIN_POST_COMMIT_ACTION = b"openbuild-post-commit-root-completion-action-v1\0"
 _DOMAIN_POST_COMMIT_AUTHORIZATION = b"openbuild-post-commit-root-completion-authorization-v1\0"
@@ -1273,6 +1274,27 @@ def _validate_history_event(value: Any) -> None:
             set(),
         ),
         "containment-loss-quarantined": ({"event", "lease_id", "cause"}, set()),
+        "containment-loss-reconciled": (
+            {
+                "event",
+                "schema",
+                "lease_id",
+                "run_id",
+                "proof_digest",
+                "provider",
+                "guardian_id",
+                "guardian_pid",
+                "guardian_identity",
+                "guardian_state",
+                "worker_pid",
+                "worker_identity",
+                "worker_state",
+                "terminal_binding_digest",
+                "zero_proof_digest",
+                "reconciled_at",
+            },
+            set(),
+        ),
         "fallback-launch-quarantined": ({"event", "lease_id", "cause"}, set()),
         "legacy-terminal-released": ({"event", "lease_id", "success"}, set()),
         "semantic-handoff-rejected": (
@@ -1405,6 +1427,31 @@ def _validate_history_event(value: Any) -> None:
             _require_optional_hex(history[field], f"history activation {field}")
     elif event in {"containment-loss-quarantined", "fallback-launch-quarantined"}:
         _require_string(history["cause"], "history quarantine cause")
+    elif event == "containment-loss-reconciled":
+        if history["schema"] != "containment-loss-reconciliation-v1":
+            raise RecoveryStateError("history containment reconciliation schema is unsupported")
+        if history["provider"] not in {"windows-job", "linux-cgroup-v2"}:
+            raise RecoveryStateError("history containment reconciliation provider is unsupported")
+        for field in ("guardian_state", "worker_state"):
+            if history[field] not in {"stopped", "reused"}:
+                raise RecoveryStateError(
+                    "history containment reconciliation original process is not stopped"
+                )
+        for field in ("guardian_pid", "worker_pid"):
+            _require_integer(history[field], f"history containment reconciliation {field}", minimum=1)
+        for field in ("guardian_id", "guardian_identity", "worker_identity"):
+            _require_string(history[field], f"history containment reconciliation {field}")
+        _require_string(history["run_id"], "history containment reconciliation run ID")
+        _require_string(history["reconciled_at"], "history containment reconciliation time")
+        for field in ("proof_digest", "terminal_binding_digest", "zero_proof_digest"):
+            _require_hex(history[field], f"history containment reconciliation {field}")
+        proof_basis = dict(history)
+        proof_digest = proof_basis.pop("proof_digest")
+        proof_basis.pop("event")
+        if proof_digest != _domain_digest(
+            _DOMAIN_CONTAINMENT_LOSS_RECONCILIATION, proof_basis
+        ):
+            raise RecoveryStateError("history containment reconciliation proof digest drifted")
     elif event == "legacy-terminal-released":
         _require_boolean(history["success"], "history legacy terminal success")
     elif event == "semantic-handoff-rejected":
@@ -2120,6 +2167,34 @@ class RecoveryRegistry:
                 )
             ):
                 raise RecoveryStateError("terminal abandonment history binding drifted")
+            reconciled = [
+                event
+                for event in state.get("history", [])
+                if event.get("event") == "containment-loss-reconciled"
+                and event.get("lease_id") == lease.get("lease_id")
+                and event.get("run_id") == expected_run_id
+            ]
+            if reconciled and (
+                len(reconciled) != 1
+                or state.get("quarantine") is not None
+                or reconciled[0].get("provider")
+                != lease.get("provider_receipt", {}).get("provider")
+                or reconciled[0].get("guardian_id")
+                != lease.get("provider_receipt", {}).get("guardian_id")
+                or reconciled[0].get("guardian_pid")
+                != lease.get("provider_receipt", {}).get("guardian_pid")
+                or reconciled[0].get("guardian_identity")
+                != lease.get("provider_receipt", {}).get("guardian_identity")
+                or reconciled[0].get("worker_pid")
+                != lease.get("process_receipt", {}).get("pid")
+                or reconciled[0].get("worker_identity")
+                != lease.get("process_receipt", {}).get("identity")
+                or reconciled[0].get("terminal_binding_digest")
+                != semantic.get("terminal_binding_digest")
+                or reconciled[0].get("zero_proof_digest")
+                != semantic.get("zero_proof_digest")
+            ):
+                raise RecoveryStateError("containment-loss reconciliation history binding drifted")
             source = self._read_source_locked(str(semantic["source_state_id"]), rebarrier=True)
             checkpoint = source.get("public_checkpoint")
             candidate = checkpoint.get("candidate_snapshot") if isinstance(checkpoint, Mapping) else None
@@ -2540,8 +2615,8 @@ class RecoveryRegistry:
     ) -> dict[str, Any]:
         previous = state.get("digest")
         state = dict(state)
-        # Reading a 2.2.0/2.2.1 generation never rewrites it.  Any durable
-        # transition made by this reader raises the floor atomically.
+        # Reading an explicitly supported legacy generation never rewrites it.
+        # Any durable transition made by this reader raises the floor atomically.
         state["reader_floor"] = READER_FLOOR
         state["previous_generation_digest"] = previous
         state["generation"] = int(state.get("generation", 0)) + 1
@@ -5223,7 +5298,12 @@ class RecoveryRegistry:
                 "archive_digest": released[0]["archive_digest"],
             }
 
-    def record_terminal_abandonment(self, lease_id: str) -> dict[str, Any]:
+    def record_terminal_abandonment(
+        self,
+        lease_id: str,
+        *,
+        _containment_loss_reconciliation: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Record the one exact no-handoff terminal outcome for outside-set drift.
 
         The caller has no cause, digest, checkpoint, or force input.  This is
@@ -5231,12 +5311,28 @@ class RecoveryRegistry:
         a replacement-writer or generic unlock API.
         """
         with self._lock():
-            state = self._read_registry_locked(rebarrier=True)
+            state = self._read_registry_locked(
+                rebarrier=True,
+                allow_quarantine=_containment_loss_reconciliation is not None,
+            )
             lease = state.get("lease")
             semantic = lease.get("semantic_disposition") if isinstance(lease, dict) else None
             if isinstance(semantic, dict):
                 if semantic.get("disposition") != "abandoned":
                     raise RecoveryStateError("terminal lease already has a different semantic disposition")
+                if _containment_loss_reconciliation is not None:
+                    run_id = _lease_run_id(lease)
+                    reconciled = [
+                        event
+                        for event in state["history"]
+                        if event.get("event") == "containment-loss-reconciled"
+                        and event.get("lease_id") == lease_id
+                        and event.get("run_id") == run_id
+                    ]
+                    if state.get("quarantine") is not None or len(reconciled) != 1:
+                        raise RecoveryStateError(
+                            "containment-loss reconciliation replay is not authoritative"
+                        )
                 return state
             if (
                 not isinstance(lease, dict)
@@ -5287,6 +5383,73 @@ class RecoveryRegistry:
             if not isinstance(terminal_binding, str):
                 raise RecoveryStateError("terminal abandonment terminal binding is missing")
             zero_digest = _terminal_part_digest("zero", lease["zero_proof"])
+            reconciliation_event: dict[str, Any] | None = None
+            if _containment_loss_reconciliation is not None:
+                proof = _require_exact_object(
+                    _containment_loss_reconciliation,
+                    "containment-loss reconciliation proof",
+                    {
+                        "schema",
+                        "guardian_pid",
+                        "guardian_identity",
+                        "guardian_state",
+                        "worker_pid",
+                        "worker_identity",
+                        "worker_state",
+                        "reconciled_at",
+                    },
+                )
+                provider = lease.get("provider_receipt")
+                process = lease.get("process_receipt")
+                zero = lease.get("zero_proof")
+                if (
+                    state.get("quarantine") != "containment-loss-after-boundary"
+                    or not isinstance(provider, Mapping)
+                    or not isinstance(process, Mapping)
+                    or not isinstance(zero, Mapping)
+                    or proof["schema"] != "containment-loss-reconciliation-v1"
+                    or proof["guardian_pid"] != provider.get("guardian_pid")
+                    or proof["guardian_identity"] != provider.get("guardian_identity")
+                    or proof["worker_pid"] != process.get("pid")
+                    or proof["worker_identity"] != process.get("identity")
+                ):
+                    raise RecoveryStateError(
+                        "containment-loss reconciliation identity binding drifted"
+                    )
+                if proof["guardian_state"] not in {"stopped", "reused"} or proof[
+                    "worker_state"
+                ] not in {"stopped", "reused"}:
+                    raise RecoveryStateError(
+                        "containment-loss reconciliation original processes must be stopped"
+                    )
+                _require_string(proof["reconciled_at"], "containment-loss reconciliation time")
+                loss_events = [
+                    event
+                    for event in state["history"]
+                    if event.get("event") == "containment-loss-quarantined"
+                    and event.get("lease_id") == lease_id
+                ]
+                if len(loss_events) != 1:
+                    raise RecoveryStateError(
+                        "containment-loss reconciliation requires one quarantine event"
+                    )
+                proof_basis = {
+                    **dict(proof),
+                    "run_id": run_id,
+                    "lease_id": lease_id,
+                    "provider": provider.get("provider"),
+                    "guardian_id": provider.get("guardian_id"),
+                    "terminal_binding_digest": terminal_binding,
+                    "zero_proof_digest": zero_digest,
+                }
+                reconciliation_event = {
+                    "event": "containment-loss-reconciled",
+                    **proof_basis,
+                    "proof_digest": _domain_digest(
+                        _DOMAIN_CONTAINMENT_LOSS_RECONCILIATION, proof_basis
+                    ),
+                }
+                state["quarantine"] = None
             candidate_digest = _domain_digest(_DOMAIN_CHECKPOINT, candidate_snapshot)
             evidence_basis = {
                 "schema": schema,
@@ -5312,8 +5475,21 @@ class RecoveryRegistry:
             lease["terminal_receipt"]["success"] = False
             lease["terminal_receipt"]["semantic_rejected"] = True
             lease["terminal_receipt"]["semantic_evidence_digest"] = evidence_digest
+            if reconciliation_event is not None:
+                state["history"].append(reconciliation_event)
             state["history"].append({"event": "terminal-abandonment-recorded", **semantic})
             return self._commit_registry_locked(state)
+
+    def record_containment_loss_abandonment(
+        self,
+        lease_id: str,
+        reconciliation: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Turn exact post-zero guardian loss into the existing no-handoff abandonment."""
+        return self.record_terminal_abandonment(
+            lease_id,
+            _containment_loss_reconciliation=reconciliation,
+        )
 
     def complete_terminal_abandonment(self, lease_id: str) -> dict[str, Any]:
         """Complete the source invalidation bound by a recorded abandonment."""
@@ -5685,6 +5861,49 @@ class RecoveryRegistry:
                     _durable_replace(target, payload)
                 outbox["state"] = "materialized"
                 return self._commit_registry_locked(state)
+
+    def acknowledge_containment_loss_close(self, lease_id: str) -> dict[str, Any]:
+        """Close a lost guardian only after its authenticated zero was abandoned."""
+        with self._lock():
+            state = self._read_registry_locked(rebarrier=True)
+            lease = state.get("lease")
+            semantic = lease.get("semantic_disposition") if isinstance(lease, dict) else None
+            run_id = _lease_run_id(lease) if isinstance(lease, Mapping) else None
+            reconciled = [
+                event
+                for event in state["history"]
+                if event.get("event") == "containment-loss-reconciled"
+                and event.get("lease_id") == lease_id
+                and event.get("run_id") == run_id
+            ]
+            if (
+                not isinstance(lease, dict)
+                or lease.get("lease_id") != lease_id
+                or lease.get("state") != "stopped-terminal"
+                or not isinstance(semantic, Mapping)
+                or semantic.get("disposition") != "abandoned"
+                or semantic.get("checkpoint_invalidation") != "completed"
+                or len(reconciled) != 1
+                or state.get("outbox") is not None
+            ):
+                raise RecoveryStateError(
+                    "containment-loss close requires completed post-zero abandonment"
+                )
+            if lease.get("guardian_close") is not None:
+                expected = {
+                    "closed": True,
+                    "guardian_id": lease.get("provider_receipt", {}).get("guardian_id"),
+                    "closed_at": f"reconciled:{reconciled[0]['reconciled_at']}",
+                }
+                if lease["guardian_close"] != expected:
+                    raise RecoveryStateError("containment-loss close acknowledgement drifted")
+                return state
+            lease["guardian_close"] = {
+                "closed": True,
+                "guardian_id": lease["provider_receipt"]["guardian_id"],
+                "closed_at": f"reconciled:{reconciled[0]['reconciled_at']}",
+            }
+            return self._commit_registry_locked(state)
 
     def acknowledge_guardian_close(self, lease_id: str, acknowledgement: Mapping[str, Any]) -> dict[str, Any]:
         if acknowledgement.get("closed") is not True:

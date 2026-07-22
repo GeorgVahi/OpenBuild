@@ -4,6 +4,20 @@ OpenBuild follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.3.5] - 2026-07-22
+
+### Fixed
+
+- Added the private `_reconcile-containment-loss` transition for the exact `containment-loss-after-boundary` state where the same lease is already `stopped-terminal`, its authenticated guardian zero and terminal/run/provider/process bindings match, and the original guardian and worker creation identities are stopped or reused.
+- Made the transition record one digest-bound `containment-loss-reconciliation-v1` owner event, atomically clear quarantine while selecting the applicable existing terminal-abandonment v1/v2/v3 intent, invalidate the source checkpoint, record a reconciliation-specific guardian close, archive the lifecycle as unsuccessful and abandoned, and release the same lease without accepting a handoff or starting a writer.
+- Kept missing or tampered ready/zero evidence, guardian failure/close, handoff/outbox/prior semantic state, pre-zero lease states, live or unknown original identities, other quarantine reasons, and ineligible abandonment reasons fail-closed without registry/source/workspace mutation or force-unlock. Every durable phase is replayable.
+
+### Changed
+
+- Raised the first-write reader floor to 2.3.5 while retaining exact no-rewrite reads of 2.2.0–2.2.3, 2.2.5, and 2.3.2 generations; floor promotion precedes private-source invalidation.
+- Added owner, runner, tamper, no-mutation, reader-floor, package-contract, and observable no-handoff regressions, and synchronized the Build skill, lifecycle references, both READMEs, manifest, changelog, and release pins for 2.3.5.
+- Preserved the packaged defaults, `codex-exec-explicit-model`, project → user → packaged precedence, exact model/rung validation, single-writer ownership, and the ban on unknown-model agent routes.
+
 ## [2.3.4] - 2026-07-20
 
 ### Fixed

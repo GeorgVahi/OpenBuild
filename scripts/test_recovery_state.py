@@ -213,7 +213,7 @@ class RegistryContractTests(unittest.TestCase):
                 action_snapshot_id="9" * 64,
                 action_snapshot_sha256=hashlib.sha256(action_snapshot_bytes).hexdigest(),
             )
-            self.assertEqual(owner.state()["reader_floor"], "2.3.2")
+            self.assertEqual(owner.state()["reader_floor"], "2.3.5")
             authorization = owner.issue_post_commit_root_completion_authorization(action)
             issued_source = owner.read_private_source(preflight["source_state_id"])
             issued_action = issued_source["post_commit_root_completion"]["action"]
@@ -1125,6 +1125,21 @@ class RegistryContractTests(unittest.TestCase):
         }
 
     @staticmethod
+    def containment_loss_reconciliation(
+        *, guardian_state: str = "stopped", worker_state: str = "stopped"
+    ) -> dict[str, object]:
+        return {
+            "schema": "containment-loss-reconciliation-v1",
+            "guardian_pid": 201,
+            "guardian_identity": "private-guardian-process",
+            "guardian_state": guardian_state,
+            "worker_pid": 101,
+            "worker_identity": "private-process",
+            "worker_state": worker_state,
+            "reconciled_at": "2026-07-15T00:00:03Z",
+        }
+
+    @staticmethod
     def handoff_event(
         allowed_set_digest: object, lease_id: str = "normal-1"
     ) -> dict[str, object]:
@@ -1152,7 +1167,7 @@ class RegistryContractTests(unittest.TestCase):
             self.assertEqual(first.workspace_key, second.workspace_key)
             self.assertTrue(first.directory.is_relative_to(state_root))
             self.assertFalse(first.directory.is_relative_to(workspace))
-            self.assertEqual(state["reader_floor"], "2.3.2")
+            self.assertEqual(state["reader_floor"], "2.3.5")
             self.assertEqual(state["identity_version"], 2)
             self.assertEqual(state["workspace_key"], first.workspace_key)
             self.assertIn("git_common_dir_identity", state)
@@ -1202,8 +1217,8 @@ class RegistryContractTests(unittest.TestCase):
                     specification_revision="R-001",
                 )
 
-            self.assertEqual(observed_floors, ["2.3.2"])
-            self.assertEqual(owner.state()["reader_floor"], "2.3.2")
+            self.assertEqual(observed_floors, ["2.3.5"])
+            self.assertEqual(owner.state()["reader_floor"], "2.3.5")
 
     def test_digest_consistent_malformed_registry_generations_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -2863,6 +2878,137 @@ class RegistryContractTests(unittest.TestCase):
             with self.assertRaisesRegex(recovery_state.RecoveryStateError, "quarantined"):
                 owner.reserve_normal("normal-2", allowed_set_digest="c" * 64, recovery_capable=False)
 
+    def test_post_zero_containment_loss_reconciliation_abandons_and_releases_exact_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = self.make_git_workspace(root)
+            (workspace / "allowed" / "seed.txt").write_text(
+                "preexisting user change\n", encoding="utf-8", newline="\n"
+            )
+            owner = self.owner(workspace, root / "state")
+            preflight = self.reserve_source(owner)
+            owner.claim_contained_launch("normal-1", "contained-token")
+            owner.bind_process_unactivated(
+                "normal-1",
+                allowed_set_digest=preflight["allowed_set_digest"],
+                provider_receipt=self.provider_receipt(),
+                process_receipt=self.process_receipt(),
+            )
+            owner.commit_activation("normal-1", preflight["allowed_set_digest"])
+            checkpoint = owner.finalize_prepared_checkpoint(
+                preflight, source_receipt_digest="a" * 64
+            )
+            (workspace / "allowed" / "seed.txt").write_text(
+                "writer change\n", encoding="utf-8", newline="\n"
+            )
+            (workspace / "outside.txt").write_text(
+                "outside drift\n", encoding="utf-8", newline="\n"
+            )
+            self.assertEqual(
+                owner.revalidate_checkpoint(checkpoint)["reasons"],
+                ["outside-set-drift", "preexisting-dirty-overlap"],
+            )
+            owner.record_terminal_evidence(
+                "normal-1", self.terminal_receipt(True), preflight["allowed_set_digest"]
+            )
+            owner.prove_contained_tree_empty(
+                "normal-1", self.zero_proof(), preflight["allowed_set_digest"]
+            )
+            owner.quarantine_containment_loss("normal-1", "guardian-process-stopped")
+
+            pending = owner.record_containment_loss_abandonment(
+                "normal-1", self.containment_loss_reconciliation()
+            )
+
+            self.assertIsNone(pending["quarantine"])
+            self.assertEqual(pending["reader_floor"], "2.3.5")
+            self.assertEqual(
+                pending["lease"]["semantic_disposition"]["schema"],
+                "terminal-abandonment-v3",
+            )
+            reconciliation = next(
+                event
+                for event in pending["history"]
+                if event["event"] == "containment-loss-reconciled"
+            )
+            self.assertEqual(reconciliation["lease_id"], "normal-1")
+            self.assertEqual(reconciliation["run_id"], "contained-run")
+
+            replay = owner.record_containment_loss_abandonment(
+                "normal-1",
+                self.containment_loss_reconciliation(guardian_state="running"),
+            )
+            self.assertEqual(replay["digest"], pending["digest"])
+
+            malformed = json.loads(json.dumps(pending))
+            next(
+                event
+                for event in malformed["history"]
+                if event["event"] == "containment-loss-reconciled"
+            )["proof_digest"] = "9" * 64
+            malformed["digest"] = recovery_state._digest(malformed)
+            with self.assertRaisesRegex(
+                recovery_state.RecoveryStateError, "proof digest drifted"
+            ):
+                owner._validate_registry(malformed)
+
+            owner.complete_terminal_abandonment("normal-1")
+            closed = owner.acknowledge_containment_loss_close("normal-1")
+            self.assertTrue(closed["lease"]["guardian_close"]["closed"])
+            released = owner.release_contained_terminal("normal-1")
+
+            self.assertIsNone(released["lease"])
+            self.assertIsNone(released["outbox"])
+            self.assertEqual(released["history"][-1]["semantic_disposition"], "abandoned")
+            self.assertFalse(released["history"][-1]["terminal_success"])
+            self.assertIsNone(released["history"][-1]["handoff_digest"])
+            self.assertEqual(
+                owner.read_private_source(preflight["source_state_id"])["public_checkpoint"][
+                    "reasons"
+                ],
+                ["terminal-abandoned-legacy-normal-overlap"],
+            )
+
+    def test_post_zero_containment_loss_reconciliation_rejects_live_identity_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            owner = self.owner(self.make_git_workspace(root), root / "state")
+            preflight = self.reserve_source(owner)
+            owner.claim_contained_launch("normal-1", "contained-token")
+            owner.bind_process_unactivated(
+                "normal-1",
+                allowed_set_digest=preflight["allowed_set_digest"],
+                provider_receipt=self.provider_receipt(),
+                process_receipt=self.process_receipt(),
+            )
+            owner.commit_activation("normal-1", preflight["allowed_set_digest"])
+            owner.finalize_prepared_checkpoint(preflight, source_receipt_digest="a" * 64)
+            (owner.workspace / "outside.txt").write_text(
+                "outside drift\n", encoding="utf-8", newline="\n"
+            )
+            owner.record_terminal_evidence(
+                "normal-1", self.terminal_receipt(True), preflight["allowed_set_digest"]
+            )
+            owner.prove_contained_tree_empty(
+                "normal-1", self.zero_proof(), preflight["allowed_set_digest"]
+            )
+            owner.quarantine_containment_loss("normal-1", "guardian-process-stopped")
+            registry_before = owner.path.read_bytes()
+            source_before = owner.source_path(preflight["source_state_id"]).read_bytes()
+
+            with self.assertRaisesRegex(
+                recovery_state.RecoveryStateError, "original processes must be stopped"
+            ):
+                owner.record_containment_loss_abandonment(
+                    "normal-1",
+                    self.containment_loss_reconciliation(guardian_state="running"),
+                )
+
+            self.assertEqual(owner.path.read_bytes(), registry_before)
+            self.assertEqual(
+                owner.source_path(preflight["source_state_id"]).read_bytes(), source_before
+            )
+
     def test_after_replace_failure_is_rebarriered_on_reload(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -3008,7 +3154,7 @@ class RegistryContractTests(unittest.TestCase):
 
             replay = self.owner(workspace, root / "state").state()
             self.assertEqual(replay["digest"], released["digest"])
-            self.assertEqual(replay["reader_floor"], "2.3.2")
+            self.assertEqual(replay["reader_floor"], "2.3.5")
 
     def test_ac05_mixed_drift_rejects_terminal_abandonment_without_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -3100,7 +3246,7 @@ class RegistryContractTests(unittest.TestCase):
 
             pending = owner.record_terminal_abandonment("normal-1")
             semantic = pending["lease"]["semantic_disposition"]
-            self.assertEqual(pending["reader_floor"], "2.3.2")
+            self.assertEqual(pending["reader_floor"], "2.3.5")
             self.assertEqual(pending["lease"]["lease_kind"], "normal-contained")
             self.assertEqual(semantic["schema"], "terminal-abandonment-v3")
             self.assertEqual(
@@ -3637,7 +3783,14 @@ class RegistryContractTests(unittest.TestCase):
                 "normal-1", self.zero_proof(), preflight["allowed_set_digest"]
             )
             legacy: dict[str, object] | None = None
-            for reader_floor in ("2.2.0", "2.2.1", "2.2.2", "2.2.3", "2.2.5"):
+            for reader_floor in (
+                "2.2.0",
+                "2.2.1",
+                "2.2.2",
+                "2.2.3",
+                "2.2.5",
+                "2.3.2",
+            ):
                 with self.subTest(reader_floor=reader_floor):
                     legacy = dict(current)
                     legacy["reader_floor"] = reader_floor
@@ -3664,14 +3817,14 @@ class RegistryContractTests(unittest.TestCase):
             upgraded_owner = self.owner(workspace, root / "state")
 
             pending = upgraded_owner.record_terminal_abandonment("normal-1")
-            self.assertEqual(pending["reader_floor"], "2.3.2")
+            self.assertEqual(pending["reader_floor"], "2.3.5")
             upgraded_owner.complete_terminal_abandonment("normal-1")
             upgraded_owner.acknowledge_guardian_close("normal-1", self.guardian_close())
             released = upgraded_owner.release_contained_terminal("normal-1")
             replay = self.owner(workspace, root / "state").state()
 
             self.assertEqual(replay["digest"], released["digest"])
-            self.assertEqual(replay["reader_floor"], "2.3.2")
+            self.assertEqual(replay["reader_floor"], "2.3.5")
             self.assertEqual(
                 len(
                     [
@@ -3731,7 +3884,7 @@ class RegistryContractTests(unittest.TestCase):
             def assert_promoted_before_source(source: dict[str, object]):
                 self.assertEqual(
                     upgraded._read_registry_locked(rebarrier=False)["reader_floor"],
-                    "2.3.2",
+                    "2.3.5",
                 )
                 return commit_source(source)
 
@@ -3739,7 +3892,7 @@ class RegistryContractTests(unittest.TestCase):
                 upgraded, "_commit_source_locked", side_effect=assert_promoted_before_source
             ):
                 completed = upgraded.complete_terminal_abandonment("normal-1")
-            self.assertEqual(completed["reader_floor"], "2.3.2")
+            self.assertEqual(completed["reader_floor"], "2.3.5")
             self.assertEqual(
                 completed["lease"]["semantic_disposition"]["checkpoint_invalidation"],
                 "completed",

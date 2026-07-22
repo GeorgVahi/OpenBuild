@@ -3326,6 +3326,16 @@ def validate_implementation_delegation_contract(
             "implementation-delegation.md legacy normal overlap: missing v3 lease boundary",
         ),
         (
+            skill_text,
+            "_reconcile-containment-loss --run-dir <path>",
+            "SKILL.md containment-loss reconciliation: missing command boundary",
+        ),
+        (
+            protocol_text,
+            "The sole quarantine exception is private `_reconcile-containment-loss`",
+            "implementation-delegation.md containment-loss reconciliation: missing exact quarantine boundary",
+        ),
+        (
             protocol_text,
             "required_action=provide-decision",
             "implementation-delegation.md recovery autonomy: missing decision outcome boundary",
@@ -3344,6 +3354,11 @@ def validate_implementation_delegation_contract(
             model_routing,
             "Exact `[outside-set-drift, preexisting-dirty-overlap]` uses terminal abandonment v2 for a recovery-target and v3 for a legacy `normal-contained` lease",
             "model-routing.md recovery overlap: missing v2/v3 routing boundary",
+        ),
+        (
+            model_routing,
+            "An exact post-zero `containment-loss-after-boundary` quarantine",
+            "model-routing.md containment-loss reconciliation: missing non-routing boundary",
         ),
         (
             model_routing,
@@ -3366,14 +3381,24 @@ def validate_implementation_delegation_contract(
             "tdd-workflow.md legacy normal overlap: missing v3 fixture contract",
         ),
         (
+            tdd_workflow,
+            "Post-zero containment-loss reconciliation must additionally reproduce",
+            "tdd-workflow.md containment-loss reconciliation: missing fixture contract",
+        ),
+        (
             review_protocol,
             "legacy `normal-contained` v3",
             "review-protocol.md recovery overlap: missing v3 review boundary",
         ),
         (
+            review_protocol,
+            "post-zero containment-loss diffs additionally prove",
+            "review-protocol.md containment-loss reconciliation: missing review boundary",
+        ),
+        (
             versioning_text,
-            "first durable write by the new owner raises the floor to 2.3.2",
-            "versioning.md legacy normal overlap: missing reader-floor rollout contract",
+            "first new durable transition raises the floor to 2.3.5 before source invalidation",
+            "versioning.md containment-loss reconciliation: missing reader-floor rollout contract",
         ),
         (
             readme,
@@ -3384,6 +3409,11 @@ def validate_implementation_delegation_contract(
             readme,
             "Only a new checkpoint-bound recovery target writer requires explicit user authorization",
             "README.md automatic orchestration: missing new-writer authority boundary",
+        ),
+        (
+            readme,
+            "Version 2.3.5 adds exact post-zero reconciliation for `containment-loss-after-boundary`",
+            "README.md containment-loss reconciliation: missing operator outcome",
         ),
         (
             readme,
@@ -3404,6 +3434,11 @@ def validate_implementation_delegation_contract(
             readme_ru,
             "Только новый checkpoint-bound recovery target writer требует явного разрешения пользователя",
             "README.ru.md automatic orchestration: missing new-writer authority boundary",
+        ),
+        (
+            readme_ru,
+            "Версия 2.3.5 добавляет точную post-zero reconciliation",
+            "README.ru.md containment-loss reconciliation: missing operator outcome",
         ),
         (
             readme_ru,
@@ -4473,8 +4508,8 @@ def validate_safe_artifact_reader_contract(
 def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> list[str]:
     errors: list[str] = []
     recovery_contract = [
-        ('READER_FLOOR = "2.3.2"', "reader floor"),
-        ('_LEGACY_READER_FLOORS = {"2.2.0", "2.2.1", "2.2.2", "2.2.3", "2.2.5"}', "legacy reader compatibility"),
+        ('READER_FLOOR = "2.3.5"', "reader floor"),
+        ('_LEGACY_READER_FLOORS = {"2.2.0", "2.2.1", "2.2.2", "2.2.3", "2.2.5", "2.3.2"}', "legacy reader compatibility"),
         (
             "state = self._read_registry_for_write_locked(rebarrier=True)",
             "pending abandonment reader floor before source replay",
@@ -4570,6 +4605,10 @@ def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> lis
         ("_validate_terminal_archive", "contained terminal archive"),
         ('"terminal_receipt_digest"', "contained terminal archive"),
         ("quarantine_containment_loss", "post-boundary containment quarantine"),
+        ('b"openbuild-containment-loss-reconciliation-v1\\0"', "containment-loss reconciliation domain"),
+        ('"containment-loss-reconciled"', "containment-loss reconciliation history"),
+        ("record_containment_loss_abandonment", "containment-loss abandonment transition"),
+        ("acknowledge_containment_loss_close", "containment-loss guardian close"),
         ("retire_for_downgrade", "reader floor retirement"),
         ("retire_authorization", "prompt authorization retirement"),
         ('"authorization-retired"', "prompt authorization retirement"),
@@ -4847,6 +4886,11 @@ def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> lis
         ('"_finalize-success"', "root-verified success gate"),
         ('"_reject-handoff"', "root semantic rejection gate"),
         ('"_reconcile-terminal-abandonment"', "terminal abandonment command"),
+        ("reconcile_containment_loss_run", "containment-loss reconciliation lifecycle"),
+        ("registry.record_containment_loss_abandonment", "containment-loss abandonment binding"),
+        ("registry.acknowledge_containment_loss_close", "containment-loss guardian close"),
+        ('"_reconcile-containment-loss"', "containment-loss reconciliation command"),
+        ('"containment-loss-reconciliation-v1"', "containment-loss public result"),
         ('"_stage-post-commit-root-completion-action"', "hidden post-commit action snapshot command"),
         ('"_authorize-post-commit-root-completion"', "hidden post-commit authorization command"),
         ('"_finalize-post-commit-root-completion"', "hidden post-commit finalization command"),
@@ -4894,6 +4938,64 @@ def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> lis
     for token, category in runner_contract:
         if token not in runner_text:
             errors.append(f"agent_runner.py recovery {category}: missing {token}")
+    containment_owner = runner_text.find("def reconcile_containment_loss_run")
+    containment_end = runner_text.find(
+        "def _post_commit_root_completion_blocked", containment_owner
+    )
+    containment_ready = runner_text.find(
+        'read_guardian_message(\n                    run_dir / "guardian-ready.json"',
+        containment_owner,
+        containment_end,
+    )
+    containment_receipt = runner_text.find(
+        "receipt = public_receipt(run_dir)", containment_owner, containment_end
+    )
+    containment_binding = runner_text.find(
+        "_match_terminal_binding(", containment_receipt, containment_end
+    )
+    containment_record = runner_text.find(
+        "registry.record_containment_loss_abandonment(",
+        containment_binding,
+        containment_end,
+    )
+    containment_complete = runner_text.find(
+        "registry.complete_terminal_abandonment(lease_id)",
+        containment_record,
+        containment_end,
+    )
+    containment_close = runner_text.find(
+        "registry.acknowledge_containment_loss_close(lease_id)",
+        containment_complete,
+        containment_end,
+    )
+    containment_release = runner_text.find(
+        "registry.release_contained_terminal(lease_id)",
+        containment_close,
+        containment_end,
+    )
+    if (
+        containment_owner < 0
+        or containment_end < 0
+        or containment_ready < 0
+        or containment_receipt < 0
+        or containment_binding < 0
+        or containment_record < 0
+        or containment_complete < 0
+        or containment_close < 0
+        or containment_release < 0
+        or not containment_owner
+        < containment_ready
+        < containment_receipt
+        < containment_binding
+        < containment_record
+        < containment_complete
+        < containment_close
+        < containment_release
+        < containment_end
+    ):
+        errors.append(
+            "agent_runner.py containment-loss reconciliation: authenticated evidence and terminal binding must precede abandonment, invalidation, close, and release"
+        )
     public_receipt_start = runner_text.find("def public_receipt")
     public_receipt_end = runner_text.find("\ndef apply_preboundary_guardian_failure", public_receipt_start)
     public_receipt_text = (

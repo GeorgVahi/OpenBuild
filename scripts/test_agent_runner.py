@@ -1995,6 +1995,242 @@ class CodexInvocationTests(unittest.TestCase):
                 "guardian-process-stopped",
             )
 
+    def test_containment_loss_completed_replay_requires_the_recorded_abandonment(self) -> None:
+        state = {
+            "lease": None,
+            "outbox": None,
+            "quarantine": None,
+            "history": [
+                {
+                    "event": "containment-loss-reconciled",
+                    "lease_id": "lease-1",
+                    "run_id": "run-1",
+                },
+                {
+                    "event": "terminal-abandonment-completed",
+                    "lease_id": "lease-1",
+                    "run_id": "run-1",
+                },
+                {
+                    "event": "contained-terminal-released",
+                    "lease_id": "lease-1",
+                    "semantic_disposition": "abandoned",
+                    "terminal_success": False,
+                    "handoff_digest": None,
+                    "outbox_digest": None,
+                },
+            ],
+        }
+
+        self.assertFalse(
+            agent_runner._containment_loss_release_is_complete(
+                state, lease_id="lease-1", run_id="run-1"
+            )
+        )
+        state["history"].append(
+            {
+                "event": "terminal-abandonment-recorded",
+                "lease_id": "lease-1",
+                "run_id": "run-1",
+                "disposition": "abandoned",
+            }
+        )
+        self.assertTrue(
+            agent_runner._containment_loss_release_is_complete(
+                state, lease_id="lease-1", run_id="run-1"
+            )
+        )
+
+    def test_post_zero_containment_quarantine_reconciliation_releases_without_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "tests@example.invalid"],
+                cwd=repo,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "Tests"], cwd=repo, check=True
+            )
+            allowed = repo / "allowed.txt"
+            allowed.write_text("seed\n", encoding="utf-8", newline="\n")
+            subprocess.run(["git", "add", "allowed.txt"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "--quiet", "-m", "baseline"], cwd=repo, check=True
+            )
+            allowed.write_text(
+                "preexisting user change\n", encoding="utf-8", newline="\n"
+            )
+
+            run_dir = root / "post-zero-loss-run"
+            owner = agent_runner.RecoveryRegistry(repo, state_root=root / "state")
+            preflight = owner.prepare_source_checkpoint(
+                source_id=run_dir.name,
+                source_lease_id="lease-1",
+                source_milestone="M2-source",
+                target_milestone="M2-recovery",
+                allowed_paths=["allowed.txt"],
+                specification_revision="R-005",
+            )
+            owner.reserve_normal(
+                "lease-1",
+                allowed_set_digest=preflight["allowed_set_digest"],
+                recovery_capable=True,
+                source_state_id=preflight["source_state_id"],
+                run_id=run_dir.name,
+                prompt_sha256="a" * 64,
+                containment_plan=_containment_plan(),
+            )
+            owner.bind_reserved_source_snapshot("lease-1", preflight)
+            owner.claim_contained_launch("lease-1", "contained-token")
+            process = _process_receipt()
+            provider = _provider_receipt(worker=process)
+            owner.bind_process_unactivated(
+                "lease-1",
+                allowed_set_digest=preflight["allowed_set_digest"],
+                provider_receipt=provider,
+                process_receipt=process,
+            )
+            owner.commit_activation("lease-1", preflight["allowed_set_digest"])
+            owner.finalize_prepared_checkpoint(preflight, source_receipt_digest="a" * 64)
+
+            agent_runner.ensure_private_run_dir(run_dir)
+            agent_runner.atomic_write_json(
+                run_dir / "request.json",
+                {
+                    "profile": {"name": "openbuild_implementation_strong"},
+                    "task_name": "M2-source",
+                    "repo": str(repo),
+                    "lease_id": "lease-1",
+                    "lifecycle_allowed_set_digest": preflight["allowed_set_digest"],
+                    "recovery_preflight": preflight,
+                    **self.private_run_request_identity(run_dir),
+                },
+            )
+            secret = bytes.fromhex("55" * 32)
+            agent_runner.atomic_write_bytes(run_dir / "guardian.key", secret)
+            ready = {
+                **{key: value for key, value in provider.items() if key != "precommit"},
+                "worker": process,
+            }
+            agent_runner.write_guardian_message(
+                run_dir / "guardian-ready.json", secret, "guardian-ready", ready
+            )
+            zero = _zero_proof()
+            agent_runner.write_guardian_message(
+                run_dir / "guardian-zero.json", secret, "guardian-zero", zero
+            )
+            receipt = {
+                "run_dir": str(run_dir),
+                "status": "completed",
+                "agent_name": "openbuild_implementation_strong",
+                "task_name": "M2-source",
+                "lease_id": "lease-1",
+                "activated": True,
+                "configured_model": "fixture",
+                "model_reasoning_effort": "xhigh",
+                "sandbox": "workspace-write",
+                "worker_pid": 123,
+                "worker_process_identity": "worker-1",
+                "codex_pid": 456,
+                "codex_process_identity": "codex-1",
+                "terminal_event": "turn.completed",
+                "codex_exit_evidence": "valid",
+                "codex_exit_code": 0,
+                "result_evidence": "valid",
+                "process_tree_stopped": True,
+            }
+            terminal_binding = agent_runner._terminal_binding(
+                receipt, run_id=run_dir.name
+            )
+            owner.record_terminal_evidence(
+                "lease-1",
+                {
+                    "success": True,
+                    "binding_digest": agent_runner.sha256_bytes(
+                        agent_runner._canonical_json_bytes(terminal_binding)
+                    ),
+                    "binding_format": "run-id-v2",
+                    "terminal_event": "turn.completed",
+                },
+                preflight["allowed_set_digest"],
+            )
+            owner.prove_contained_tree_empty(
+                "lease-1", zero, preflight["allowed_set_digest"]
+            )
+            allowed.write_text("writer change\n", encoding="utf-8", newline="\n")
+            outside = repo / "outside.txt"
+            outside.write_text("outside drift\n", encoding="utf-8", newline="\n")
+            owner.quarantine_containment_loss("lease-1", "guardian-process-stopped")
+            status_before = subprocess.run(
+                ["git", "status", "--porcelain=v2", "-z"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+            ).stdout
+
+            ready_path = run_dir / "guardian-ready.json"
+            ready_bytes = ready_path.read_bytes()
+            tampered_ready = dict(ready)
+            tampered_ready["worker"] = _process_receipt(identity="other-worker")
+            agent_runner.write_guardian_message(
+                ready_path, secret, "guardian-ready", tampered_ready
+            )
+            registry_before = owner.path.read_bytes()
+            source_before = owner.source_path(preflight["source_state_id"]).read_bytes()
+            with mock.patch.object(
+                agent_runner, "recovery_registry_for_agent", return_value=owner
+            ), mock.patch.object(
+                agent_runner, "public_receipt", return_value=receipt
+            ), mock.patch.object(
+                agent_runner, "process_record_state", return_value="stopped"
+            ), self.assertRaisesRegex(agent_runner.RunnerError, "guardian evidence drifted"):
+                agent_runner.reconcile_containment_loss_run(
+                    Namespace(run_dir=str(run_dir))
+                )
+            self.assertEqual(owner.path.read_bytes(), registry_before)
+            self.assertEqual(
+                owner.source_path(preflight["source_state_id"]).read_bytes(), source_before
+            )
+            agent_runner.atomic_write_bytes(ready_path, ready_bytes)
+
+            output = io.StringIO()
+            with mock.patch.object(
+                agent_runner, "recovery_registry_for_agent", return_value=owner
+            ), mock.patch.object(
+                agent_runner, "public_receipt", return_value=receipt
+            ), mock.patch.object(
+                agent_runner, "process_record_state", return_value="stopped"
+            ), redirect_stdout(output):
+                self.assertEqual(
+                    agent_runner.reconcile_containment_loss_run(
+                        Namespace(run_dir=str(run_dir))
+                    ),
+                    0,
+                )
+
+            result = json.loads(output.getvalue())
+            state = owner.state()
+            self.assertEqual(result["outcome"], "containment-loss-reconciled")
+            self.assertTrue(result["registry_vacant"])
+            self.assertFalse(result["handoff_accepted"])
+            self.assertIsNone(state["lease"])
+            self.assertIsNone(state["outbox"])
+            self.assertIsNone(state["quarantine"])
+            self.assertFalse((run_dir / "implementation-handoffs.jsonl").exists())
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "status", "--porcelain=v2", "-z"],
+                    cwd=repo,
+                    check=True,
+                    stdout=subprocess.PIPE,
+                ).stdout,
+                status_before,
+            )
+
     def test_containment_gate_rejects_tamper_before_worker_auth(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             run_dir = Path(temp)
