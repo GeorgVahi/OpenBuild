@@ -3331,9 +3331,19 @@ def validate_implementation_delegation_contract(
             "SKILL.md containment-loss reconciliation: missing command boundary",
         ),
         (
+            skill_text,
+            "terminal-abandonment-v4",
+            "SKILL.md containment-loss reconciliation: missing v4 exact-triple boundary",
+        ),
+        (
             protocol_text,
             "The sole quarantine exception is private `_reconcile-containment-loss`",
             "implementation-delegation.md containment-loss reconciliation: missing exact quarantine boundary",
+        ),
+        (
+            protocol_text,
+            "fresh reasons are exactly `[git-control-plane-drift, outside-set-drift, preexisting-dirty-overlap]`",
+            "implementation-delegation.md containment-loss reconciliation: missing v4 reason boundary",
         ),
         (
             protocol_text,
@@ -3362,6 +3372,11 @@ def validate_implementation_delegation_contract(
         ),
         (
             model_routing,
+            "Only that quarantined legacy-normal path may select v4",
+            "model-routing.md containment-loss reconciliation: missing v4 confinement",
+        ),
+        (
+            model_routing,
             "asks for permission that cannot change the evidence",
             "model-routing.md recovery autonomy: missing no-useless-permission boundary",
         ),
@@ -3386,6 +3401,11 @@ def validate_implementation_delegation_contract(
             "tdd-workflow.md containment-loss reconciliation: missing fixture contract",
         ),
         (
+            tdd_workflow,
+            "Its v4 regression must advance HEAD after checkpoint capture",
+            "tdd-workflow.md containment-loss reconciliation: missing v4 committed-HEAD fixture",
+        ),
+        (
             review_protocol,
             "legacy `normal-contained` v3",
             "review-protocol.md recovery overlap: missing v3 review boundary",
@@ -3397,7 +3417,7 @@ def validate_implementation_delegation_contract(
         ),
         (
             versioning_text,
-            "first new durable transition raises the floor to 2.3.5 before source invalidation",
+            "first new durable transition raises the floor to 2.3.6 before source invalidation",
             "versioning.md containment-loss reconciliation: missing reader-floor rollout contract",
         ),
         (
@@ -3412,7 +3432,7 @@ def validate_implementation_delegation_contract(
         ),
         (
             readme,
-            "Version 2.3.5 adds exact post-zero reconciliation for `containment-loss-after-boundary`",
+            "Version 2.3.6 extends post-zero containment-loss reconciliation",
             "README.md containment-loss reconciliation: missing operator outcome",
         ),
         (
@@ -3437,7 +3457,7 @@ def validate_implementation_delegation_contract(
         ),
         (
             readme_ru,
-            "Версия 2.3.5 добавляет точную post-zero reconciliation",
+            "Версия 2.3.6 расширяет post-zero containment-loss reconciliation",
             "README.ru.md containment-loss reconciliation: missing operator outcome",
         ),
         (
@@ -4508,8 +4528,9 @@ def validate_safe_artifact_reader_contract(
 def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> list[str]:
     errors: list[str] = []
     recovery_contract = [
-        ('READER_FLOOR = "2.3.5"', "reader floor"),
-        ('_LEGACY_READER_FLOORS = {"2.2.0", "2.2.1", "2.2.2", "2.2.3", "2.2.5", "2.3.2"}', "legacy reader compatibility"),
+        ('READER_FLOOR = "2.3.6"', "reader floor"),
+        ('_LEGACY_READER_FLOORS = {', "legacy reader compatibility"),
+        ('"2.3.5",', "2.3.5 reader compatibility"),
         (
             "state = self._read_registry_for_write_locked(rebarrier=True)",
             "pending abandonment reader floor before source replay",
@@ -4580,6 +4601,7 @@ def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> lis
         ('"terminal-abandonment-v1"', "terminal abandonment schema"),
         ('"terminal-abandonment-v2"', "recovery overlap abandonment schema"),
         ('"terminal-abandonment-v3"', "legacy normal overlap abandonment schema"),
+        ('"terminal-abandonment-v4"', "legacy normal control-plane overlap abandonment schema"),
         ('"outside-set-drift"', "terminal abandonment cause"),
         ('"outside-set-drift-with-preexisting-dirty-overlap"', "recovery overlap abandonment cause"),
         (
@@ -4591,6 +4613,10 @@ def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> lis
         (
             '"terminal-abandoned-legacy-normal-overlap"',
             "legacy normal overlap abandonment invalidation",
+        ),
+        (
+            '"terminal-abandoned-legacy-normal-control-plane-overlap"',
+            "legacy normal control-plane overlap abandonment invalidation",
         ),
         ("invalidate_source_checkpoint", "semantic checkpoint invalidation"),
         (
@@ -4872,6 +4898,7 @@ def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> lis
         ("registry.complete_terminal_abandonment", "runner terminal abandonment completion"),
         ('"terminal-abandonment-v2"', "runner recovery overlap public result"),
         ('"terminal-abandonment-v3"', "runner legacy normal overlap public result"),
+        ('"terminal-abandonment-v4"', "runner legacy normal control-plane overlap result"),
         (
             '"outside-set-drift-with-preexisting-dirty-overlap"',
             "runner recovery overlap public cause",

@@ -4,6 +4,20 @@ OpenBuild follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.3.6] - 2026-07-22
+
+### Fixed
+
+- Extended private post-zero containment-loss reconciliation only for a legacy `normal-contained` lease whose fresh reasons are exactly `[git-control-plane-drift, outside-set-drift, preexisting-dirty-overlap]`.
+- Added owner-derived `terminal-abandonment-v4` with a distinct checkpoint invalidation reason. It binds the fresh candidate snapshot and reuses the authenticated reconciliation, close, unsuccessful archive, and same-lease release path without accepting a handoff, diff, commit, or root-completion authority.
+- Kept the same triple ineligible for ordinary terminal abandonment and kept every other additional, unknown, or control-plane reason no-mutation fail-closed.
+
+### Changed
+
+- Raised the first-write reader floor to 2.3.6 while retaining exact no-rewrite reads through 2.3.5; floor promotion still precedes private-source invalidation.
+- Added a committed-HEAD regression matching the observed quarantined lifecycle and synchronized runtime schemas, owner docs, release pins, and package contracts for 2.3.6.
+- Preserved the current README workflow, packaged defaults, `codex-exec-explicit-model`, project → user → packaged precedence, and the ban on unknown-model agent routes.
+
 ## [2.3.5] - 2026-07-22
 
 ### Fixed

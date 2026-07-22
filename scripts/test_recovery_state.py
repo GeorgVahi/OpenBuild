@@ -213,7 +213,7 @@ class RegistryContractTests(unittest.TestCase):
                 action_snapshot_id="9" * 64,
                 action_snapshot_sha256=hashlib.sha256(action_snapshot_bytes).hexdigest(),
             )
-            self.assertEqual(owner.state()["reader_floor"], "2.3.5")
+            self.assertEqual(owner.state()["reader_floor"], "2.3.6")
             authorization = owner.issue_post_commit_root_completion_authorization(action)
             issued_source = owner.read_private_source(preflight["source_state_id"])
             issued_action = issued_source["post_commit_root_completion"]["action"]
@@ -1167,7 +1167,7 @@ class RegistryContractTests(unittest.TestCase):
             self.assertEqual(first.workspace_key, second.workspace_key)
             self.assertTrue(first.directory.is_relative_to(state_root))
             self.assertFalse(first.directory.is_relative_to(workspace))
-            self.assertEqual(state["reader_floor"], "2.3.5")
+            self.assertEqual(state["reader_floor"], "2.3.6")
             self.assertEqual(state["identity_version"], 2)
             self.assertEqual(state["workspace_key"], first.workspace_key)
             self.assertIn("git_common_dir_identity", state)
@@ -1217,8 +1217,8 @@ class RegistryContractTests(unittest.TestCase):
                     specification_revision="R-001",
                 )
 
-            self.assertEqual(observed_floors, ["2.3.5"])
-            self.assertEqual(owner.state()["reader_floor"], "2.3.5")
+            self.assertEqual(observed_floors, ["2.3.6"])
+            self.assertEqual(owner.state()["reader_floor"], "2.3.6")
 
     def test_digest_consistent_malformed_registry_generations_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -2921,7 +2921,7 @@ class RegistryContractTests(unittest.TestCase):
             )
 
             self.assertIsNone(pending["quarantine"])
-            self.assertEqual(pending["reader_floor"], "2.3.5")
+            self.assertEqual(pending["reader_floor"], "2.3.6")
             self.assertEqual(
                 pending["lease"]["semantic_disposition"]["schema"],
                 "terminal-abandonment-v3",
@@ -3154,7 +3154,7 @@ class RegistryContractTests(unittest.TestCase):
 
             replay = self.owner(workspace, root / "state").state()
             self.assertEqual(replay["digest"], released["digest"])
-            self.assertEqual(replay["reader_floor"], "2.3.5")
+            self.assertEqual(replay["reader_floor"], "2.3.6")
 
     def test_ac05_mixed_drift_rejects_terminal_abandonment_without_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -3246,7 +3246,7 @@ class RegistryContractTests(unittest.TestCase):
 
             pending = owner.record_terminal_abandonment("normal-1")
             semantic = pending["lease"]["semantic_disposition"]
-            self.assertEqual(pending["reader_floor"], "2.3.5")
+            self.assertEqual(pending["reader_floor"], "2.3.6")
             self.assertEqual(pending["lease"]["lease_kind"], "normal-contained")
             self.assertEqual(semantic["schema"], "terminal-abandonment-v3")
             self.assertEqual(
@@ -3790,6 +3790,7 @@ class RegistryContractTests(unittest.TestCase):
                 "2.2.3",
                 "2.2.5",
                 "2.3.2",
+                "2.3.5",
             ):
                 with self.subTest(reader_floor=reader_floor):
                     legacy = dict(current)
@@ -3817,14 +3818,14 @@ class RegistryContractTests(unittest.TestCase):
             upgraded_owner = self.owner(workspace, root / "state")
 
             pending = upgraded_owner.record_terminal_abandonment("normal-1")
-            self.assertEqual(pending["reader_floor"], "2.3.5")
+            self.assertEqual(pending["reader_floor"], "2.3.6")
             upgraded_owner.complete_terminal_abandonment("normal-1")
             upgraded_owner.acknowledge_guardian_close("normal-1", self.guardian_close())
             released = upgraded_owner.release_contained_terminal("normal-1")
             replay = self.owner(workspace, root / "state").state()
 
             self.assertEqual(replay["digest"], released["digest"])
-            self.assertEqual(replay["reader_floor"], "2.3.5")
+            self.assertEqual(replay["reader_floor"], "2.3.6")
             self.assertEqual(
                 len(
                     [
@@ -3884,7 +3885,7 @@ class RegistryContractTests(unittest.TestCase):
             def assert_promoted_before_source(source: dict[str, object]):
                 self.assertEqual(
                     upgraded._read_registry_locked(rebarrier=False)["reader_floor"],
-                    "2.3.5",
+                    "2.3.6",
                 )
                 return commit_source(source)
 
@@ -3892,7 +3893,7 @@ class RegistryContractTests(unittest.TestCase):
                 upgraded, "_commit_source_locked", side_effect=assert_promoted_before_source
             ):
                 completed = upgraded.complete_terminal_abandonment("normal-1")
-            self.assertEqual(completed["reader_floor"], "2.3.5")
+            self.assertEqual(completed["reader_floor"], "2.3.6")
             self.assertEqual(
                 completed["lease"]["semantic_disposition"]["checkpoint_invalidation"],
                 "completed",

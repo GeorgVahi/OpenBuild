@@ -146,7 +146,8 @@ class RecoveryControlPlanePackageTests(unittest.TestCase):
         self.assertEqual(validate_recovery_control_plane(self.runner, self.recovery), [])
 
         mutations = [
-            ("recovery", 'READER_FLOOR = "2.3.5"', 'READER_FLOOR = "1"', "reader floor"),
+            ("recovery", 'READER_FLOOR = "2.3.6"', 'READER_FLOOR = "1"', "reader floor"),
+            ("recovery", '"2.3.5",', '"2.3.4",', "2.3.5 reader compatibility"),
             (
                 "recovery",
                 "state = self._read_registry_for_write_locked(rebarrier=True)",
@@ -264,6 +265,7 @@ class RecoveryControlPlanePackageTests(unittest.TestCase):
             ("recovery", "terminal-abandonment-v1", "terminal-abandonment-v0", "terminal abandonment schema"),
             ("recovery", "terminal-abandonment-v2", "terminal-abandonment-v0", "recovery overlap abandonment schema"),
             ("recovery", "terminal-abandonment-v3", "terminal-abandonment-v0", "legacy normal overlap abandonment schema"),
+            ("recovery", "terminal-abandonment-v4", "terminal-abandonment-v0", "legacy normal control-plane overlap abandonment schema"),
             (
                 "recovery",
                 "record_containment_loss_abandonment",
@@ -278,6 +280,7 @@ class RecoveryControlPlanePackageTests(unittest.TestCase):
             ),
             ("runner", "terminal-abandonment-v2", "terminal-abandonment-v0", "runner recovery overlap public result"),
             ("runner", "terminal-abandonment-v3", "terminal-abandonment-v0", "runner legacy normal overlap public result"),
+            ("runner", "terminal-abandonment-v4", "terminal-abandonment-v0", "runner legacy normal control-plane overlap result"),
             (
                 "runner",
                 '"_reconcile-containment-loss"',
@@ -295,6 +298,12 @@ class RecoveryControlPlanePackageTests(unittest.TestCase):
                 "terminal-abandoned-legacy-normal-overlap",
                 "terminal-abandoned-legacy-normal-overlap-v0",
                 "legacy normal overlap abandonment invalidation",
+            ),
+            (
+                "recovery",
+                "terminal-abandoned-legacy-normal-control-plane-overlap",
+                "terminal-abandoned-legacy-normal-control-plane-overlap-v0",
+                "legacy normal control-plane overlap abandonment invalidation",
             ),
             ("recovery", "record_terminal_abandonment", "record_generic_abandonment", "terminal abandonment transition"),
             ("recovery", "persist=False", "persist=True", "terminal abandonment no-mutation gate"),
@@ -1074,6 +1083,13 @@ class ImplementationDelegationContractTests(unittest.TestCase):
         )
 
         skill = self.skill_text.replace(
+            "terminal-abandonment-v4", "manual-recovery-v4"
+        )
+        self.assertTrue(
+            any("v4 exact-triple" in error for error in self.validate(skill_text=skill))
+        )
+
+        skill = self.skill_text.replace(
             "_reconcile-containment-loss --run-dir <path>",
             "_force-unlock-containment --run-dir <path>",
         )
@@ -1093,6 +1109,14 @@ class ImplementationDelegationContractTests(unittest.TestCase):
                 "containment-loss reconciliation" in error
                 for error in self.validate(protocol_text=protocol)
             )
+        )
+
+        protocol = self.protocol_text.replace(
+            "fresh reasons are exactly `[git-control-plane-drift, outside-set-drift, preexisting-dirty-overlap]`",
+            "fresh reasons are arbitrary",
+        )
+        self.assertTrue(
+            any("v4 reason boundary" in error for error in self.validate(protocol_text=protocol))
         )
 
         protocol = self.protocol_text.replace(
@@ -1122,6 +1146,14 @@ class ImplementationDelegationContractTests(unittest.TestCase):
             )
         )
 
+        routing = self.model_routing.replace(
+            "Only that quarantined legacy-normal path may select v4",
+            "Any path may select v4",
+        )
+        self.assertTrue(
+            any("v4 confinement" in error for error in self.validate(model_routing=routing))
+        )
+
         tdd = self.tdd_workflow.replace(
             "terminal-abandonment-v2", "manual-recovery-v2"
         )
@@ -1147,6 +1179,14 @@ class ImplementationDelegationContractTests(unittest.TestCase):
             )
         )
 
+        tdd = self.tdd_workflow.replace(
+            "Its v4 regression must advance HEAD after checkpoint capture",
+            "Its v4 regression needs no committed-HEAD fixture",
+        )
+        self.assertTrue(
+            any("v4 committed-HEAD fixture" in error for error in self.validate(tdd_workflow=tdd))
+        )
+
         review = self.review_protocol.replace(
             "legacy `normal-contained` v3",
             "generic mixed recovery",
@@ -1167,7 +1207,7 @@ class ImplementationDelegationContractTests(unittest.TestCase):
         )
 
         versioning = self.versioning_text.replace(
-            "first new durable transition raises the floor to 2.3.5 before source invalidation",
+            "first new durable transition raises the floor to 2.3.6 before source invalidation",
             "reader floor remains unchanged",
         )
         self.assertTrue(
@@ -1177,19 +1217,19 @@ class ImplementationDelegationContractTests(unittest.TestCase):
 class ChangelogContractTests(unittest.TestCase):
     def test_release_manifest_version_and_latest_release_are_documented(self) -> None:
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-        self.assertEqual(validate_changelog_contract(changelog, "2.3.5"), [])
+        self.assertEqual(validate_changelog_contract(changelog, "2.3.6"), [])
         self.assertNotIn("## [2.1.1]", changelog)
 
-        mutated = changelog.replace("## [2.3.5]", "## [next]", 1)
-        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "2.3.5")))
+        mutated = changelog.replace("## [2.3.6]", "## [next]", 1)
+        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "2.3.6")))
 
     def test_released_version_is_pinned_in_both_install_channels(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         readme_ru = (ROOT / "README.ru.md").read_text(encoding="utf-8")
-        self.assertEqual(validate_release_docs_contract(readme, readme_ru, "2.3.5"), [])
+        self.assertEqual(validate_release_docs_contract(readme, readme_ru, "2.3.6"), [])
 
-        mutated = readme.replace("--ref v2.3.5", "--ref main")
-        self.assertTrue(any("README.md" in error for error in validate_release_docs_contract(mutated, readme_ru, "2.3.5")))
+        mutated = readme.replace("--ref v2.3.6", "--ref main")
+        self.assertTrue(any("README.md" in error for error in validate_release_docs_contract(mutated, readme_ru, "2.3.6")))
 
 
 class DecisionAuthorityTraceTests(unittest.TestCase):

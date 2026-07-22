@@ -3915,6 +3915,11 @@ def classify_recovery_outcome(
                 "terminal-abandonment-v3",
                 "legacy-normal-outside-set-drift-with-preexisting-dirty-overlap",
             ),
+            (
+                "terminal-abandonment-v4",
+                "legacy-normal-control-plane-and-outside-set-drift-with-"
+                "preexisting-dirty-overlap",
+            ),
         }
         or terminal_abandonment.get("checkpoint_invalidation") != "completed"
     ):

@@ -2164,6 +2164,25 @@ class CodexInvocationTests(unittest.TestCase):
             allowed.write_text("writer change\n", encoding="utf-8", newline="\n")
             outside = repo / "outside.txt"
             outside.write_text("outside drift\n", encoding="utf-8", newline="\n")
+            subprocess.run(["git", "add", "outside.txt"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "--quiet", "-m", "later root change"],
+                cwd=repo,
+                check=True,
+            )
+            registry_before_ordinary = owner.path.read_bytes()
+            source_before_ordinary = owner.source_path(
+                preflight["source_state_id"]
+            ).read_bytes()
+            with self.assertRaisesRegex(
+                agent_runner.RecoveryStateError, "exact outside-set-drift"
+            ):
+                owner.record_terminal_abandonment("lease-1")
+            self.assertEqual(owner.path.read_bytes(), registry_before_ordinary)
+            self.assertEqual(
+                owner.source_path(preflight["source_state_id"]).read_bytes(),
+                source_before_ordinary,
+            )
             owner.quarantine_containment_loss("lease-1", "guardian-process-stopped")
             status_before = subprocess.run(
                 ["git", "status", "--porcelain=v2", "-z"],
@@ -2220,6 +2239,19 @@ class CodexInvocationTests(unittest.TestCase):
             self.assertIsNone(state["lease"])
             self.assertIsNone(state["outbox"])
             self.assertIsNone(state["quarantine"])
+            abandonment = next(
+                event
+                for event in state["history"]
+                if event.get("event") == "terminal-abandonment-recorded"
+                and event.get("lease_id") == "lease-1"
+            )
+            self.assertEqual(abandonment["schema"], "terminal-abandonment-v4")
+            self.assertEqual(
+                owner.read_private_source(preflight["source_state_id"])["public_checkpoint"][
+                    "reasons"
+                ],
+                ["terminal-abandoned-legacy-normal-control-plane-overlap"],
+            )
             self.assertFalse((run_dir / "implementation-handoffs.jsonl").exists())
             self.assertEqual(
                 subprocess.run(
@@ -3960,6 +3992,19 @@ class CodexInvocationTests(unittest.TestCase):
                 "checkpoint_invalidation": "completed",
             }
         )
+        legacy_normal_control_plane_overlap_abandoned = (
+            agent_runner.classify_recovery_outcome(
+                terminal_abandonment={
+                    "outcome": "terminal-abandoned",
+                    "schema": "terminal-abandonment-v4",
+                    "cause": (
+                        "legacy-normal-control-plane-and-outside-set-drift-with-"
+                        "preexisting-dirty-overlap"
+                    ),
+                    "checkpoint_invalidation": "completed",
+                }
+            )
+        )
         audit = agent_runner.root_completion_authorization_record(
             specification_revision="R-005",
             milestone="M2",
@@ -3975,6 +4020,10 @@ class CodexInvocationTests(unittest.TestCase):
         self.assertEqual(
             legacy_normal_overlap_abandoned["schema"], "terminal-abandonment-v3"
         )
+        self.assertEqual(
+            legacy_normal_control_plane_overlap_abandoned["schema"],
+            "terminal-abandonment-v4",
+        )
         self.assertEqual(audit["event"], "root-completion-authorized")
         self.assertEqual(audit["authority"], "original-build-request")
         self.assertTrue(audit["automatic"])
@@ -3985,6 +4034,7 @@ class CodexInvocationTests(unittest.TestCase):
             abandoned,
             recovery_overlap_abandoned,
             legacy_normal_overlap_abandoned,
+            legacy_normal_control_plane_overlap_abandoned,
             audit,
         ):
             self.assertEqual(record["writer_action"], "none")
