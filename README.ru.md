@@ -4,7 +4,7 @@
 
 OpenBuild — явно вызываемый workflow для Codex, который может провести задачу или существующую спецификацию от поиска по репозиторию до реализации, проверок и review. Основной маршрут автоматический: вызовите Build, опишите результат, а он сам выберет первый незавершённый этап.
 
-Текущий релиз: `2.3.6` ([закреплённый исходник skill](https://github.com/GeorgVahi/OpenBuild/tree/v2.3.6/plugins/openbuild/skills/build)).
+Текущий релиз: `2.4.0-alpha.1` ([закреплённый исходник skill](https://github.com/GeorgVahi/OpenBuild/tree/v2.4.0-alpha.1/plugins/openbuild/skills/build)).
 
 OpenBuild сам управляет рутинной оркестрацией агентов: сразу активирует выбранный exact-agent, продолжает наблюдать живой процесс в пределах одного 15-минутного окна и применяет проверенный same-scope retry или переход на одну ступень без постоянных вопросов пользователю. Решения о продукте, архитектуре, разрешениях, приватности, разрушительных и внешних действиях и публикации остаются за пользователем.
 
@@ -43,7 +43,7 @@ codex plugin marketplace remove openbuild
 Добавьте последний закреплённый релиз и установите plugin:
 
 ```powershell
-codex plugin marketplace add GeorgVahi/OpenBuild --ref v2.3.6
+codex plugin marketplace add GeorgVahi/OpenBuild --ref v2.4.0-alpha.1
 codex plugin add openbuild@openbuild
 ```
 

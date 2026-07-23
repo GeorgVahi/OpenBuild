@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import re
@@ -22,6 +23,7 @@ AGENT_RUNNER = SKILL / "scripts" / "agent_runner.py"
 RECOVERY_STATE = SKILL / "scripts" / "recovery_state.py"
 MODEL_MAP_RESOLVER = SKILL / "scripts" / "model_map.py"
 DISCOVERY_CONTRACT = SKILL / "scripts" / "discovery_contract.py"
+PROJECT_STATE = SKILL / "scripts" / "project_state.py"
 PACKAGED_MODEL_MAP = SKILL / "profiles" / "openbuild_model_map.toml"
 MODEL_MAP_INTERVIEW = SKILL / "references" / "model-map-interview.md"
 PACKAGED_SEARCH_MODEL = "gpt-5.3-codex-spark"
@@ -94,6 +96,7 @@ REQUIRED = [
     RECOVERY_STATE,
     MODEL_MAP_RESOLVER,
     DISCOVERY_CONTRACT,
+    PROJECT_STATE,
     PACKAGED_MODEL_MAP,
     *PACKAGED_AGENT_PROFILES.values(),
     SKILL / "references" / "tdd-workflow.md",
@@ -103,6 +106,7 @@ REQUIRED = [
     ROOT / "scripts" / "test_recovery_state.py",
     ROOT / "scripts" / "test_model_map.py",
     ROOT / "scripts" / "test_discovery_contract.py",
+    ROOT / "scripts" / "test_project_lanes.py",
 ]
 
 TEXT_SUFFIXES = {".md", ".json", ".yaml", ".yml", ".toml", ".py"}
@@ -4461,6 +4465,143 @@ def public_text_files() -> list[Path]:
     return result
 
 
+def parse_project_transition_registry(source: str) -> list[dict[str, object]]:
+    """Read the literal R-031 registry without importing its state owner."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as exc:
+        raise ValueError("project state transition registry is not parseable") from exc
+    value: ast.AST | None = None
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "TRANSITION_REGISTRY_DATA"
+            for target in node.targets
+        ):
+            value = node.value
+            break
+    if value is None:
+        raise ValueError("project state transition registry literal is missing")
+    try:
+        data = ast.literal_eval(value)
+    except (ValueError, TypeError) as exc:
+        raise ValueError("project state transition registry is not literal data") from exc
+    if not isinstance(data, tuple) or not all(isinstance(entry, dict) for entry in data):
+        raise ValueError("project state transition registry has an invalid shape")
+    return [dict(entry) for entry in data]
+
+
+def validate_project_transition_registry(entries: list[dict[str, object]]) -> list[str]:
+    """Keep registry completeness checks static and independent of state sinks."""
+    errors: list[str] = []
+    expected = {"I0", "BA0", "B0", *(f"O{number}" for number in range(1, 9)), "S", "BS", "R", "TST"}
+    fields = {"short_id", "id", "class", "family", "incident_safe", "test_only"}
+    short_ids = [entry.get("short_id") for entry in entries]
+    full_ids = [entry.get("id") for entry in entries]
+    classes = [entry.get("class") for entry in entries]
+    if set(short_ids) != expected or len(short_ids) != len(set(short_ids)):
+        errors.append("project_state.py: R-031 transition short IDs are incomplete or non-unique")
+    if len(full_ids) != len(set(full_ids)) or not all(isinstance(value, str) for value in full_ids):
+        errors.append("project_state.py: R-031 transition full IDs are malformed or non-unique")
+    if len(classes) != len(set(classes)) or not all(isinstance(value, str) and value for value in classes):
+        errors.append("project_state.py: R-031 transition concrete classes are malformed or non-unique")
+    family_members = {
+        "bootstrap": {"I0", "BA0", "B0"},
+        "ordinary": {f"O{number}" for number in range(1, 9)},
+        "incident": {"S", "BS"},
+        "observer": {"R"},
+        "test": {"TST"},
+    }
+    for entry in entries:
+        if set(entry) != fields:
+            errors.append("project_state.py: R-031 transition registry fields are not exact")
+            continue
+        short_id = entry["short_id"]
+        full_id = entry["id"]
+        if not isinstance(short_id, str) or entry["family"] not in family_members or short_id not in family_members[entry["family"]]:
+            errors.append("project_state.py: R-031 transition family membership is invalid")
+        if not isinstance(full_id, str) or not isinstance(short_id, str) or not full_id.startswith(f"R-031.M1.{short_id}."):
+            errors.append("project_state.py: R-031 transition full ID is not exact")
+        if entry["test_only"] is not (short_id == "TST"):
+            errors.append("project_state.py: R-031 test-only transition separation is invalid")
+        if short_id in {"S", "BS", "R", "TST"} and entry["incident_safe"] is not True:
+            errors.append("project_state.py: R-031 incident-safe observer transition is invalid")
+        if short_id not in {"S", "BS", "R", "TST"} and entry["incident_safe"] is not False:
+            errors.append("project_state.py: R-031 non-observer transition is incorrectly incident-safe")
+    return sorted(set(errors))
+
+
+_TRANSITION_ASSIGNMENT_CONTEXT = re.compile(
+    r"(?:\b(?:model|model_id)\b|[\"'](?:model|model_id)[\"'])\s*[:=]",
+    re.IGNORECASE,
+)
+_ORDINARY_TRANSITION_PREFIX = "O"
+_ORDINARY_TRANSITION_TOKEN = (
+    rf"(?<![A-Za-z0-9_]){re.escape(_ORDINARY_TRANSITION_PREFIX)}[1-8]"
+    r"(?![A-Za-z0-9_])"
+)
+
+
+def _mask_transition_code_span(match: re.Match[str]) -> str:
+    return re.sub(
+        _ORDINARY_TRANSITION_TOKEN,
+        "ordinary-transition",
+        match.group(0),
+    )
+
+
+def mask_registered_transition_references(
+    text: str,
+    registered_full_ids: set[str],
+    *,
+    registry_table: bool = False,
+) -> str:
+    """Mask only structural transition notation before the fixed-model scan.
+
+    In particular, a model assignment is never exempt, even if it happens to
+    contain a registered transition string.  Ordinary identifiers are exempt
+    only in code spans, transition-table cells, the documented closed ordinary
+    range, or the literal registry ``short_id`` column.
+    """
+    lines: list[str] = []
+    for line in text.splitlines(keepends=True):
+        if _TRANSITION_ASSIGNMENT_CONTEXT.search(line):
+            lines.append(line)
+            continue
+        masked = line
+        for transition_id in sorted(registered_full_ids, key=len, reverse=True):
+            pattern = rf"(?<![A-Za-z0-9_.-]){re.escape(transition_id)}(?![A-Za-z0-9_.-])"
+            masked = re.sub(pattern, "registered-transition", masked)
+        masked = re.sub(r"`[^`\r\n]+`", _mask_transition_code_span, masked)
+        masked = re.sub(
+            rf"(?P<cell>\|\s*){_ORDINARY_TRANSITION_TOKEN}(?=[\s.`|])",
+            r"\g<cell>ordinary-transition",
+            masked,
+        )
+        masked = re.sub(
+            rf"\b{re.escape(_ORDINARY_TRANSITION_PREFIX)}[1]\s*[-–—]\s*"
+            rf"{re.escape(_ORDINARY_TRANSITION_PREFIX)}[8]\b",
+            "ordinary-transition-range",
+            masked,
+        )
+        if registry_table:
+            masked = re.sub(
+                r"((?:[\"']short_id[\"'])\s*:\s*[\"'])"
+                + re.escape(_ORDINARY_TRANSITION_PREFIX)
+                + r"[1-8]([\"'])",
+                r"\1ordinary-transition\2",
+                masked,
+            )
+        lines.append(masked)
+    return "".join(lines)
+
+
+def mask_packaged_model_references(text: str) -> str:
+    """Mask packaged model references without collapsing Markdown spans."""
+    for packaged_model, _, _ in PACKAGED_AGENT_DEFAULTS.values():
+        text = text.replace(packaged_model, "packaged-model")
+    return text
+
+
 def validate_search_availability_classifier_contract(runner_text: str) -> list[str]:
     """Keep the fail-closed complete-stream classifier visible to package validation."""
     errors: list[str] = []
@@ -5528,6 +5669,18 @@ def main() -> int:
 
     forbidden = ["[TO" + "DO", "TO" + "DO:", "C:" + "\\Users\\", "BIAS" + "MACHINE"]
     fixed_model = re.compile(r"\b(?:gpt[\s\-_‑–—]?\d|o\d(?:[-._][a-z0-9]+)?|claude[\s\-_‑–—]?\d|gemini[\s\-_‑–—]?\d)", re.IGNORECASE)
+    registry_text = read_text(PROJECT_STATE, errors)
+    try:
+        transition_entries = parse_project_transition_registry(registry_text)
+    except ValueError as exc:
+        fail(errors, f"project_state.py: {exc}")
+        transition_entries = []
+    errors.extend(validate_project_transition_registry(transition_entries))
+    registered_transition_ids = {
+        entry["id"]
+        for entry in transition_entries
+        if isinstance(entry.get("id"), str)
+    }
     active_model_assignment = re.compile(
         r'''(?im)^\s*["']?(?:model|model_id)["']?\s*[:=]\s*["'](?![<{])([^"']+)["']'''
     )
@@ -5537,9 +5690,12 @@ def main() -> int:
         for marker in forbidden:
             if marker in text:
                 fail(errors, f"{relative}: forbidden marker {marker!r}")
-        model_scan_text = text
-        for packaged_model, _, _ in PACKAGED_AGENT_DEFAULTS.values():
-            model_scan_text = model_scan_text.replace(packaged_model, "")
+        model_scan_text = mask_packaged_model_references(text)
+        model_scan_text = mask_registered_transition_references(
+            model_scan_text,
+            registered_transition_ids,
+            registry_table=path == PROJECT_STATE,
+        )
         if fixed_model.search(model_scan_text):
             fail(errors, f"{relative}: fixed model slug is not allowed")
         assignment = active_model_assignment.search(text)

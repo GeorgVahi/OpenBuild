@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import tomllib
 import unittest
@@ -16,6 +17,8 @@ from validate_package import (
     IMPLEMENTATION_DELEGATION,
     PACKAGED_SEARCH_INSTRUCTIONS,
     PACKAGED_SEARCH_MODEL,
+    PROJECT_STATE,
+    REQUIRED,
     REVIEW_MAX_TIER_BY_RISK,
     REVIEW_PROTOCOL,
     ROOT,
@@ -25,6 +28,9 @@ from validate_package import (
     migration_entry_id,
     migration_plan_id,
     migration_supported_mappings,
+    mask_packaged_model_references,
+    mask_registered_transition_references,
+    parse_project_transition_registry,
     validate_auto_routing_contract,
     validate_agent_usage_report_contract,
     validate_blindspot_contract,
@@ -43,6 +49,81 @@ from validate_package import (
     validate_search_availability_classifier_contract,
     validate_usage_routing_contract,
 )
+
+
+class TransitionTokenValidatorTests(unittest.TestCase):
+    def test_project_state_is_required_and_registry_is_static_data(self) -> None:
+        self.assertIn(PROJECT_STATE, REQUIRED)
+        entries = parse_project_transition_registry(PROJECT_STATE.read_text(encoding="utf-8"))
+        expected = {
+            "I0",
+            "BA0",
+            "B0",
+            *(f"O{number}" for number in range(1, 9)),
+            "S",
+            "BS",
+            "R",
+            "TST",
+        }
+        self.assertEqual({entry["short_id"] for entry in entries}, expected)
+
+    def test_masks_only_proven_transition_references(self) -> None:
+        ordinary_one = "O" + "1"
+        ordinary_eight = "O" + "8"
+        registered_id = f"R-031.M1.{ordinary_one}.session-routing.stage"
+        registered = {registered_id}
+        self.assertNotIn(
+            ordinary_one,
+            mask_registered_transition_references(
+                f"transition {registered_id}", registered
+            ),
+        )
+        for text in (
+            f"`{ordinary_one}`",
+            f"`{ordinary_one}.session.attach`",
+            f"| {ordinary_one} | owner |",
+            f"| {ordinary_one} Project/session | owner |",
+            f"{ordinary_one}-{ordinary_eight}",
+        ):
+            with self.subTest(text=text):
+                self.assertNotIn(
+                    ordinary_one,
+                    mask_registered_transition_references(text, registered),
+                )
+        self.assertNotIn(
+            ordinary_one,
+            mask_registered_transition_references(
+                f'"short_id": "{ordinary_one}",',
+                registered,
+                registry_table=True,
+            ),
+        )
+
+    def test_does_not_mask_models_or_unproven_tokens(self) -> None:
+        ordinary_one = "O" + "1"
+        registered_id = f"R-031.M1.{ordinary_one}.session-routing.stage"
+        registered = {registered_id}
+        for text in (
+            ordinary_one,
+            ordinary_one.lower(),
+            f"MODEL_{ordinary_one}",
+            f'model = "{ordinary_one}"',
+            f'model_id: "{registered_id}"',
+            "O" + "9",
+            "gpt" + "-5.6",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(mask_registered_transition_references(text, registered), text)
+
+    def test_packaged_model_mask_preserves_adjacent_transition_code_spans(self) -> None:
+        ordinary_seven = "O" + "7"
+        text = f"configured `{PACKAGED_SEARCH_MODEL}` then `{ordinary_seven}`"
+        masked = mask_registered_transition_references(
+            mask_packaged_model_references(text),
+            set(),
+        )
+        self.assertNotIn(PACKAGED_SEARCH_MODEL, masked)
+        self.assertNotIn(ordinary_seven, masked)
 
 
 class SearchAvailabilityClassifierPackageTests(unittest.TestCase):
@@ -1215,21 +1296,49 @@ class ImplementationDelegationContractTests(unittest.TestCase):
         )
 
 class ChangelogContractTests(unittest.TestCase):
+    @staticmethod
+    def current_version() -> str:
+        manifest = json.loads(
+            (ROOT / "plugins/openbuild/.codex-plugin/plugin.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        return str(manifest["version"])
+
     def test_release_manifest_version_and_latest_release_are_documented(self) -> None:
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-        self.assertEqual(validate_changelog_contract(changelog, "2.3.6"), [])
+        version = self.current_version()
+        self.assertEqual(validate_changelog_contract(changelog, version), [])
         self.assertNotIn("## [2.1.1]", changelog)
 
-        mutated = changelog.replace("## [2.3.6]", "## [next]", 1)
-        self.assertTrue(any("current manifest version" in error for error in validate_changelog_contract(mutated, "2.3.6")))
+        mutated = changelog.replace(version, "next")
+        self.assertTrue(
+            any(
+                "current manifest version" in error
+                for error in validate_changelog_contract(mutated, version)
+            )
+        )
 
     def test_released_version_is_pinned_in_both_install_channels(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         readme_ru = (ROOT / "README.ru.md").read_text(encoding="utf-8")
-        self.assertEqual(validate_release_docs_contract(readme, readme_ru, "2.3.6"), [])
+        version = self.current_version()
+        self.assertEqual(
+            validate_release_docs_contract(readme, readme_ru, version),
+            [],
+        )
 
-        mutated = readme.replace("--ref v2.3.6", "--ref main")
-        self.assertTrue(any("README.md" in error for error in validate_release_docs_contract(mutated, readme_ru, "2.3.6")))
+        mutated = readme.replace(f"--ref v{version}", "--ref main")
+        self.assertTrue(
+            any(
+                "README.md" in error
+                for error in validate_release_docs_contract(
+                    mutated,
+                    readme_ru,
+                    version,
+                )
+            )
+        )
 
 
 class DecisionAuthorityTraceTests(unittest.TestCase):

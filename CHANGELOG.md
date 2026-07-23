@@ -4,6 +4,18 @@ OpenBuild follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### 2.4.0-alpha.1
+
+#### Added
+
+- Added the first R-031 project coordinator owner for automatic I0 setup, one-use BA0 bootstrap authority, immutable anchor publication, clean B0 state, and sink-free typed observers.
+- Added Windows-supported durability and concurrency fixtures plus registry-aware transition-token validation without weakening the fixed-model prohibition.
+
+#### Changed
+
+- Kept the packaged defaults, `codex-exec-explicit-model`, project → user → packaged precedence, and the ban on unknown-model agent routes.
+- Synchronized the README version pins for the `2.4.0-alpha.1` development snapshot; later parallel-lane milestones remain unreleased.
+
 ## [2.3.6] - 2026-07-22
 
 ### Fixed
