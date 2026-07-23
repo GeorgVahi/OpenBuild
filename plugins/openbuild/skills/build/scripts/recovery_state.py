@@ -26,7 +26,7 @@ from typing import Any, Iterator, Mapping, Sequence
 
 REGISTRY_SCHEMA = 1
 IDENTITY_VERSION = 2
-READER_FLOOR = "2.3.6"
+READER_FLOOR = "2.4.0"
 _LEGACY_READER_FLOORS = {
     "2.2.0",
     "2.2.1",
@@ -35,6 +35,7 @@ _LEGACY_READER_FLOORS = {
     "2.2.5",
     "2.3.2",
     "2.3.5",
+    "2.3.6",
 }
 DEFAULT_MAX_RECORDS = 100_000
 DEFAULT_MAX_BYTES = 2 * 1024 * 1024 * 1024
@@ -441,6 +442,7 @@ def _validate_public_checkpoint(value: Any) -> None:
         "terminal-abandoned-outside-set-drift",
         "terminal-abandoned-recovery-overlap",
         "terminal-abandoned-legacy-normal-overlap",
+        "terminal-abandoned-legacy-normal-dirty-overlap",
         "terminal-abandoned-legacy-normal-control-plane-overlap",
         "post-commit-root-completed",
     }
@@ -860,6 +862,10 @@ def _validate_semantic_disposition(value: Any) -> None:
             (
                 "terminal-abandonment-v4",
                 "legacy-normal-control-plane-and-outside-set-drift-with-preexisting-dirty-overlap",
+            ),
+            (
+                "terminal-abandonment-v5",
+                "legacy-normal-preexisting-dirty-overlap",
             ),
         }
         if (
@@ -2155,10 +2161,17 @@ class RecoveryRegistry:
             ):
                 raise RecoveryStateError("terminal abandonment v2 requires a recovery target lease")
             if (
-                semantic.get("schema") in {"terminal-abandonment-v3", "terminal-abandonment-v4"}
+                semantic.get("schema")
+                in {
+                    "terminal-abandonment-v3",
+                    "terminal-abandonment-v4",
+                    "terminal-abandonment-v5",
+                }
                 and lease.get("lease_kind") != "normal-contained"
             ):
-                raise RecoveryStateError("terminal abandonment v3/v4 requires a normal contained lease")
+                raise RecoveryStateError(
+                    "terminal abandonment v3/v4/v5 requires a normal contained lease"
+                )
             recorded = [
                 event
                 for event in state.get("history", [])
@@ -2264,9 +2277,14 @@ class RecoveryRegistry:
                             "terminal-abandoned-legacy-normal-control-plane-overlap"
                             if semantic.get("schema") == "terminal-abandonment-v4"
                             else (
-                                "terminal-abandoned-legacy-normal-overlap"
-                                if semantic.get("schema") == "terminal-abandonment-v3"
-                                else "terminal-abandoned-outside-set-drift"
+                                "terminal-abandoned-legacy-normal-dirty-overlap"
+                                if semantic.get("schema") == "terminal-abandonment-v5"
+                                else (
+                                    "terminal-abandoned-legacy-normal-overlap"
+                                    if semantic.get("schema")
+                                    == "terminal-abandonment-v3"
+                                    else "terminal-abandoned-outside-set-drift"
+                                )
                             )
                         )
                     )
@@ -2994,6 +3012,7 @@ class RecoveryRegistry:
                 "terminal-abandoned-outside-set-drift",
                 "terminal-abandoned-recovery-overlap",
                 "terminal-abandoned-legacy-normal-overlap",
+                "terminal-abandoned-legacy-normal-dirty-overlap",
                 "terminal-abandoned-legacy-normal-control-plane-overlap",
                 "post-commit-root-completed",
             }:
@@ -5322,7 +5341,7 @@ class RecoveryRegistry:
         *,
         _containment_loss_reconciliation: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Record the one exact no-handoff terminal outcome for outside-set drift.
+        """Record one exact supported no-handoff terminal abandonment outcome.
 
         The caller has no cause, digest, checkpoint, or force input.  This is
         deliberately a continuation of the contained producer lifecycle, not
@@ -5393,6 +5412,12 @@ class RecoveryRegistry:
                 schema = "terminal-abandonment-v3"
                 cause = "legacy-normal-outside-set-drift-with-preexisting-dirty-overlap"
             elif (
+                lease.get("lease_kind") == "normal-contained"
+                and reasons == ["preexisting-dirty-overlap"]
+            ):
+                schema = "terminal-abandonment-v5"
+                cause = "legacy-normal-preexisting-dirty-overlap"
+            elif (
                 _containment_loss_reconciliation is not None
                 and lease.get("lease_kind") == "normal-contained"
                 and reasons
@@ -5408,7 +5433,9 @@ class RecoveryRegistry:
                     "preexisting-dirty-overlap"
                 )
             else:
-                raise RecoveryStateError("terminal abandonment requires exact outside-set-drift")
+                raise RecoveryStateError(
+                    "terminal abandonment requires an exact supported drift shape"
+                )
             candidate_snapshot = candidate_checkpoint.get("candidate_snapshot")
             if not isinstance(candidate_snapshot, Mapping):
                 raise RecoveryStateError("terminal abandonment lacks a candidate snapshot")
@@ -5589,9 +5616,13 @@ class RecoveryRegistry:
                     "terminal-abandoned-legacy-normal-control-plane-overlap"
                     if semantic.get("schema") == "terminal-abandonment-v4"
                     else (
-                        "terminal-abandoned-legacy-normal-overlap"
-                        if semantic.get("schema") == "terminal-abandonment-v3"
-                        else "terminal-abandoned-outside-set-drift"
+                        "terminal-abandoned-legacy-normal-dirty-overlap"
+                        if semantic.get("schema") == "terminal-abandonment-v5"
+                        else (
+                            "terminal-abandoned-legacy-normal-overlap"
+                            if semantic.get("schema") == "terminal-abandonment-v3"
+                            else "terminal-abandoned-outside-set-drift"
+                        )
                     )
                 )
             )
@@ -5633,10 +5664,14 @@ class RecoveryRegistry:
                         ]
                         if semantic.get("schema") == "terminal-abandonment-v4"
                         else (
-                            ["outside-set-drift", "preexisting-dirty-overlap"]
-                            if semantic.get("schema")
-                            in {"terminal-abandonment-v2", "terminal-abandonment-v3"}
-                            else ["outside-set-drift"]
+                            ["preexisting-dirty-overlap"]
+                            if semantic.get("schema") == "terminal-abandonment-v5"
+                            else (
+                                ["outside-set-drift", "preexisting-dirty-overlap"]
+                                if semantic.get("schema")
+                                in {"terminal-abandonment-v2", "terminal-abandonment-v3"}
+                                else ["outside-set-drift"]
+                            )
                         )
                     )
                     or not isinstance(candidate_snapshot, Mapping)
@@ -5745,6 +5780,7 @@ class RecoveryRegistry:
             "terminal-abandoned-outside-set-drift",
             "terminal-abandoned-recovery-overlap",
             "terminal-abandoned-legacy-normal-overlap",
+            "terminal-abandoned-legacy-normal-dirty-overlap",
             "terminal-abandoned-legacy-normal-control-plane-overlap",
             "post-commit-root-completed",
         }:

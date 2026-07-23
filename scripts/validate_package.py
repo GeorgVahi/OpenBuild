@@ -24,6 +24,7 @@ RECOVERY_STATE = SKILL / "scripts" / "recovery_state.py"
 MODEL_MAP_RESOLVER = SKILL / "scripts" / "model_map.py"
 DISCOVERY_CONTRACT = SKILL / "scripts" / "discovery_contract.py"
 PROJECT_STATE = SKILL / "scripts" / "project_state.py"
+PROJECT_LANES = SKILL / "scripts" / "project_lanes.py"
 PACKAGED_MODEL_MAP = SKILL / "profiles" / "openbuild_model_map.toml"
 MODEL_MAP_INTERVIEW = SKILL / "references" / "model-map-interview.md"
 PACKAGED_SEARCH_MODEL = "gpt-5.3-codex-spark"
@@ -97,6 +98,7 @@ REQUIRED = [
     MODEL_MAP_RESOLVER,
     DISCOVERY_CONTRACT,
     PROJECT_STATE,
+    PROJECT_LANES,
     PACKAGED_MODEL_MAP,
     *PACKAGED_AGENT_PROFILES.values(),
     SKILL / "references" / "tdd-workflow.md",
@@ -3320,6 +3322,16 @@ def validate_implementation_delegation_contract(
             "SKILL.md legacy normal overlap: missing v3 terminal outcome",
         ),
         (
+            skill_text,
+            "terminal-abandonment-v5",
+            "SKILL.md legacy normal single overlap: missing v5 terminal outcome",
+        ),
+        (
+            skill_text,
+            "CAS-attaches that exact lease/run/allowed-set to the project lane",
+            "SKILL.md project lane bridge: missing pre-prompt attach boundary",
+        ),
+        (
             protocol_text,
             "exact sorted pair `[outside-set-drift, preexisting-dirty-overlap]`",
             "implementation-delegation.md recovery overlap: missing exact pair",
@@ -3328,6 +3340,16 @@ def validate_implementation_delegation_contract(
             protocol_text,
             "legacy `normal-contained` lease",
             "implementation-delegation.md legacy normal overlap: missing v3 lease boundary",
+        ),
+        (
+            protocol_text,
+            "exact single reason `[preexisting-dirty-overlap]`",
+            "implementation-delegation.md legacy normal single overlap: missing v5 reason boundary",
+        ),
+        (
+            protocol_text,
+            "successful accepted handoff records `waiting-for-integration`",
+            "implementation-delegation.md project lane bridge: missing terminal boundary",
         ),
         (
             skill_text,
@@ -3371,6 +3393,11 @@ def validate_implementation_delegation_contract(
         ),
         (
             model_routing,
+            "exact single `[preexisting-dirty-overlap]` uses v5 only for a completed legacy `normal-contained` lease",
+            "model-routing.md legacy normal single overlap: missing v5 routing boundary",
+        ),
+        (
+            model_routing,
             "An exact post-zero `containment-loss-after-boundary` quarantine",
             "model-routing.md containment-loss reconciliation: missing non-routing boundary",
         ),
@@ -3401,6 +3428,11 @@ def validate_implementation_delegation_contract(
         ),
         (
             tdd_workflow,
+            "terminal-abandonment-v5",
+            "tdd-workflow.md legacy normal single overlap: missing v5 fixture contract",
+        ),
+        (
+            tdd_workflow,
             "Post-zero containment-loss reconciliation must additionally reproduce",
             "tdd-workflow.md containment-loss reconciliation: missing fixture contract",
         ),
@@ -3416,13 +3448,18 @@ def validate_implementation_delegation_contract(
         ),
         (
             review_protocol,
+            "legacy `normal-contained` lifecycle to v5 without artificial drift",
+            "review-protocol.md legacy normal single overlap: missing v5 review boundary",
+        ),
+        (
+            review_protocol,
             "post-zero containment-loss diffs additionally prove",
             "review-protocol.md containment-loss reconciliation: missing review boundary",
         ),
         (
             versioning_text,
-            "first new durable transition raises the floor to 2.3.6 before source invalidation",
-            "versioning.md containment-loss reconciliation: missing reader-floor rollout contract",
+            "first new durable transition raises the floor to 2.4.0 before source invalidation",
+            "versioning.md v5 reconciliation: missing reader-floor rollout contract",
         ),
         (
             readme,
@@ -3433,6 +3470,16 @@ def validate_implementation_delegation_contract(
             readme,
             "Only a new checkpoint-bound recovery target writer requires explicit user authorization",
             "README.md automatic orchestration: missing new-writer authority boundary",
+        ),
+        (
+            readme,
+            "Version 2.4.0 adds ordinary post-zero reconciliation",
+            "README.md legacy normal single overlap: missing operator outcome",
+        ),
+        (
+            readme,
+            "Version 2.4.0-alpha.2 previews the M2 project-lane lifecycle",
+            "README.md project lane bridge: missing operator outcome",
         ),
         (
             readme,
@@ -3458,6 +3505,16 @@ def validate_implementation_delegation_contract(
             readme_ru,
             "Только новый checkpoint-bound recovery target writer требует явного разрешения пользователя",
             "README.ru.md automatic orchestration: missing new-writer authority boundary",
+        ),
+        (
+            readme_ru,
+            "Версия 2.4.0 добавляет обычный post-zero reconciliation",
+            "README.ru.md legacy normal single overlap: missing operator outcome",
+        ),
+        (
+            readme_ru,
+            "Версия 2.4.0-alpha.2 предварительно выпускает M2 lifecycle project lanes",
+            "README.ru.md project lane bridge: missing operator outcome",
         ),
         (
             readme_ru,
@@ -4666,12 +4723,114 @@ def validate_safe_artifact_reader_contract(
     return errors
 
 
+def validate_project_lane_runner_bridge(
+    runner_text: str,
+    project_lanes_text: str,
+) -> list[str]:
+    errors: list[str] = []
+    runner_contract = [
+        (
+            "from project_lanes import ProjectLaneCoordinator, ProjectLaneError",
+            "project lane owner import",
+        ),
+        ("def recovery_registry_for_request(", "lane-local registry routing"),
+        ("def resolve_project_lane_start(", "project lane start resolver"),
+        (
+            "def resolve_project_lane_recovery_authorization(",
+            "project lane recovery authorization resolver",
+        ),
+        ('"project-lane-request-v1"', "project lane private request schema"),
+        ("def attach_project_lane_writer(", "project lane writer attach"),
+        ("def quarantine_project_lane_writer(", "project lane quarantine"),
+        ("def finalize_project_lane_terminal(", "project lane terminal replay"),
+        (
+            "def prepare_project_lane_recovery(",
+            "project lane recovery-ready bridge",
+        ),
+        (
+            "def complete_project_lane_writer(",
+            "project lane successful terminal bridge",
+        ),
+        ('parser.add_argument("--project-lane-id")', "project lane CLI identity"),
+        (
+            'parser.add_argument("--project-coordinator-root")',
+            "project coordinator CLI binding",
+        ),
+        (
+            'parser.add_argument("--project-integration-ref")',
+            "project integration CLI binding",
+        ),
+    ]
+    project_contract = [
+        ("class ProjectLaneCoordinator:", "project lane owner"),
+        ("def runner_writer_binding(", "runner lane binding"),
+        ("def verify_runner_writer_binding(", "runner lane binding replay"),
+        (
+            "runner allowed path escapes the lane hard scopes",
+            "runner allowed-set confinement",
+        ),
+        ("def attach_contained_writer(", "contained writer attach"),
+        ("def record_recovery_ready(", "lane recovery-ready transition"),
+        ('"recovery-ready"', "recovery-ready lane state"),
+        ('"recovery-target"', "recovery-target writer kind"),
+        ("def record_successful_terminal(", "successful terminal projection"),
+        ('"waiting-for-integration"', "integration-wait lane state"),
+        ("def cancel_or_crash(", "lane quarantine transition"),
+        ("def close_terminal(", "lane terminal close"),
+    ]
+    for token, label in runner_contract:
+        if token not in runner_text:
+            errors.append(f"agent_runner.py: missing {label}")
+    for token, label in project_contract:
+        if token not in project_lanes_text:
+            errors.append(f"project_lanes.py: missing {label}")
+    activation_start = runner_text.find("def activate_run(")
+    activation_end = runner_text.find("\ndef dispatch_run(", activation_start)
+    activation = (
+        runner_text[activation_start:activation_end]
+        if activation_start >= 0 and activation_end > activation_start
+        else ""
+    )
+    commit_index = activation.find("registry.commit_activation(")
+    attach_index = activation.find("attach_project_lane_writer(request)")
+    prompt_index = activation.find("atomic_write_json(\n            activation_path")
+    if not (
+        0 <= commit_index < attach_index < prompt_index
+    ):
+        errors.append(
+            "agent_runner.py: project lane attach must follow lane-local activation "
+            "and precede prompt release"
+        )
+    containment_start = runner_text.find("def reconcile_containment_loss_run(")
+    containment_end = runner_text.find(
+        "\ndef _post_commit_root_completion_blocked(",
+        containment_start,
+    )
+    containment = (
+        runner_text[containment_start:containment_end]
+        if containment_start >= 0 and containment_end > containment_start
+        else ""
+    )
+    if (
+        containment.find('quarantine_project_lane_writer(request, "crashed")')
+        < 0
+        or containment.find('finalize_project_lane_terminal(request, "crashed")')
+        < 0
+    ):
+        errors.append(
+            "agent_runner.py: containment-loss reconciliation must quarantine "
+            "and close its bound project lane"
+        )
+    return errors
+
+
 def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> list[str]:
     errors: list[str] = []
     recovery_contract = [
-        ('READER_FLOOR = "2.3.6"', "reader floor"),
+        ('READER_FLOOR = "2.4.0"', "reader floor"),
         ('_LEGACY_READER_FLOORS = {', "legacy reader compatibility"),
         ('"2.3.5",', "2.3.5 reader compatibility"),
+        ('"2.3.6",', "2.3.6 reader compatibility"),
         (
             "state = self._read_registry_for_write_locked(rebarrier=True)",
             "pending abandonment reader floor before source replay",
@@ -4743,17 +4902,26 @@ def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> lis
         ('"terminal-abandonment-v2"', "recovery overlap abandonment schema"),
         ('"terminal-abandonment-v3"', "legacy normal overlap abandonment schema"),
         ('"terminal-abandonment-v4"', "legacy normal control-plane overlap abandonment schema"),
+        ('"terminal-abandonment-v5"', "legacy normal single overlap abandonment schema"),
         ('"outside-set-drift"', "terminal abandonment cause"),
         ('"outside-set-drift-with-preexisting-dirty-overlap"', "recovery overlap abandonment cause"),
         (
             '"legacy-normal-outside-set-drift-with-preexisting-dirty-overlap"',
             "legacy normal overlap abandonment cause",
         ),
+        (
+            '"legacy-normal-preexisting-dirty-overlap"',
+            "legacy normal single overlap abandonment cause",
+        ),
         ('"terminal-abandoned-outside-set-drift"', "terminal abandonment invalidation"),
         ('"terminal-abandoned-recovery-overlap"', "recovery overlap abandonment invalidation"),
         (
             '"terminal-abandoned-legacy-normal-overlap"',
             "legacy normal overlap abandonment invalidation",
+        ),
+        (
+            '"terminal-abandoned-legacy-normal-dirty-overlap"',
+            "legacy normal single overlap abandonment invalidation",
         ),
         (
             '"terminal-abandoned-legacy-normal-control-plane-overlap"',
@@ -5040,6 +5208,7 @@ def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> lis
         ('"terminal-abandonment-v2"', "runner recovery overlap public result"),
         ('"terminal-abandonment-v3"', "runner legacy normal overlap public result"),
         ('"terminal-abandonment-v4"', "runner legacy normal control-plane overlap result"),
+        ('"terminal-abandonment-v5"', "runner legacy normal single overlap result"),
         (
             '"outside-set-drift-with-preexisting-dirty-overlap"',
             "runner recovery overlap public cause",
@@ -5047,6 +5216,10 @@ def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> lis
         (
             '"legacy-normal-outside-set-drift-with-preexisting-dirty-overlap"',
             "runner legacy normal overlap public cause",
+        ),
+        (
+            '"legacy-normal-preexisting-dirty-overlap"',
+            "runner legacy normal single overlap public cause",
         ),
         ("registry.materialize_handoff", "runner handoff materialization"),
         ("registry.release_contained_terminal", "runner contained release"),
@@ -5377,6 +5550,13 @@ def main() -> int:
             fail(errors, f"agent_runner.py: missing effective profile routing envelope {token}")
     recovery_text = read_text(RECOVERY_STATE, errors)
     errors.extend(validate_recovery_control_plane(runner_text, recovery_text))
+    project_lanes_text = read_text(PROJECT_LANES, errors)
+    errors.extend(
+        validate_project_lane_runner_bridge(
+            runner_text,
+            project_lanes_text,
+        )
+    )
     for token in [
         "codex-exec-explicit-model",
         "model_reasoning_effort",

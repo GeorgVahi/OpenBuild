@@ -48,6 +48,8 @@ from discovery_contract import (
     read_regular_file_no_follow,
     validate_discovery_result,
 )
+from project_lanes import ProjectLaneCoordinator, ProjectLaneError
+from project_state import ProjectStateError, ProjectStateStore
 
 
 SUPPORTED_AGENTS = {
@@ -1107,6 +1109,426 @@ def recovery_registry_for_agent(
     if not agent_name.startswith("openbuild_implementation_"):
         return None
     return RecoveryRegistry(repo, state_root=state_root)
+
+
+_PROJECT_LANE_ARGUMENTS = (
+    "project_lane_id",
+    "project_checkout",
+    "project_coordinator_root",
+    "project_anchor_id",
+    "project_recovery_root",
+    "project_lane_root",
+    "project_integration_ref",
+)
+_PROJECT_LANE_REQUEST_FIELDS = {
+    "schema",
+    "lane_id",
+    "project_checkout",
+    "coordinator_root",
+    "anchor_id",
+    "recovery_root",
+    "lane_root",
+    "integration_ref",
+    "lane_binding",
+}
+
+
+def recovery_registry_for_request(
+    request: Mapping[str, Any],
+) -> RecoveryRegistry | None:
+    profile = request.get("profile")
+    repo_value = request.get("repo")
+    if not isinstance(profile, Mapping) or not isinstance(repo_value, str):
+        raise RunnerError("implementation request registry binding is malformed")
+    project_lane = request.get("project_lane")
+    state_root = None
+    if project_lane is not None:
+        if (
+            not isinstance(project_lane, Mapping)
+            or set(project_lane) != _PROJECT_LANE_REQUEST_FIELDS
+            or not isinstance(project_lane.get("recovery_root"), str)
+        ):
+            raise RunnerError("project lane request registry binding is malformed")
+        try:
+            state_root = Path(str(project_lane["recovery_root"])).expanduser().resolve(
+                strict=True
+            )
+        except OSError as exc:
+            raise RunnerError("project lane recovery root is unavailable") from exc
+    return recovery_registry_for_agent(
+        str(profile.get("name")),
+        Path(repo_value),
+        state_root=state_root,
+    )
+
+
+def _project_lane_coordinator(
+    project_lane: Mapping[str, Any],
+) -> ProjectLaneCoordinator:
+    if (
+        not isinstance(project_lane, Mapping)
+        or set(project_lane) != _PROJECT_LANE_REQUEST_FIELDS
+        or project_lane.get("schema") != "project-lane-request-v1"
+        or not all(
+            isinstance(project_lane.get(field), str) and project_lane[field]
+            for field in (
+                "lane_id",
+                "project_checkout",
+                "coordinator_root",
+                "anchor_id",
+                "recovery_root",
+                "lane_root",
+                "integration_ref",
+            )
+        )
+        or not isinstance(project_lane.get("lane_binding"), Mapping)
+    ):
+        raise RunnerError("project lane request binding is malformed")
+    try:
+        checkout = Path(str(project_lane["project_checkout"])).expanduser().resolve(
+            strict=True
+        )
+        coordinator_root = Path(
+            str(project_lane["coordinator_root"])
+        ).expanduser().resolve(strict=True)
+        recovery_root = Path(
+            str(project_lane["recovery_root"])
+        ).expanduser().resolve(strict=True)
+        lane_root = Path(str(project_lane["lane_root"])).expanduser().resolve(
+            strict=True
+        )
+        store = ProjectStateStore(
+            checkout,
+            coordinator_root=coordinator_root,
+        )
+        return ProjectLaneCoordinator(
+            checkout,
+            store,
+            str(project_lane["anchor_id"]),
+            recovery_root=recovery_root,
+            lane_root=lane_root,
+            integration_ref=str(project_lane["integration_ref"]),
+        )
+    except (OSError, ProjectLaneError, ProjectStateError) as exc:
+        raise RunnerError(f"project lane coordinator rejected the request: {exc}") from exc
+
+
+def resolve_project_lane_start(
+    args: argparse.Namespace,
+    *,
+    agent_name: str,
+    repo: Path,
+    allowed_files: list[str],
+) -> dict[str, Any] | None:
+    values = {
+        field: getattr(args, field, None)
+        for field in _PROJECT_LANE_ARGUMENTS
+    }
+    supplied = [
+        isinstance(value, str) and bool(value.strip())
+        for value in values.values()
+    ]
+    if not any(supplied):
+        return None
+    if not all(supplied):
+        raise RunnerError("project lane options must be supplied together")
+    if not agent_name.startswith("openbuild_implementation_"):
+        raise RunnerError("project lane options are valid only for implementation agents")
+    if not allowed_files:
+        raise RunnerError("project lane dispatch requires an explicit allowed-file set")
+    try:
+        project_lane = {
+            "schema": "project-lane-request-v1",
+            "lane_id": str(values["project_lane_id"]).strip(),
+            "project_checkout": str(
+                Path(str(values["project_checkout"])).expanduser().resolve(
+                    strict=True
+                )
+            ),
+            "coordinator_root": str(
+                Path(str(values["project_coordinator_root"]))
+                .expanduser()
+                .resolve(strict=True)
+            ),
+            "anchor_id": str(values["project_anchor_id"]).strip(),
+            "recovery_root": str(
+                Path(str(values["project_recovery_root"]))
+                .expanduser()
+                .resolve(strict=True)
+            ),
+            "lane_root": str(
+                Path(str(values["project_lane_root"]))
+                .expanduser()
+                .resolve(strict=True)
+            ),
+            "integration_ref": str(values["project_integration_ref"]).strip(),
+            "lane_binding": {},
+        }
+        coordinator = _project_lane_coordinator(project_lane)
+        lane_registry_state = RecoveryRegistry(
+            repo,
+            state_root=Path(project_lane["recovery_root"]),
+        ).state()
+        reserved_lease = lane_registry_state.get("lease")
+        lease_kind = (
+            "recovery-target"
+            if (
+                isinstance(reserved_lease, Mapping)
+                and reserved_lease.get("lease_kind") == "recovery-target"
+                and reserved_lease.get("state") == "reserved"
+            )
+            else "normal-contained"
+        )
+        project_lane["lane_binding"] = coordinator.runner_writer_binding(
+            project_lane["lane_id"],
+            repo,
+            allowed_files,
+            require_ready=True,
+            lease_kind=lease_kind,
+        )
+        return project_lane
+    except (
+        OSError,
+        ProjectLaneError,
+        ProjectStateError,
+        RecoveryStateError,
+    ) as exc:
+        raise RunnerError(f"project lane rejected runner start: {exc}") from exc
+
+
+def resolve_project_lane_recovery_authorization(
+    args: argparse.Namespace,
+    *,
+    repo: Path,
+    checkpoint: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    values = {
+        field: getattr(args, field, None)
+        for field in _PROJECT_LANE_ARGUMENTS
+    }
+    supplied = [
+        isinstance(value, str) and bool(value.strip())
+        for value in values.values()
+    ]
+    if not any(supplied):
+        return None
+    if not all(supplied):
+        raise RunnerError("project lane options must be supplied together")
+    checkpoint_digest = checkpoint.get("checkpoint_digest")
+    if (
+        checkpoint.get("disposition") != "recovery-eligible"
+        or not re.fullmatch(r"[0-9a-f]{64}", str(checkpoint_digest))
+    ):
+        raise RunnerError(
+            "project lane recovery authorization requires an eligible checkpoint"
+        )
+    try:
+        project_lane = {
+            "schema": "project-lane-request-v1",
+            "lane_id": str(values["project_lane_id"]).strip(),
+            "project_checkout": str(
+                Path(str(values["project_checkout"])).expanduser().resolve(
+                    strict=True
+                )
+            ),
+            "coordinator_root": str(
+                Path(str(values["project_coordinator_root"]))
+                .expanduser()
+                .resolve(strict=True)
+            ),
+            "anchor_id": str(values["project_anchor_id"]).strip(),
+            "recovery_root": str(
+                Path(str(values["project_recovery_root"]))
+                .expanduser()
+                .resolve(strict=True)
+            ),
+            "lane_root": str(
+                Path(str(values["project_lane_root"]))
+                .expanduser()
+                .resolve(strict=True)
+            ),
+            "integration_ref": str(values["project_integration_ref"]).strip(),
+            "lane_binding": {},
+        }
+        coordinator = _project_lane_coordinator(project_lane)
+        lane = coordinator.lane_projection(project_lane["lane_id"])
+        if (
+            lane.get("state") != "recovery-ready"
+            or lane.get("writer") is not None
+            or lane.get("recovery_checkpoint_digest") != checkpoint_digest
+        ):
+            raise ProjectLaneError(
+                "project lane is not bound to this recovery checkpoint"
+            )
+        project_lane["lane_binding"] = coordinator.runner_writer_binding(
+            project_lane["lane_id"],
+            repo,
+            lane["scopes"],
+            require_ready=False,
+            lease_kind="recovery-target",
+        )
+        return project_lane
+    except (
+        OSError,
+        ProjectLaneError,
+        ProjectStateError,
+        RecoveryStateError,
+    ) as exc:
+        raise RunnerError(
+            f"project lane rejected recovery authorization: {exc}"
+        ) from exc
+
+
+def _verified_project_lane(
+    request: Mapping[str, Any],
+) -> tuple[ProjectLaneCoordinator, Mapping[str, Any]] | None:
+    project_lane = request.get("project_lane")
+    if project_lane is None:
+        return None
+    if not isinstance(project_lane, Mapping):
+        raise RunnerError("project lane request binding is malformed")
+    coordinator = _project_lane_coordinator(project_lane)
+    try:
+        repo = Path(str(request.get("repo"))).expanduser().resolve(strict=True)
+        binding = coordinator.verify_runner_writer_binding(
+            project_lane["lane_binding"],
+            repo,
+        )
+    except (OSError, ProjectLaneError, ProjectStateError) as exc:
+        raise RunnerError(f"project lane binding verification failed: {exc}") from exc
+    return coordinator, binding
+
+
+def attach_project_lane_writer(request: Mapping[str, Any]) -> dict[str, Any] | None:
+    verified = _verified_project_lane(request)
+    if verified is None:
+        return None
+    coordinator, binding = verified
+    registry = recovery_registry_for_request(request)
+    lease_id = request.get("lease_id")
+    if registry is None or not isinstance(lease_id, str):
+        raise RunnerError("project lane request lacks its lane-local writer lease")
+    state = registry.state()
+    lease = state.get("lease")
+    lease_kind = lease.get("lease_kind") if isinstance(lease, Mapping) else None
+    run_id = (
+        lease.get("plan", {}).get("run_id")
+        if lease_kind == "recovery-target" and isinstance(lease, Mapping)
+        else lease.get("run_id")
+        if isinstance(lease, Mapping)
+        else None
+    )
+    if (
+        not isinstance(lease, Mapping)
+        or lease.get("lease_id") != lease_id
+        or not isinstance(run_id, str)
+        or not run_id
+        or lease.get("state") not in {"running", "active"}
+        or lease_kind not in {"normal-contained", "recovery-target"}
+        or lease.get("recovery_capable") is not True
+        or lease.get("allowed_set_digest")
+        != request.get("lifecycle_allowed_set_digest")
+    ):
+        raise RunnerError("project lane writer is not an active contained lease")
+    try:
+        return coordinator.attach_contained_writer(
+            str(binding["lane_id"]),
+            lease_id=lease_id,
+            run_id=run_id,
+            allowed_set_digest=str(lease["allowed_set_digest"]),
+            lease_kind=str(lease_kind),
+            recovery_checkpoint_digest=(
+                str(lease["checkpoint_digest"])
+                if lease_kind == "recovery-target"
+                else None
+            ),
+        )
+    except (ProjectLaneError, ProjectStateError) as exc:
+        raise RunnerError(f"project lane writer attach failed closed: {exc}") from exc
+
+
+def quarantine_project_lane_writer(
+    request: Mapping[str, Any],
+    reason: str,
+) -> dict[str, Any] | None:
+    verified = _verified_project_lane(request)
+    if verified is None:
+        return None
+    coordinator, binding = verified
+    try:
+        return coordinator.cancel_or_crash(str(binding["lane_id"]), reason)
+    except (ProjectLaneError, ProjectStateError) as exc:
+        raise RunnerError(f"project lane quarantine failed closed: {exc}") from exc
+
+
+def close_project_lane_writer(
+    request: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    project_lane = request.get("project_lane")
+    if project_lane is None:
+        return None
+    if not isinstance(project_lane, Mapping):
+        raise RunnerError("project lane request binding is malformed")
+    coordinator = _project_lane_coordinator(project_lane)
+    try:
+        return coordinator.close_terminal(str(project_lane["lane_id"]))
+    except (ProjectLaneError, ProjectStateError) as exc:
+        raise RunnerError(f"project lane terminal close failed closed: {exc}") from exc
+
+
+def finalize_project_lane_terminal(
+    request: Mapping[str, Any],
+    reason: str,
+) -> dict[str, Any] | None:
+    verified = _verified_project_lane(request)
+    if verified is None:
+        return None
+    coordinator, binding = verified
+    try:
+        lane = coordinator.lane_projection(str(binding["lane_id"]))
+        if lane.get("state") == "closed":
+            return lane
+        if lane.get("state") not in {"cancelled", "quarantined"}:
+            coordinator.cancel_or_crash(str(binding["lane_id"]), reason)
+        return coordinator.close_terminal(str(binding["lane_id"]))
+    except (ProjectLaneError, ProjectStateError) as exc:
+        raise RunnerError(
+            f"project lane terminal finalization failed closed: {exc}"
+        ) from exc
+
+
+def complete_project_lane_writer(
+    request: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    verified = _verified_project_lane(request)
+    if verified is None:
+        return None
+    coordinator, binding = verified
+    try:
+        return coordinator.record_successful_terminal(str(binding["lane_id"]))
+    except (ProjectLaneError, ProjectStateError) as exc:
+        raise RunnerError(
+            f"project lane successful terminal transition failed closed: {exc}"
+        ) from exc
+
+
+def prepare_project_lane_recovery(
+    request: Mapping[str, Any],
+    checkpoint_digest: str,
+) -> dict[str, Any] | None:
+    verified = _verified_project_lane(request)
+    if verified is None:
+        return None
+    coordinator, binding = verified
+    try:
+        return coordinator.record_recovery_ready(
+            str(binding["lane_id"]),
+            checkpoint_digest,
+        )
+    except (ProjectLaneError, ProjectStateError) as exc:
+        raise RunnerError(
+            f"project lane recovery transition failed closed: {exc}"
+        ) from exc
 
 
 def validate_recovery_start_options(
@@ -3253,7 +3675,7 @@ def guardian_run(run_dir: Path) -> int:
         or private_plan.get("ipc_plan_id") != ipc_plan_id
     ):
         raise RunnerError("guardian request changed the private registry boundary binding")
-    registry = recovery_registry_for_agent(agent_name, Path(repo_value))
+    registry = recovery_registry_for_request(private_request)
     if registry is None:
         raise RunnerError("containment guardian cannot resolve the implementation registry")
     worker: Any | None = None
@@ -3920,6 +4342,10 @@ def classify_recovery_outcome(
                 "legacy-normal-control-plane-and-outside-set-drift-with-"
                 "preexisting-dirty-overlap",
             ),
+            (
+                "terminal-abandonment-v5",
+                "legacy-normal-preexisting-dirty-overlap",
+            ),
         }
         or terminal_abandonment.get("checkpoint_invalidation") != "completed"
     ):
@@ -4003,8 +4429,26 @@ def audit_guardian_health(run_dir: Path) -> None:
     if not ready_path.is_file() and not failure_path.is_file():
         return
     request = read_json(run_dir / "request.json")
-    registry = recovery_registry_for_agent(request["profile"]["name"], Path(request["repo"]))
+    registry = recovery_registry_for_request(request)
     lease_id = request.get("lease_id")
+    reconciliation_path = run_dir / "containment-loss-reconciliation.json"
+    if reconciliation_path.is_file():
+        if registry is None or not isinstance(lease_id, str):
+            raise RunnerError(
+                "completed containment-loss reconciliation cannot resolve its registry lease"
+            )
+        result = read_json(reconciliation_path)
+        expected = _containment_loss_reconciliation_result(lease_id)
+        state = registry.state()
+        if result != expected or not _containment_loss_release_is_complete(
+            state,
+            lease_id=lease_id,
+            run_id=run_dir.name,
+        ):
+            raise RunnerError(
+                "completed containment-loss reconciliation evidence drifted"
+            )
+        return
     try:
         secret = _guardian_secret(run_dir)
         ready = (
@@ -4061,10 +4505,42 @@ def audit_guardian_health(run_dir: Path) -> None:
             )
         except RecoveryStateError as exc:
             raise RunnerError(f"guardian loss could not be quarantined: {exc}") from exc
+    if request.get("project_lane") is not None:
+        try:
+            quarantine_project_lane_writer(request, "crashed")
+        except RunnerError as exc:
+            raise RunnerError(
+                "contained guardian loss was quarantined lane-locally, but "
+                f"project lane quarantine failed closed: {exc}"
+            ) from exc
     raise RunnerError(
         "contained guardian failed after the durable process boundary; "
         "the writer lease is quarantined for manual reconciliation"
     )
+
+
+def _project_lane_recovery_checkpoint_digest(
+    run_dir: Path,
+    receipt: Mapping[str, Any],
+) -> str | None:
+    semantic_path = run_dir / "semantic-rejection.json"
+    recoverable_outcome = receipt.get("status") == "failed"
+    if semantic_path.is_file():
+        semantic = read_json(semantic_path)
+        recoverable_outcome = semantic.get("disposition") == "blocked"
+    if not recoverable_outcome:
+        return None
+    checkpoint_path = run_dir / "recovery-checkpoint.json"
+    if not checkpoint_path.is_file():
+        return None
+    checkpoint = read_json(checkpoint_path)
+    digest = checkpoint.get("checkpoint_digest")
+    if (
+        checkpoint.get("disposition") != "recovery-eligible"
+        or not re.fullmatch(r"[0-9a-f]{64}", str(digest))
+    ):
+        return None
+    return str(digest)
 
 
 def reconcile_implementation_registry(
@@ -4079,13 +4555,40 @@ def reconcile_implementation_registry(
         return
     request = read_json(run_dir / "request.json")
     agent_name = request["profile"]["name"]
-    registry = recovery_registry_for_agent(agent_name, Path(request["repo"]))
+    registry = recovery_registry_for_request(request)
     lease_id = request.get("lease_id")
     if registry is None or not isinstance(lease_id, str):
         return
+    project_lane_close_required = (
+        receipt.get("status") == "failed"
+        or terminal_abandonment
+        or (run_dir / "semantic-rejection.json").is_file()
+        or (run_dir / "terminal-abandonment.json").is_file()
+    )
+    project_lane_quarantined = False
     state = registry.state()
     lease = state.get("lease")
     if lease is None:
+        if project_lane_close_required and request.get("project_lane") is not None:
+            recovery_checkpoint_digest = _project_lane_recovery_checkpoint_digest(
+                run_dir,
+                receipt,
+            )
+            if recovery_checkpoint_digest is not None:
+                prepare_project_lane_recovery(
+                    request,
+                    recovery_checkpoint_digest,
+                )
+            else:
+                finalize_project_lane_terminal(
+                    request,
+                    "crashed" if receipt.get("status") == "failed" else "cancelled",
+                )
+        elif (
+            receipt.get("status") == "completed"
+            and request.get("project_lane") is not None
+        ):
+            complete_project_lane_writer(request)
         garbage_collect_owner_prompt_snapshots(registry)
         return
     if not isinstance(lease, dict) or lease.get("lease_id") != lease_id:
@@ -4109,6 +4612,12 @@ def reconcile_implementation_registry(
     if receipt.get("lease_id") != lease_id:
         raise RunnerError("terminal receipt lease does not own the current workspace lease")
     _require_private_run_path_identity(run_dir, expected_run_id)
+    if project_lane_close_required and request.get("project_lane") is not None:
+        quarantine_project_lane_writer(
+            request,
+            "crashed" if receipt.get("status") == "failed" else "cancelled",
+        )
+        project_lane_quarantined = True
 
     try:
         secret = _guardian_secret(run_dir)
@@ -4179,6 +4688,13 @@ def reconcile_implementation_registry(
             lease = state["lease"]
             semantic_disposition = lease["semantic_disposition"]
         if isinstance(semantic_disposition, dict):
+            project_lane_close_required = True
+            if (
+                request.get("project_lane") is not None
+                and not project_lane_quarantined
+            ):
+                quarantine_project_lane_writer(request, "cancelled")
+                project_lane_quarantined = True
             if semantic_disposition.get("disposition") == "abandoned":
                 if semantic_disposition.get("checkpoint_invalidation") != "completed":
                     state = registry.complete_terminal_abandonment(lease_id)
@@ -4366,8 +4882,46 @@ def reconcile_implementation_registry(
             )
             registry.acknowledge_guardian_close(lease_id, closed)
         registry.release_contained_terminal(lease_id)
+        if project_lane_close_required:
+            recovery_checkpoint_digest = _project_lane_recovery_checkpoint_digest(
+                run_dir,
+                receipt,
+            )
+            if recovery_checkpoint_digest is not None:
+                prepare_project_lane_recovery(
+                    request,
+                    recovery_checkpoint_digest,
+                )
+            else:
+                finalize_project_lane_terminal(
+                    request,
+                    "crashed" if receipt.get("status") == "failed" else "cancelled",
+                )
+        elif request.get("project_lane") is not None:
+            complete_project_lane_writer(request)
         garbage_collect_owner_prompt_snapshots(registry)
     except (OSError, RecoveryStateError) as exc:
+        if request.get("project_lane") is not None:
+            try:
+                retained = registry.state()
+                if (
+                    retained.get("quarantine") is not None
+                    or receipt.get("status") == "failed"
+                    or terminal_abandonment
+                ):
+                    quarantine_project_lane_writer(
+                        request,
+                        (
+                            "crashed"
+                            if receipt.get("status") == "failed"
+                            else "cancelled"
+                        ),
+                    )
+            except (RecoveryStateError, RunnerError) as lane_exc:
+                raise RunnerError(
+                    "contained implementation terminalization and project lane "
+                    f"quarantine failed closed: {exc}; lane: {lane_exc}"
+                ) from exc
         raise RunnerError(f"contained implementation terminalization failed closed: {exc}") from exc
 
 
@@ -4380,7 +4934,7 @@ def finalize_success_run(args: argparse.Namespace) -> int:
     if receipt.get("status") != "completed":
         raise RunnerError("root success finalization requires an accepted completed runner receipt")
     request = read_json(run_dir / "request.json")
-    registry = recovery_registry_for_agent(request["profile"]["name"], Path(request["repo"]))
+    registry = recovery_registry_for_request(request)
     if registry is not None and any(
         event.get("event") == "semantic-handoff-rejected"
         and event.get("run_id") == run_dir.name
@@ -4430,7 +4984,7 @@ def reject_semantic_handoff_run(args: argparse.Namespace) -> int:
             print(json.dumps(reconstructed_semantic, ensure_ascii=False, indent=2))
             return 0
     request = read_json(run_dir / "request.json")
-    registry = recovery_registry_for_agent(request["profile"]["name"], Path(request["repo"]))
+    registry = recovery_registry_for_request(request)
     lease_id = request.get("lease_id")
     if registry is None or not isinstance(lease_id, str):
         raise RunnerError("semantic rejection requires a recovery-capable implementation lease")
@@ -4530,13 +5084,8 @@ def reconcile_containment_loss_run(args: argparse.Namespace) -> int:
     """Reconcile exact post-zero guardian loss without accepting a handoff."""
     run_dir = resolve_run_reference(args.run_dir)
     request = read_json(run_dir / "request.json")
-    agent_name = request.get("profile", {}).get("name")
     lease_id = request.get("lease_id")
-    registry = (
-        recovery_registry_for_agent(agent_name, Path(request["repo"]))
-        if isinstance(agent_name, str) and isinstance(request.get("repo"), str)
-        else None
-    )
+    registry = recovery_registry_for_request(request)
     if registry is None or not isinstance(lease_id, str):
         raise RunnerError("containment-loss reconciliation cannot resolve its registry lease")
     _require_private_run_path_identity(run_dir, run_dir.name)
@@ -4559,6 +5108,8 @@ def reconcile_containment_loss_run(args: argparse.Namespace) -> int:
                 raise RecoveryStateError(
                     "containment-loss reconciliation does not own the current lease"
                 )
+            if request.get("project_lane") is not None:
+                quarantine_project_lane_writer(request, "crashed")
             reconciled = [
                 event
                 for event in state.get("history", [])
@@ -4681,6 +5232,8 @@ def reconcile_containment_loss_run(args: argparse.Namespace) -> int:
             garbage_collect_owner_prompt_snapshots(registry)
     except RecoveryStateError as exc:
         raise RunnerError(f"containment-loss reconciliation failed closed: {exc}") from exc
+    if request.get("project_lane") is not None:
+        finalize_project_lane_terminal(request, "crashed")
 
     result = _containment_loss_reconciliation_result(lease_id)
     atomic_write_json(run_dir / "containment-loss-reconciliation.json", result)
@@ -4778,7 +5331,7 @@ def stage_post_commit_root_completion_action_run(args: argparse.Namespace) -> in
     try:
         run_dir = resolve_run_reference(args.run_dir)
         request = read_json(run_dir / "request.json")
-        registry = recovery_registry_for_agent(request["profile"]["name"], Path(request["repo"]))
+        registry = recovery_registry_for_request(request)
         if registry is None:
             raise RecoveryStateError("post-commit registry is unavailable")
         audit_guardian_health(run_dir)
@@ -4817,7 +5370,7 @@ def authorize_post_commit_root_completion_run(args: argparse.Namespace) -> int:
     try:
         run_dir = resolve_run_reference(args.run_dir)
         request = read_json(run_dir / "request.json")
-        registry = recovery_registry_for_agent(request["profile"]["name"], Path(request["repo"]))
+        registry = recovery_registry_for_request(request)
         if registry is None:
             raise RecoveryStateError("post-commit registry is unavailable")
         audit_guardian_health(run_dir)
@@ -4874,7 +5427,7 @@ def finalize_post_commit_root_completion_run(args: argparse.Namespace) -> int:
         if receipt.get("status") != "completed" or receipt.get("process_tree_stopped") is not True:
             raise RecoveryStateError("post-commit terminal transport evidence is unavailable")
         request = read_json(run_dir / "request.json")
-        registry = recovery_registry_for_agent(request["profile"]["name"], Path(request["repo"]))
+        registry = recovery_registry_for_request(request)
         lease_id = request.get("lease_id")
         if registry is None or not isinstance(lease_id, str):
             raise RecoveryStateError("post-commit registry lease is unavailable")
@@ -5040,9 +5593,7 @@ def record_root_completion_authorization_run(args: argparse.Namespace) -> int:
     """Persist the privacy-safe T-004 audit only after exact terminal vacancy."""
     run_dir = resolve_run_reference(args.run_dir)
     request = read_json(run_dir / "request.json")
-    registry = recovery_registry_for_agent(
-        request["profile"]["name"], Path(request["repo"])
-    )
+    registry = recovery_registry_for_request(request)
     lease_id = request.get("lease_id")
     if registry is None or not isinstance(lease_id, str):
         raise RunnerError("root completion audit requires an implementation lifecycle")
@@ -5144,7 +5695,20 @@ def authorize_recovery_run(args: argparse.Namespace) -> int:
         raise RunnerError("recovery target lease ID is required")
     try:
         checkpoint = read_json(checkpoint_path)
-        registry = recovery_registry_for_agent("openbuild_implementation_fast", repo)
+        project_lane = resolve_project_lane_recovery_authorization(
+            args,
+            repo=repo,
+            checkpoint=checkpoint,
+        )
+        registry = recovery_registry_for_agent(
+            "openbuild_implementation_fast",
+            repo,
+            state_root=(
+                Path(project_lane["recovery_root"])
+                if project_lane is not None
+                else None
+            ),
+        )
         if registry is None:
             raise RecoveryStateError("implementation recovery registry is unavailable")
         state = registry.state()
@@ -5557,7 +6121,21 @@ def start_run(args: argparse.Namespace) -> int:
         getattr(args, "specification_revision", None),
         getattr(args, "recovery_target_milestone", None),
     )
-    registry = recovery_registry_for_agent(args.agent, repo)
+    project_lane = resolve_project_lane_start(
+        args,
+        agent_name=args.agent,
+        repo=repo,
+        allowed_files=allowed_files,
+    )
+    registry = recovery_registry_for_agent(
+        args.agent,
+        repo,
+        state_root=(
+            Path(project_lane["recovery_root"])
+            if project_lane is not None
+            else None
+        ),
+    )
     registry_lease_id = lease_id
     recovery_target_lease: dict[str, Any] | None = None
     if registry is not None and registry_lease_id is not None:
@@ -5722,6 +6300,7 @@ def start_run(args: argparse.Namespace) -> int:
         "root_completion_source_binding": None,
         "recovery_target": False,
         "containment_plan": None,
+        "project_lane": project_lane,
     }
 
     if registry is not None and registry_lease_id is not None:
@@ -5774,6 +6353,10 @@ def start_run(args: argparse.Namespace) -> int:
                 )
             except RecoveryStateError as exc:
                 request["recovery_capability_unavailable"] = str(exc)
+    if project_lane is not None and request.get("recovery_preflight") is None:
+        raise RunnerError(
+            "project lane dispatch requires a recovery-capable contained source boundary"
+        )
     if recovery_target_lease is not None:
         target_plan = recovery_target_lease["plan"]
         request["containment_plan"] = {
@@ -6512,6 +7095,15 @@ def activate_run(args: argparse.Namespace) -> int:
     if not receipt.get("codex_pid") or not receipt.get("codex_process_identity"):
         raise RunnerError("Codex process is not ready for activation")
     activation_path = run_dir / "activate.json"
+    request_path = run_dir / "request.json"
+    request = read_json(request_path) if request_path.is_file() else None
+    root_completion_binding_digest = None
+    if request is not None:
+        source_binding = request.get("root_completion_source_binding")
+        if isinstance(source_binding, Mapping):
+            root_completion_binding_digest = sha256_bytes(
+                _canonical_json_bytes(source_binding)
+            )
     if activation_path.is_file():
         activation = read_json(activation_path)
         if (
@@ -6520,35 +7112,33 @@ def activate_run(args: argparse.Namespace) -> int:
         ):
             raise RunnerError("existing activation does not match the live creation-bound Codex process")
     else:
-        request_path = run_dir / "request.json"
-        root_completion_binding_digest = None
-        if request_path.is_file():
-            request = read_json(request_path)
-            source_binding = request.get("root_completion_source_binding")
-            if isinstance(source_binding, Mapping):
-                root_completion_binding_digest = sha256_bytes(
-                    _canonical_json_bytes(source_binding)
-                )
-            registry = recovery_registry_for_agent(request["profile"]["name"], Path(request["repo"]))
-            lease_id = request.get("lease_id")
-            if registry is not None and isinstance(lease_id, str):
-                allowed_set_digest = request.get("lifecycle_allowed_set_digest") or (
-                    request.get("recovery_preflight") or {}
-                ).get("allowed_set_digest", "")
-                state = registry.state_for_activation()
-                lease = state.get("lease")
-                if not isinstance(lease, dict) or lease.get("lease_id") != lease_id:
-                    raise RunnerError("workspace activation lease is missing or changed")
-                if lease.get("state") in {
-                    "process-bound-unactivated",
-                    "ordinary-process-bound-unactivated",
-                    "running",
-                    "active",
-                    "legacy-running",
-                }:
-                    registry.commit_activation(lease_id, allowed_set_digest)
-                else:
-                    raise RunnerError("workspace activation lifecycle is not resumable")
+        registry = recovery_registry_for_request(request) if request is not None else None
+        lease_id = request.get("lease_id") if request is not None else None
+        if (
+            request is not None
+            and registry is not None
+            and isinstance(lease_id, str)
+        ):
+            allowed_set_digest = request.get("lifecycle_allowed_set_digest") or (
+                request.get("recovery_preflight") or {}
+            ).get("allowed_set_digest", "")
+            state = registry.state_for_activation()
+            lease = state.get("lease")
+            if not isinstance(lease, dict) or lease.get("lease_id") != lease_id:
+                raise RunnerError("workspace activation lease is missing or changed")
+            if lease.get("state") in {
+                "process-bound-unactivated",
+                "ordinary-process-bound-unactivated",
+                "running",
+                "active",
+                "legacy-running",
+            }:
+                registry.commit_activation(lease_id, allowed_set_digest)
+            else:
+                raise RunnerError("workspace activation lifecycle is not resumable")
+    if request is not None:
+        attach_project_lane_writer(request)
+    if not activation_path.is_file():
         atomic_write_json(
             activation_path,
             {
@@ -6852,6 +7442,16 @@ def cancel_run(args: argparse.Namespace) -> int:
     return 0 if receipt["status"] == "completed" else 1
 
 
+def add_project_lane_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--project-lane-id")
+    parser.add_argument("--project-checkout")
+    parser.add_argument("--project-coordinator-root")
+    parser.add_argument("--project-anchor-id")
+    parser.add_argument("--project-recovery-root")
+    parser.add_argument("--project-lane-root")
+    parser.add_argument("--project-integration-ref")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -6871,6 +7471,7 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--allowed-file", action="append", default=[])
     start.add_argument("--specification-revision")
     start.add_argument("--recovery-target-milestone")
+    add_project_lane_arguments(start)
     start.add_argument("--activation-timeout", type=float, default=300.0)
     start.add_argument("--codex-bin", default=os.environ.get("OPENBUILD_CODEX_BIN", "codex"))
     start.set_defaults(handler=start_run)
@@ -6893,6 +7494,7 @@ def build_parser() -> argparse.ArgumentParser:
     dispatch.add_argument("--allowed-file", action="append", default=[])
     dispatch.add_argument("--specification-revision")
     dispatch.add_argument("--recovery-target-milestone")
+    add_project_lane_arguments(dispatch)
     dispatch.add_argument("--activation-timeout", type=float, default=300.0)
     dispatch.add_argument("--codex-bin", default=os.environ.get("OPENBUILD_CODEX_BIN", "codex"))
     dispatch.set_defaults(handler=dispatch_run)
@@ -6998,6 +7600,7 @@ def build_parser() -> argparse.ArgumentParser:
     authorize.add_argument("--lease-id", required=True)
     authorize.add_argument("--user-action-digest", required=True)
     authorize.add_argument("--specification-revision", required=True)
+    add_project_lane_arguments(authorize)
     authorize.set_defaults(handler=authorize_recovery_run)
     return parser
 

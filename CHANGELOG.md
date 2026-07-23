@@ -4,6 +4,23 @@ OpenBuild follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### 2.4.0-alpha.2
+
+#### Added
+
+- Added generation-bound task-lane creation and replay across distinct Git worktrees while preserving the existing one-writer RecoveryRegistry invariant inside each lane.
+- Added the runner-to-project-lane bridge: exact private lane routing, lane-scope allowed-set confinement, lane-local registry selection, pre-prompt CAS attach, successful `waiting-for-integration`, isolated containment-loss quarantine/close, and checkpoint-bound same-lane `recovery-ready` replay.
+- Added a real two-worktree acceptance fixture that launches two concurrent runner/guardian/fake-Codex process trees, proves both workers execute at the same barrier, keeps one lane live while the other is cancelled, and launches a reserved recovery-target process in that same failed lane.
+- Added explicit, scope-bound `protected-user-work` adoption intents with content/index identity checks, integration-commit verification, rollback, and replay-safe acceptance.
+- Added owner-derived `terminal-abandonment-v5` for the exact completed `normal-contained` reason `[preexisting-dirty-overlap]`, preserving writer bytes and the Git index while closing the original lifecycle without handoff, diff acceptance, root-completion authority, or artificial drift.
+
+#### Changed
+
+- Kept timeout and process disappearance from releasing lane authority: affected lanes remain quarantined until full-tree-zero evidence, lane-local recovery vacancy, and explicit terminal close.
+- Kept exact schema-1 M1 project states readable without rewrite; the first lane-session bind migrates only the original generation-zero, empty-collection shape under the existing lock and generation CAS.
+- Raised the private recovery reader floor to 2.4.0 while retaining exact no-rewrite reads of 2.3.6 registries; v5 promotes the floor before source invalidation and remains replay-safe across its durable phases.
+- Synchronized the README version pins for the `2.4.0-alpha.2` development snapshot; scope scheduling and integration remain later milestones.
+
 ### 2.4.0-alpha.1
 
 #### Added

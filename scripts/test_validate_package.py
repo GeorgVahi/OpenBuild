@@ -17,6 +17,7 @@ from validate_package import (
     IMPLEMENTATION_DELEGATION,
     PACKAGED_SEARCH_INSTRUCTIONS,
     PACKAGED_SEARCH_MODEL,
+    PROJECT_LANES,
     PROJECT_STATE,
     REQUIRED,
     REVIEW_MAX_TIER_BY_RISK,
@@ -41,6 +42,7 @@ from validate_package import (
     validate_packaged_agent_profile,
     validate_packaged_search_profile,
     validate_profile_migration_trace,
+    validate_project_lane_runner_bridge,
     validate_recovery_control_plane,
     validate_release_docs_contract,
     validate_review_escalation_trace,
@@ -49,6 +51,85 @@ from validate_package import (
     validate_search_availability_classifier_contract,
     validate_usage_routing_contract,
 )
+
+
+class ProjectLaneRunnerPackageTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.runner = (
+            SKILL / "scripts" / "agent_runner.py"
+        ).read_text(encoding="utf-8")
+        self.project_lanes = PROJECT_LANES.read_text(encoding="utf-8")
+
+    def test_project_lane_owner_and_runner_bridge_are_packaged(self) -> None:
+        self.assertIn(PROJECT_LANES, REQUIRED)
+        self.assertEqual(
+            validate_project_lane_runner_bridge(
+                self.runner,
+                self.project_lanes,
+            ),
+            [],
+        )
+        broken_owner = self.project_lanes.replace(
+            "def runner_writer_binding(",
+            "def unbound_runner_writer(",
+        )
+        self.assertTrue(
+            any(
+                "runner lane binding" in error
+                for error in validate_project_lane_runner_bridge(
+                    self.runner,
+                    broken_owner,
+                )
+            )
+        )
+        late_attach = self.runner.replace(
+            "attach_project_lane_writer(request)",
+            "late_project_lane_attach(request)",
+        )
+        errors = validate_project_lane_runner_bridge(
+            late_attach,
+            self.project_lanes,
+        )
+        self.assertTrue(any("precede prompt release" in error for error in errors))
+        missing_attach = self.runner.replace(
+            "def attach_project_lane_writer(",
+            "def detach_project_lane_writer(",
+        )
+        self.assertTrue(
+            any(
+                "writer attach" in error
+                for error in validate_project_lane_runner_bridge(
+                    missing_attach,
+                    self.project_lanes,
+                )
+            )
+        )
+        missing_recovery = self.runner.replace(
+            "def prepare_project_lane_recovery(",
+            "def discard_project_lane_recovery(",
+        )
+        self.assertTrue(
+            any(
+                "recovery-ready bridge" in error
+                for error in validate_project_lane_runner_bridge(
+                    missing_recovery,
+                    self.project_lanes,
+                )
+            )
+        )
+        missing_containment_projection = self.runner.replace(
+            'finalize_project_lane_terminal(request, "crashed")',
+            'leave_project_lane_running(request, "crashed")',
+        )
+        self.assertTrue(
+            any(
+                "containment-loss reconciliation" in error
+                for error in validate_project_lane_runner_bridge(
+                    missing_containment_projection,
+                    self.project_lanes,
+                )
+            )
+        )
 
 
 class TransitionTokenValidatorTests(unittest.TestCase):
@@ -227,8 +308,9 @@ class RecoveryControlPlanePackageTests(unittest.TestCase):
         self.assertEqual(validate_recovery_control_plane(self.runner, self.recovery), [])
 
         mutations = [
-            ("recovery", 'READER_FLOOR = "2.3.6"', 'READER_FLOOR = "1"', "reader floor"),
+            ("recovery", 'READER_FLOOR = "2.4.0"', 'READER_FLOOR = "1"', "reader floor"),
             ("recovery", '"2.3.5",', '"2.3.4",', "2.3.5 reader compatibility"),
+            ("recovery", '"2.3.6",', '"2.3.4",', "2.3.6 reader compatibility"),
             (
                 "recovery",
                 "state = self._read_registry_for_write_locked(rebarrier=True)",
@@ -347,6 +429,7 @@ class RecoveryControlPlanePackageTests(unittest.TestCase):
             ("recovery", "terminal-abandonment-v2", "terminal-abandonment-v0", "recovery overlap abandonment schema"),
             ("recovery", "terminal-abandonment-v3", "terminal-abandonment-v0", "legacy normal overlap abandonment schema"),
             ("recovery", "terminal-abandonment-v4", "terminal-abandonment-v0", "legacy normal control-plane overlap abandonment schema"),
+            ("recovery", "terminal-abandonment-v5", "terminal-abandonment-v0", "legacy normal single overlap abandonment schema"),
             (
                 "recovery",
                 "record_containment_loss_abandonment",
@@ -362,6 +445,7 @@ class RecoveryControlPlanePackageTests(unittest.TestCase):
             ("runner", "terminal-abandonment-v2", "terminal-abandonment-v0", "runner recovery overlap public result"),
             ("runner", "terminal-abandonment-v3", "terminal-abandonment-v0", "runner legacy normal overlap public result"),
             ("runner", "terminal-abandonment-v4", "terminal-abandonment-v0", "runner legacy normal control-plane overlap result"),
+            ("runner", "terminal-abandonment-v5", "terminal-abandonment-v0", "runner legacy normal single overlap result"),
             (
                 "runner",
                 '"_reconcile-containment-loss"',
@@ -379,6 +463,12 @@ class RecoveryControlPlanePackageTests(unittest.TestCase):
                 "terminal-abandoned-legacy-normal-overlap",
                 "terminal-abandoned-legacy-normal-overlap-v0",
                 "legacy normal overlap abandonment invalidation",
+            ),
+            (
+                "recovery",
+                "terminal-abandoned-legacy-normal-dirty-overlap",
+                "terminal-abandoned-legacy-normal-dirty-overlap-v0",
+                "legacy normal single overlap abandonment invalidation",
             ),
             (
                 "recovery",
@@ -950,6 +1040,35 @@ class ImplementationDelegationContractTests(unittest.TestCase):
         self.assertTrue(IMPLEMENTATION_DELEGATION.is_file())
         self.assertEqual(self.validate(), [])
 
+    def test_project_lane_bridge_contract_is_required(self) -> None:
+        skill = self.skill_text.replace(
+            "CAS-attaches that exact lease/run/allowed-set to the project lane",
+            "attaches an unspecified writer",
+        )
+        self.assertTrue(
+            any("project lane bridge" in error for error in self.validate(skill_text=skill))
+        )
+        protocol = self.protocol_text.replace(
+            "successful accepted handoff records `waiting-for-integration`",
+            "successful handoff releases its scopes",
+        )
+        self.assertTrue(
+            any(
+                "project lane bridge" in error
+                for error in self.validate(protocol_text=protocol)
+            )
+        )
+        readme = self.readme.replace(
+            "Version 2.4.0-alpha.2 previews the M2 project-lane lifecycle",
+            "Version 2.4.0-alpha.2 changes internals",
+        )
+        self.assertTrue(
+            any(
+                "project lane bridge" in error
+                for error in self.validate(readme=readme)
+            )
+        )
+
     def test_shared_workspace_allows_only_one_bounded_writer(self) -> None:
         mutated = self.protocol_text.replace("one active writer", "an active writer")
         self.assertTrue(any("single-writer" in error for error in self.validate(protocol_text=mutated)))
@@ -1171,6 +1290,16 @@ class ImplementationDelegationContractTests(unittest.TestCase):
         )
 
         skill = self.skill_text.replace(
+            "terminal-abandonment-v5", "manual-recovery-v5"
+        )
+        self.assertTrue(
+            any(
+                "v5 terminal outcome" in error
+                for error in self.validate(skill_text=skill)
+            )
+        )
+
+        skill = self.skill_text.replace(
             "_reconcile-containment-loss --run-dir <path>",
             "_force-unlock-containment --run-dir <path>",
         )
@@ -1208,12 +1337,34 @@ class ImplementationDelegationContractTests(unittest.TestCase):
             any("missing exact pair" in error for error in self.validate(protocol_text=protocol))
         )
 
+        protocol = self.protocol_text.replace(
+            "exact single reason `[preexisting-dirty-overlap]`",
+            "generic single reason",
+        )
+        self.assertTrue(
+            any(
+                "v5 reason boundary" in error
+                for error in self.validate(protocol_text=protocol)
+            )
+        )
+
         routing = self.model_routing.replace(
             "Exact `[outside-set-drift, preexisting-dirty-overlap]` uses terminal abandonment v2 for a recovery-target and v3 for a legacy `normal-contained` lease",
             "mixed reasons resume routing",
         )
         self.assertTrue(
             any("v2/v3 routing" in error for error in self.validate(model_routing=routing))
+        )
+
+        routing = self.model_routing.replace(
+            "exact single `[preexisting-dirty-overlap]` uses v5 only for a completed legacy `normal-contained` lease",
+            "single overlap resumes generic routing",
+        )
+        self.assertTrue(
+            any(
+                "v5 routing boundary" in error
+                for error in self.validate(model_routing=routing)
+            )
         )
 
         routing = self.model_routing.replace(
@@ -1250,6 +1401,13 @@ class ImplementationDelegationContractTests(unittest.TestCase):
         )
 
         tdd = self.tdd_workflow.replace(
+            "terminal-abandonment-v5", "manual-recovery-v5"
+        )
+        self.assertTrue(
+            any("v5 fixture" in error for error in self.validate(tdd_workflow=tdd))
+        )
+
+        tdd = self.tdd_workflow.replace(
             "Post-zero containment-loss reconciliation must additionally reproduce",
             "Containment loss needs no dedicated fixture",
         )
@@ -1277,6 +1435,17 @@ class ImplementationDelegationContractTests(unittest.TestCase):
         )
 
         review = self.review_protocol.replace(
+            "legacy `normal-contained` lifecycle to v5 without artificial drift",
+            "generic single-overlap recovery",
+        )
+        self.assertTrue(
+            any(
+                "v5 review boundary" in error
+                for error in self.validate(review_protocol=review)
+            )
+        )
+
+        review = self.review_protocol.replace(
             "post-zero containment-loss diffs additionally prove",
             "containment-loss diffs need no additional proof",
         )
@@ -1288,7 +1457,7 @@ class ImplementationDelegationContractTests(unittest.TestCase):
         )
 
         versioning = self.versioning_text.replace(
-            "first new durable transition raises the floor to 2.3.6 before source invalidation",
+            "first new durable transition raises the floor to 2.4.0 before source invalidation",
             "reader floor remains unchanged",
         )
         self.assertTrue(

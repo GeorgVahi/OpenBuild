@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import stat
 from contextlib import contextmanager
@@ -649,6 +650,380 @@ def validate_scope_state(value: Any) -> dict[str, Any]:
     return dict(value)
 
 
+_LANE_ID = re.compile(r"[a-z][a-z0-9-]{0,62}\Z")
+_GIT_OBJECT = re.compile(r"[0-9a-f]{40,64}\Z")
+_GIT_REF = re.compile(r"refs/[A-Za-z0-9][A-Za-z0-9._/-]*\Z")
+_LANE_STATES = frozenset(
+    {
+        "waiting-for-scope",
+        "creating",
+        "ready",
+        "running",
+        "recovery-ready",
+        "waiting-for-integration",
+        "cancelled",
+        "quarantined",
+        "closed",
+    }
+)
+_TERMINAL_REASONS = frozenset({"cancelled", "crashed", "timeout", "pid-lost"})
+
+
+def _is_normalized_relative_path(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and len(value) <= 4096
+        and "\\" not in value
+        and not value.startswith("/")
+        and not value.endswith("/")
+        and "//" not in value
+        and all(part not in {"", ".", ".."} for part in value.split("/"))
+    )
+
+
+def _validate_common_identity(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {"path", "identity"}:
+        raise ProjectStateError("lane common-directory identity is invalid")
+    path = value.get("path")
+    identity = value.get("identity")
+    if (
+        not isinstance(path, str)
+        or not Path(path).is_absolute()
+        or len(path) > 4096
+        or not isinstance(identity, list)
+        or len(identity) != 2
+        or not all(isinstance(part, int) and part >= 0 for part in identity)
+    ):
+        raise ProjectStateError("lane common-directory identity is invalid")
+    return {"path": path, "identity": list(identity)}
+
+
+def _validate_writer(value: Any) -> dict[str, Any]:
+    required = {"lease_id", "run_id", "allowed_set_digest", "lease_kind"}
+    if not isinstance(value, dict) or set(value) != required:
+        raise ProjectStateError("lane writer binding is invalid")
+    if (
+        not isinstance(value["lease_id"], str)
+        or not value["lease_id"]
+        or len(value["lease_id"]) > 512
+        or not isinstance(value["run_id"], str)
+        or not value["run_id"]
+        or len(value["run_id"]) > 512
+        or not _is_hex_identifier(value["allowed_set_digest"])
+        or value["lease_kind"] not in {"normal-contained", "recovery-target"}
+    ):
+        raise ProjectStateError("lane writer binding is invalid")
+    return dict(value)
+
+
+def _validate_lane_session(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {
+        "common",
+        "integration_ref",
+        "reader_floor",
+    }:
+        raise ProjectStateError("lane session binding is invalid")
+    integration_ref = value.get("integration_ref")
+    if (
+        not isinstance(integration_ref, str)
+        or not _GIT_REF.fullmatch(integration_ref)
+        or integration_ref.endswith(("/", "."))
+        or ".." in integration_ref.split("/")
+        or value.get("reader_floor") != "2.3.6"
+    ):
+        raise ProjectStateError("lane session integration binding is invalid")
+    return {
+        "common": _validate_common_identity(value.get("common")),
+        "integration_ref": integration_ref,
+        "reader_floor": "2.3.6",
+    }
+
+
+def _validate_lane_projection(value: Any) -> dict[str, Any]:
+    base_fields = {
+        "lane_id",
+        "milestone",
+        "reader_floor",
+        "common",
+        "base",
+        "branch",
+        "worktree",
+        "scopes",
+        "state",
+        "writer",
+    }
+    if not isinstance(value, dict) or not base_fields <= set(value):
+        raise ProjectStateError("lane fields are incomplete")
+    lane_id = value.get("lane_id")
+    state = value.get("state")
+    if (
+        not isinstance(lane_id, str)
+        or not _LANE_ID.fullmatch(lane_id)
+        or state not in _LANE_STATES
+        or not isinstance(value.get("milestone"), str)
+        or not value["milestone"]
+        or len(value["milestone"]) > 256
+        or value.get("reader_floor") != "2.3.6"
+        or not isinstance(value.get("base"), str)
+        or not _GIT_OBJECT.fullmatch(value["base"])
+        or value.get("branch") != f"refs/heads/openbuild/lanes/{lane_id}"
+        or not isinstance(value.get("worktree"), str)
+        or not Path(value["worktree"]).is_absolute()
+        or len(value["worktree"]) > 4096
+    ):
+        raise ProjectStateError("lane identity or state is invalid")
+    _validate_common_identity(value.get("common"))
+    scopes = value.get("scopes")
+    if (
+        not isinstance(scopes, list)
+        or not scopes
+        or not all(_is_normalized_relative_path(scope) for scope in scopes)
+        or len({scope.casefold() for scope in scopes}) != len(scopes)
+    ):
+        raise ProjectStateError("lane scopes are invalid")
+    writer = value.get("writer")
+    if state in {"running", "waiting-for-integration", "quarantined"}:
+        _validate_writer(writer)
+    elif state != "closed" and writer is not None:
+        raise ProjectStateError("lane writer/state split is invalid")
+    elif state == "closed" and writer is not None:
+        _validate_writer(writer)
+    expected_fields = set(base_fields)
+    if state in {"recovery-ready", "cancelled", "quarantined", "closed"}:
+        expected_fields.update({"reason", "terminal_from"})
+        terminal_from = value.get("terminal_from")
+        if (
+            value.get("reason") not in _TERMINAL_REASONS
+            or terminal_from not in {"waiting-for-scope", "creating", "ready", "running"}
+            or (state == "quarantined" and terminal_from not in {"creating", "ready", "running"})
+            or (state == "recovery-ready" and terminal_from != "running")
+        ):
+            raise ProjectStateError("lane terminal binding is invalid")
+    if state == "recovery-ready":
+        expected_fields.update(
+            {"terminal_evidence", "recovery_checkpoint_digest"}
+        )
+        if (
+            not _is_hex_identifier(value.get("terminal_evidence"))
+            or not _is_hex_identifier(value.get("recovery_checkpoint_digest"))
+        ):
+            raise ProjectStateError("lane recovery evidence is invalid")
+    if state == "closed":
+        expected_fields.add("terminal_evidence")
+        if not _is_hex_identifier(value.get("terminal_evidence")):
+            raise ProjectStateError("lane terminal evidence is invalid")
+    if state == "waiting-for-integration":
+        expected_fields.add("terminal_evidence")
+        if not _is_hex_identifier(value.get("terminal_evidence")):
+            raise ProjectStateError("lane terminal evidence is invalid")
+    if set(value) != expected_fields:
+        raise ProjectStateError("lane fields are incomplete or unknown")
+    return dict(value)
+
+
+def _validate_protected_content(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or value.get("kind") not in {"missing", "file", "link"}:
+        raise ProjectStateError("protected scope content is invalid")
+    if value["kind"] == "missing":
+        if set(value) != {"kind", "digest"} or value.get("digest") is not None:
+            raise ProjectStateError("protected scope deletion evidence is invalid")
+    elif (
+        set(value) != {"kind", "digest", "git_blob_id", "git_mode"}
+        or not _is_hex_identifier(value.get("digest"))
+        or not isinstance(value.get("git_blob_id"), str)
+        or not _GIT_OBJECT.fullmatch(value["git_blob_id"])
+        or value.get("git_mode") not in {"100644", "100755", "120000"}
+        or (value["kind"] == "link") != (value["git_mode"] == "120000")
+    ):
+        raise ProjectStateError("protected scope content evidence is invalid")
+    return dict(value)
+
+
+def _validate_adoption_receipt(value: Any) -> dict[str, Any]:
+    required = {
+        "kind",
+        "project_common_digest",
+        "integration_ref",
+        "user_action_digest",
+        "plan_digest",
+        "paths",
+        "integrated_commit",
+        "digest",
+    }
+    if not isinstance(value, dict) or set(value) != required:
+        raise ProjectStateError("protected scope adoption receipt is invalid")
+    paths = value.get("paths")
+    if (
+        value.get("kind") != "accepted-protected-work-integration"
+        or not all(
+            _is_hex_identifier(value.get(field))
+            for field in (
+                "project_common_digest",
+                "user_action_digest",
+                "plan_digest",
+                "digest",
+            )
+        )
+        or not isinstance(value.get("integration_ref"), str)
+        or not value["integration_ref"].startswith("refs/")
+        or not isinstance(value.get("integrated_commit"), str)
+        or not _GIT_OBJECT.fullmatch(value["integrated_commit"])
+        or not isinstance(paths, list)
+        or not paths
+    ):
+        raise ProjectStateError("protected scope adoption receipt is invalid")
+    for entry in paths:
+        if (
+            not isinstance(entry, dict)
+            or set(entry) != {"path", "provenance", "intent_generation"}
+            or not _is_normalized_relative_path(entry.get("path"))
+            or not _is_hex_identifier(entry.get("provenance"))
+            or not isinstance(entry.get("intent_generation"), int)
+            or entry["intent_generation"] < 1
+        ):
+            raise ProjectStateError("protected scope adoption receipt path is invalid")
+    if value["digest"] != _digest(value):
+        raise ProjectStateError("protected scope adoption receipt digest is invalid")
+    return dict(value)
+
+
+def _validate_project_scope(
+    value: Any,
+    lane_session: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ProjectStateError("project scope is invalid")
+    if value.get("kind") != "protected-user-work":
+        return validate_scope_state(value)
+    base_fields = {"kind", "path", "owner", "adoption", "evidence", "provenance"}
+    adoption = value.get("adoption")
+    expected_fields = set(base_fields)
+    if adoption == "adoption-intent":
+        expected_fields.add("adoption_intent")
+    elif adoption == "adopted":
+        expected_fields.add("adoption_acceptance")
+    elif adoption != "protected":
+        raise ProjectStateError("protected scope adoption state is invalid")
+    if set(value) != expected_fields or not _is_normalized_relative_path(value.get("path")):
+        raise ProjectStateError("protected scope fields are incomplete or unknown")
+    evidence = value.get("evidence")
+    if not isinstance(evidence, dict) or set(evidence) != {
+        "common",
+        "path",
+        "content",
+        "index_digest",
+        "index_blob_id",
+    }:
+        raise ProjectStateError("protected scope evidence is invalid")
+    _validate_common_identity(evidence.get("common"))
+    _validate_protected_content(evidence.get("content"))
+    index_blob_id = evidence.get("index_blob_id")
+    if (
+        evidence.get("path") != value["path"]
+        or not _is_hex_identifier(evidence.get("index_digest"))
+        or (
+            index_blob_id is not None
+            and (
+                not isinstance(index_blob_id, str)
+                or not _GIT_OBJECT.fullmatch(index_blob_id)
+            )
+        )
+        or not _is_hex_identifier(value.get("provenance"))
+        or value["provenance"] != hashlib.sha256(_canonical(evidence)).hexdigest()
+    ):
+        raise ProjectStateError("protected scope evidence binding is invalid")
+    if (
+        lane_session is None
+        or evidence["common"] != lane_session.get("common")
+    ):
+        raise ProjectStateError("protected scope session binding is invalid")
+    if adoption in {"protected", "adoption-intent"} and value.get("owner") is not None:
+        raise ProjectStateError("protected scope owner is invalid")
+    if adoption == "adoption-intent":
+        intent = value.get("adoption_intent")
+        if (
+            not isinstance(intent, dict)
+            or set(intent)
+            != {
+                "user_action_digest",
+                "plan_digest",
+                "provenance",
+                "intent_generation",
+            }
+            or not _is_hex_identifier(intent.get("user_action_digest"))
+            or not _is_hex_identifier(intent.get("plan_digest"))
+            or intent.get("provenance") != value["provenance"]
+            or not isinstance(intent.get("intent_generation"), int)
+            or intent["intent_generation"] < 1
+        ):
+            raise ProjectStateError("protected scope adoption intent is invalid")
+    if adoption == "adopted":
+        acceptance = value.get("adoption_acceptance")
+        if (
+            value.get("owner") != "integration"
+            or not isinstance(acceptance, dict)
+            or set(acceptance)
+            != {
+                "user_action_digest",
+                "plan_digest",
+                "integrated_commit",
+                "integration_receipt_digest",
+                "receipt",
+            }
+            or not _is_hex_identifier(acceptance.get("user_action_digest"))
+            or not _is_hex_identifier(acceptance.get("plan_digest"))
+            or not isinstance(acceptance.get("integrated_commit"), str)
+            or not _GIT_OBJECT.fullmatch(acceptance["integrated_commit"])
+            or not _is_hex_identifier(acceptance.get("integration_receipt_digest"))
+        ):
+            raise ProjectStateError("protected scope adoption acceptance is invalid")
+        receipt = _validate_adoption_receipt(acceptance.get("receipt"))
+        matching_paths = [
+            entry
+            for entry in receipt["paths"]
+            if entry.get("path") == value["path"]
+            and entry.get("provenance") == value["provenance"]
+        ]
+        if (
+            acceptance["integration_receipt_digest"] != receipt["digest"]
+            or acceptance["integrated_commit"] != receipt["integrated_commit"]
+            or acceptance["user_action_digest"] != receipt["user_action_digest"]
+            or acceptance["plan_digest"] != receipt["plan_digest"]
+            or len(matching_paths) != 1
+            or len({entry["path"].casefold() for entry in receipt["paths"]})
+            != len(receipt["paths"])
+            or receipt["project_common_digest"]
+            != hashlib.sha256(_canonical(evidence["common"])).hexdigest()
+            or receipt["integration_ref"] != lane_session.get("integration_ref")
+        ):
+            raise ProjectStateError("protected scope adoption acceptance binding is invalid")
+    return dict(value)
+
+
+def _validate_lane_scope_uniqueness(
+    lanes: Sequence[Mapping[str, Any]],
+    scopes: Sequence[Mapping[str, Any]],
+) -> None:
+    lane_ids = [value["lane_id"] for value in lanes]
+    lane_branches = [value["branch"] for value in lanes]
+    lane_worktrees = [value["worktree"].casefold() for value in lanes]
+    scope_paths = [
+        value["path"].casefold()
+        for value in scopes
+        if value.get("kind") == "protected-user-work"
+    ]
+    if (
+        len(lane_ids) != len(set(lane_ids))
+        or len(lane_branches) != len(set(lane_branches))
+        or len(lane_worktrees) != len(set(lane_worktrees))
+        or len(scope_paths) != len(set(scope_paths))
+    ):
+        raise ProjectStateError("project lane or scope identities are not unique")
+
+
 class ProjectStateStore:
     def __init__(self, project: Path, *, coordinator_root: Path | None = None, fault: str | None = None) -> None:
         self.project = _absolute_no_follow(project)
@@ -842,6 +1217,9 @@ class ProjectStateStore:
             raise ProjectStateError("anchor ID is invalid")
         return self._states_directory / f"{anchor_id}.json"
 
+    def _anchor_state_lock_path(self, anchor_id: str) -> Path:
+        return self.anchor_path(anchor_id) / "state.lock"
+
     def _anchor_manifest(self, record: Mapping[str, Any]) -> dict[str, Any]:
         outcome = record["outcome"]
         assert isinstance(outcome, Mapping)
@@ -985,6 +1363,7 @@ class ProjectStateStore:
                 "state": "clean" if verdict == "clean" else "breach",
                 "registry": "B0" if verdict == "clean" else None,
                 "incident_id": None if verdict == "clean" else secrets.token_hex(32),
+                "lane_session": None,
                 "lanes": [],
                 "milestones": [],
                 "scopes": [],
@@ -995,14 +1374,116 @@ class ProjectStateStore:
     def _read_state_strict(self, anchor_id: str) -> dict[str, Any]:
         self._manifest(anchor_id)
         state = _read_json(self._state_path(anchor_id))
-        required = {"schema", "generation", "epoch", "state", "registry", "incident_id", "lanes", "milestones", "scopes", "digest"}
-        if set(state) != required or state.get("schema") != SCHEMA_VERSION or state.get("generation") != 0 or state.get("epoch") != 0 or state.get("state") not in {"clean", "breach"}:
+        required = {"schema", "generation", "epoch", "state", "registry", "incident_id", "lane_session", "lanes", "milestones", "scopes", "digest"}
+        legacy_required = required - {"lane_session"}
+        legacy = set(state) == legacy_required
+        if legacy:
+            if (
+                state.get("generation") != 0
+                or any(state.get(key) != [] for key in ("lanes", "milestones", "scopes"))
+            ):
+                raise ProjectStateError("legacy project state schema is invalid")
+            state = dict(state)
+            state["lane_session"] = None
+        if set(state) != required or state.get("schema") != SCHEMA_VERSION or not isinstance(state.get("generation"), int) or state["generation"] < 0 or state.get("epoch") != 0 or state.get("state") not in {"clean", "breach"}:
             raise ProjectStateError("project state schema is invalid")
         if (state["state"] == "clean") != (state["registry"] == "B0") or (state["state"] == "breach") != (isinstance(state["incident_id"], str) and state["registry"] is None):
             raise ProjectStateError("clean/breach state split is invalid")
         if not all(isinstance(state[key], list) for key in ("lanes", "milestones", "scopes")):
             raise ProjectStateError("project state collections are invalid")
+        lane_session = _validate_lane_session(state["lane_session"])
+        validated_lanes = [_validate_lane_projection(value) for value in state["lanes"]]
+        validated_scopes = [
+            _validate_project_scope(value, lane_session)
+            for value in state["scopes"]
+        ]
+        if lane_session is None and validated_lanes:
+            raise ProjectStateError("project lanes require a lane session binding")
+        if lane_session is not None and any(
+            lane["common"] != lane_session["common"]
+            for lane in validated_lanes
+        ):
+            raise ProjectStateError("project lane session identity drifted")
+        _validate_lane_scope_uniqueness(validated_lanes, validated_scopes)
         return {key: value for key, value in state.items() if key != "digest"}
+
+    def bind_lane_session(
+        self,
+        anchor_id: str,
+        *,
+        expected_generation: int,
+        common: Mapping[str, Any],
+        integration_ref: str,
+    ) -> dict[str, Any]:
+        if not isinstance(expected_generation, int) or expected_generation < 0:
+            raise ProjectStateError("expected project generation is invalid")
+        binding = _validate_lane_session(
+            {
+                "common": dict(common),
+                "integration_ref": integration_ref,
+                "reader_floor": "2.3.6",
+            }
+        )
+        assert binding is not None
+        with _locked(self.lock_path):
+            self._manifest(anchor_id)
+            with _locked(self._anchor_state_lock_path(anchor_id)):
+                state = self._read_state_strict(anchor_id)
+                if state["generation"] != expected_generation:
+                    raise ProjectStateError("project generation changed")
+                if state["state"] != "clean":
+                    raise ProjectStateError("breached project state cannot bind a lane session")
+                if state["lane_session"] is not None:
+                    if state["lane_session"] != binding:
+                        raise ProjectStateError("lane session integration binding changed")
+                    return state
+                state["generation"] += 1
+                state["lane_session"] = binding
+                _replace_json(self._state_path(anchor_id), state)
+                return self._read_state_strict(anchor_id)
+
+    def replace_lane_state(
+        self,
+        anchor_id: str,
+        *,
+        expected_generation: int,
+        lanes: Sequence[Mapping[str, Any]],
+        scopes: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        """Atomically publish the M2 lane projection under the established locks.
+
+        This deliberately has no policy: lifecycle validation remains in the lane
+        owner, while this M1 owner retains the sole generationed state sink.
+        """
+        if not isinstance(expected_generation, int) or expected_generation < 0:
+            raise ProjectStateError("expected project generation is invalid")
+        validated_lanes = [_validate_lane_projection(value) for value in lanes]
+        with _locked(self.lock_path):
+            self._manifest(anchor_id)
+            with _locked(self._anchor_state_lock_path(anchor_id)):
+                state = self._read_state_strict(anchor_id)
+                if state["generation"] != expected_generation:
+                    raise ProjectStateError("project generation changed")
+                if state["state"] != "clean":
+                    raise ProjectStateError("breached project state cannot admit lanes")
+                lane_session = _validate_lane_session(state["lane_session"])
+                if lane_session is None:
+                    raise ProjectStateError("lane session binding is absent")
+                validated_scopes = [
+                    _validate_project_scope(value, lane_session)
+                    for value in scopes
+                ]
+                _validate_lane_scope_uniqueness(validated_lanes, validated_scopes)
+                if any(
+                    lane["common"] != lane_session["common"]
+                    for lane in validated_lanes
+                ):
+                    raise ProjectStateError("project lane session identity drifted")
+                state["generation"] += 1
+                state["lanes"] = validated_lanes
+                state["scopes"] = validated_scopes
+                _replace_json(self._state_path(anchor_id), state)
+                return self._read_state_strict(anchor_id)
 
     # The methods below are named R-031 observers.  They only lstat/open/read
     # private records and deliberately never lock, mkdir, chmod, fsync, issue a

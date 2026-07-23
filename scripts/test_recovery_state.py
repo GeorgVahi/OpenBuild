@@ -213,7 +213,7 @@ class RegistryContractTests(unittest.TestCase):
                 action_snapshot_id="9" * 64,
                 action_snapshot_sha256=hashlib.sha256(action_snapshot_bytes).hexdigest(),
             )
-            self.assertEqual(owner.state()["reader_floor"], "2.3.6")
+            self.assertEqual(owner.state()["reader_floor"], "2.4.0")
             authorization = owner.issue_post_commit_root_completion_authorization(action)
             issued_source = owner.read_private_source(preflight["source_state_id"])
             issued_action = issued_source["post_commit_root_completion"]["action"]
@@ -1167,7 +1167,7 @@ class RegistryContractTests(unittest.TestCase):
             self.assertEqual(first.workspace_key, second.workspace_key)
             self.assertTrue(first.directory.is_relative_to(state_root))
             self.assertFalse(first.directory.is_relative_to(workspace))
-            self.assertEqual(state["reader_floor"], "2.3.6")
+            self.assertEqual(state["reader_floor"], "2.4.0")
             self.assertEqual(state["identity_version"], 2)
             self.assertEqual(state["workspace_key"], first.workspace_key)
             self.assertIn("git_common_dir_identity", state)
@@ -1217,8 +1217,8 @@ class RegistryContractTests(unittest.TestCase):
                     specification_revision="R-001",
                 )
 
-            self.assertEqual(observed_floors, ["2.3.6"])
-            self.assertEqual(owner.state()["reader_floor"], "2.3.6")
+            self.assertEqual(observed_floors, ["2.4.0"])
+            self.assertEqual(owner.state()["reader_floor"], "2.4.0")
 
     def test_digest_consistent_malformed_registry_generations_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -2921,7 +2921,7 @@ class RegistryContractTests(unittest.TestCase):
             )
 
             self.assertIsNone(pending["quarantine"])
-            self.assertEqual(pending["reader_floor"], "2.3.6")
+            self.assertEqual(pending["reader_floor"], "2.4.0")
             self.assertEqual(
                 pending["lease"]["semantic_disposition"]["schema"],
                 "terminal-abandonment-v3",
@@ -3154,7 +3154,7 @@ class RegistryContractTests(unittest.TestCase):
 
             replay = self.owner(workspace, root / "state").state()
             self.assertEqual(replay["digest"], released["digest"])
-            self.assertEqual(replay["reader_floor"], "2.3.6")
+            self.assertEqual(replay["reader_floor"], "2.4.0")
 
     def test_ac05_mixed_drift_rejects_terminal_abandonment_without_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -3188,7 +3188,7 @@ class RegistryContractTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 recovery_state.RecoveryStateError,
-                "exact outside-set-drift",
+                "exact supported drift shape",
             ):
                 owner.record_terminal_abandonment("normal-1")
 
@@ -3246,7 +3246,7 @@ class RegistryContractTests(unittest.TestCase):
 
             pending = owner.record_terminal_abandonment("normal-1")
             semantic = pending["lease"]["semantic_disposition"]
-            self.assertEqual(pending["reader_floor"], "2.3.6")
+            self.assertEqual(pending["reader_floor"], "2.4.0")
             self.assertEqual(pending["lease"]["lease_kind"], "normal-contained")
             self.assertEqual(semantic["schema"], "terminal-abandonment-v3")
             self.assertEqual(
@@ -3329,6 +3329,132 @@ class RegistryContractTests(unittest.TestCase):
                 "outside drift\n",
             )
 
+    def test_legacy_normal_single_preexisting_dirty_overlap_reconciles_v5(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = self.make_git_workspace(root)
+            harness = workspace / "harness.ps1"
+            harness.write_text(
+                "preexisting user harness\n", encoding="utf-8", newline="\n"
+            )
+            owner = self.owner(workspace, root / "state")
+            preflight = owner.prepare_source_checkpoint(
+                source_id="normal-1-source",
+                source_lease_id="normal-1",
+                source_milestone="M-001",
+                target_milestone="M-001-recovery",
+                allowed_paths=["harness.ps1"],
+                specification_revision="R-010",
+            )
+            owner.reserve_normal(
+                "normal-1",
+                allowed_set_digest=preflight["allowed_set_digest"],
+                recovery_capable=True,
+                source_state_id=preflight["source_state_id"],
+                run_id="market-entry-run",
+                containment_plan=self.containment_plan(),
+            )
+            owner.bind_reserved_source_snapshot("normal-1", preflight)
+            owner.claim_contained_launch("normal-1", "contained-token")
+            owner.bind_process_unactivated(
+                "normal-1",
+                allowed_set_digest=preflight["allowed_set_digest"],
+                provider_receipt=self.provider_receipt(),
+                process_receipt=self.process_receipt(),
+            )
+            owner.commit_activation("normal-1", preflight["allowed_set_digest"])
+            checkpoint = owner.finalize_prepared_checkpoint(
+                preflight, source_receipt_digest="a" * 64
+            )
+            index_before = (workspace / ".git" / "index").read_bytes()
+            harness.write_text("writer remediation\n", encoding="utf-8", newline="\n")
+            self.assertEqual(
+                owner.revalidate_checkpoint(checkpoint)["reasons"],
+                ["preexisting-dirty-overlap"],
+            )
+            owner.record_terminal_evidence(
+                "normal-1", self.terminal_receipt(True), preflight["allowed_set_digest"]
+            )
+            owner.prove_contained_tree_empty(
+                "normal-1", self.zero_proof(), preflight["allowed_set_digest"]
+            )
+
+            legacy = owner.state()
+            legacy["reader_floor"] = "2.3.6"
+            legacy["digest"] = recovery_state._digest(legacy)
+            owner.path.write_text(
+                json.dumps(legacy, sort_keys=True) + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            legacy_bytes = owner.path.read_bytes()
+            owner = self.owner(workspace, root / "state")
+            self.assertEqual(owner.state()["reader_floor"], "2.3.6")
+            self.assertEqual(owner.path.read_bytes(), legacy_bytes)
+
+            pending = owner.record_terminal_abandonment("normal-1")
+            semantic = pending["lease"]["semantic_disposition"]
+            self.assertEqual(pending["reader_floor"], "2.4.0")
+            self.assertEqual(semantic["schema"], "terminal-abandonment-v5")
+            self.assertEqual(
+                semantic["cause"],
+                "legacy-normal-preexisting-dirty-overlap",
+            )
+            self.assertFalse(semantic["checkpoint_allowed"])
+            self.assertEqual(semantic["checkpoint_invalidation"], "pending")
+            self.assertIsNone(pending["outbox"])
+            self.assertNotIn("handoff_digest", pending["lease"])
+            self.assertEqual(
+                owner.record_terminal_abandonment("normal-1")["digest"],
+                pending["digest"],
+            )
+
+            faulting = self.owner(
+                workspace, root / "state", fault="after-replace"
+            )
+            with self.assertRaises(recovery_state.RecoveryStateError):
+                faulting.complete_terminal_abandonment("normal-1")
+            retained = self.owner(workspace, root / "state").state()
+            self.assertEqual(
+                retained["lease"]["semantic_disposition"][
+                    "checkpoint_invalidation"
+                ],
+                "pending",
+            )
+            self.assertEqual(
+                self.owner(workspace, root / "state")
+                .read_private_source(preflight["source_state_id"])[
+                    "public_checkpoint"
+                ]["reasons"],
+                ["terminal-abandoned-legacy-normal-dirty-overlap"],
+            )
+            owner = self.owner(workspace, root / "state")
+            completed = owner.complete_terminal_abandonment("normal-1")
+            self.assertEqual(
+                completed["lease"]["semantic_disposition"]["checkpoint_invalidation"],
+                "completed",
+            )
+            self.assertEqual(
+                owner.complete_terminal_abandonment("normal-1")["digest"],
+                completed["digest"],
+            )
+            self.assertEqual(
+                owner.read_private_source(preflight["source_state_id"])[
+                    "public_checkpoint"
+                ]["reasons"],
+                ["terminal-abandoned-legacy-normal-dirty-overlap"],
+            )
+            owner.acknowledge_guardian_close("normal-1", self.guardian_close())
+            released = owner.release_contained_terminal("normal-1")
+            self.assertIsNone(released["lease"])
+            self.assertIsNone(released["outbox"])
+            self.assertEqual(released["history"][-1]["semantic_disposition"], "abandoned")
+            self.assertFalse(released["history"][-1]["terminal_success"])
+            self.assertIsNone(released["history"][-1]["handoff_digest"])
+            self.assertIsNone(released["history"][-1]["outbox_digest"])
+            self.assertEqual(harness.read_text(encoding="utf-8"), "writer remediation\n")
+            self.assertEqual((workspace / ".git" / "index").read_bytes(), index_before)
+
     def test_recovery_overlap_with_git_drift_rejects_without_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -3340,7 +3466,7 @@ class RegistryContractTests(unittest.TestCase):
             source_before = source_path.read_bytes()
 
             with self.assertRaisesRegex(
-                recovery_state.RecoveryStateError, "exact outside-set-drift"
+                recovery_state.RecoveryStateError, "exact supported drift shape"
             ):
                 owner.record_terminal_abandonment("target-lease")
 
@@ -3791,6 +3917,7 @@ class RegistryContractTests(unittest.TestCase):
                 "2.2.5",
                 "2.3.2",
                 "2.3.5",
+                "2.3.6",
             ):
                 with self.subTest(reader_floor=reader_floor):
                     legacy = dict(current)
@@ -3818,14 +3945,14 @@ class RegistryContractTests(unittest.TestCase):
             upgraded_owner = self.owner(workspace, root / "state")
 
             pending = upgraded_owner.record_terminal_abandonment("normal-1")
-            self.assertEqual(pending["reader_floor"], "2.3.6")
+            self.assertEqual(pending["reader_floor"], "2.4.0")
             upgraded_owner.complete_terminal_abandonment("normal-1")
             upgraded_owner.acknowledge_guardian_close("normal-1", self.guardian_close())
             released = upgraded_owner.release_contained_terminal("normal-1")
             replay = self.owner(workspace, root / "state").state()
 
             self.assertEqual(replay["digest"], released["digest"])
-            self.assertEqual(replay["reader_floor"], "2.3.6")
+            self.assertEqual(replay["reader_floor"], "2.4.0")
             self.assertEqual(
                 len(
                     [
@@ -3885,7 +4012,7 @@ class RegistryContractTests(unittest.TestCase):
             def assert_promoted_before_source(source: dict[str, object]):
                 self.assertEqual(
                     upgraded._read_registry_locked(rebarrier=False)["reader_floor"],
-                    "2.3.6",
+                    "2.4.0",
                 )
                 return commit_source(source)
 
@@ -3893,7 +4020,7 @@ class RegistryContractTests(unittest.TestCase):
                 upgraded, "_commit_source_locked", side_effect=assert_promoted_before_source
             ):
                 completed = upgraded.complete_terminal_abandonment("normal-1")
-            self.assertEqual(completed["reader_floor"], "2.3.6")
+            self.assertEqual(completed["reader_floor"], "2.4.0")
             self.assertEqual(
                 completed["lease"]["semantic_disposition"]["checkpoint_invalidation"],
                 "completed",

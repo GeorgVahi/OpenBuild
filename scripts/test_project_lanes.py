@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import concurrent.futures
+import hashlib
+import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -24,6 +27,8 @@ from project_state import (  # type: ignore[import-not-found]
     validate_transition_registry,
     validate_scope_state,
 )
+from project_lanes import ProjectLaneCoordinator, ProjectLaneError  # type: ignore[import-not-found]
+from recovery_state import RecoveryRegistry, RecoveryStateError  # type: ignore[import-not-found]
 
 
 class ProjectStateM1Tests(unittest.TestCase):
@@ -202,6 +207,1171 @@ class ProjectStateM1Tests(unittest.TestCase):
         self.assertEqual(validate_scope_state({"kind": "file", "path": "src/a.py", "mode": "hard"})["mode"], "hard")
         with self.assertRaises(ProjectStateError):
             validate_scope_state({"kind": "file", "path": "../escape", "mode": "hard"})
+
+
+class ProjectLaneM2Tests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_context = tempfile.TemporaryDirectory(prefix="openbuild-project-lanes-")
+        self.temp = Path(self.temp_context.name)
+        self.checkout = self.temp / "checkout"
+        self.checkout.mkdir(parents=True)
+        self.git("init")
+        self.git("config", "user.email", "test@example.invalid")
+        self.git("config", "user.name", "Test")
+        (self.checkout / "base.txt").write_text("base\n", encoding="utf-8")
+        self.git("add", "base.txt")
+        self.git("commit", "-m", "base")
+        self.integration_ref = "refs/openbuild/integration"
+        self.git("update-ref", self.integration_ref, "HEAD")
+        self.coordinator = self.temp / "coordinator"
+        self.recovery = self.temp / "recovery"
+        self.lanes = self.temp / "lanes"
+        self.lanes.mkdir()
+        self.store = ProjectStateStore(self.checkout, coordinator_root=self.coordinator)
+        cap = self.store.issue_bootstrap_capability("plan", "attempt")["bootstrap_capability"]
+        self.anchor = self.store.create_anchor(cap, "plan", "attempt")["anchor_id"]
+        self.store.bootstrap(self.anchor, "clean")
+
+    def tearDown(self) -> None:
+        self.temp_context.cleanup()
+
+    def git(self, *args: str, cwd: Path | None = None) -> None:
+        subprocess.run(["git", *args], cwd=cwd or self.checkout, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    def coordinator_for(self, *, fault: str | None = None) -> ProjectLaneCoordinator:
+        return ProjectLaneCoordinator(
+            self.checkout,
+            self.store,
+            self.anchor,
+            recovery_root=self.recovery,
+            lane_root=self.lanes,
+            integration_ref=self.integration_ref,
+            fault=fault,
+        )
+
+    def test_exact_m1_schema_one_state_migrates_on_first_lane_session_bind(self) -> None:
+        state_path = self.coordinator / "states" / f"{self.anchor}.json"
+        legacy = {
+            "schema": 1,
+            "generation": 0,
+            "epoch": 0,
+            "state": "clean",
+            "registry": "B0",
+            "incident_id": None,
+            "lanes": [],
+            "milestones": [],
+            "scopes": [],
+        }
+        legacy["digest"] = hashlib.sha256(
+            json.dumps(
+                legacy,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        state_path.write_text(
+            json.dumps(
+                legacy,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        before = state_path.read_bytes()
+
+        observed = self.store.read_state(self.anchor)
+
+        self.assertEqual(observed["status"], "present")
+        self.assertIsNone(observed["state"]["lane_session"])
+        self.assertEqual(state_path.read_bytes(), before)
+
+        self.coordinator_for()
+        migrated = self.store.read_state(self.anchor)["state"]
+        self.assertEqual(migrated["generation"], 1)
+        self.assertEqual(migrated["lane_session"]["reader_floor"], "2.3.6")
+        self.assertNotEqual(state_path.read_bytes(), before)
+
+    def test_two_lanes_get_independent_worktrees_and_local_registry_reservations(self) -> None:
+        coordinator = self.coordinator_for()
+        one = coordinator.create("lane-one", "M2", self.lanes / "one", ["one.py"])
+        two = coordinator.create("lane-two", "M2", self.lanes / "two", ["two.py"])
+        self.assertEqual((one["state"], two["state"]), ("ready", "ready"))
+        self.assertNotEqual(one["worktree"], two["worktree"])
+        self.assertNotEqual(one["branch"], two["branch"])
+        registry = RecoveryRegistry(Path(one["worktree"]), state_root=self.recovery)
+        registry.reserve_normal("one-writer", allowed_set_digest="a" * 64, recovery_capable=False)
+        with self.assertRaises(RecoveryStateError):
+            registry.reserve_normal("another", allowed_set_digest="a" * 64, recovery_capable=False)
+
+    def test_runner_binding_confines_allowed_paths_to_the_registered_lane(self) -> None:
+        coordinator = self.coordinator_for()
+        lane = coordinator.create(
+            "runner-bound",
+            "M2",
+            self.lanes / "runner-bound",
+            ["src"],
+        )
+        binding = coordinator.runner_writer_binding(
+            "runner-bound",
+            Path(lane["worktree"]),
+            ["src/owned.py"],
+            require_ready=True,
+        )
+        self.assertEqual(binding["schema"], "project-lane-runner-v1")
+        self.assertEqual(binding["allowed_paths"], ["src/owned.py"])
+        self.assertEqual(
+            coordinator.verify_runner_writer_binding(
+                binding,
+                Path(lane["worktree"]),
+            ),
+            binding,
+        )
+        with self.assertRaisesRegex(ProjectLaneError, "escapes"):
+            coordinator.runner_writer_binding(
+                "runner-bound",
+                Path(lane["worktree"]),
+                ["outside.py"],
+                require_ready=True,
+            )
+        tampered = dict(binding)
+        tampered["allowed_paths"] = ["src/other.py"]
+        with self.assertRaisesRegex(ProjectLaneError, "changed"):
+            coordinator.verify_runner_writer_binding(
+                tampered,
+                Path(lane["worktree"]),
+            )
+
+    def test_existing_registry_allows_one_reservation_per_independent_worktree(self) -> None:
+        one, two = self.lanes / "manual-one", self.lanes / "manual-two"
+        self.git("worktree", "add", "-b", "manual-one", str(one)); self.git("worktree", "add", "-b", "manual-two", str(two))
+        def reserve(path: Path, lease: str) -> str:
+            return RecoveryRegistry(path, state_root=self.recovery).reserve_normal(lease, allowed_set_digest="b" * 64, recovery_capable=False)["lease"]["lease_id"]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            self.assertEqual(set(pool.map(lambda args: reserve(*args), ((one, "one"), (two, "two")))), {"one", "two"})
+        with self.assertRaises(RecoveryStateError):
+            reserve(one, "second-one")
+
+    def test_dirty_work_is_external_and_conflicting_lane_waits_without_mutation(self) -> None:
+        dirty = self.checkout / "user.txt"; dirty.write_bytes(b"uncommitted\x00bytes")
+        before = dirty.read_bytes(); index_before = self.git_output("ls-files", "--stage", "-z")
+        independent = self.coordinator_for().create("independent", "M2", self.lanes / "independent", ["other.py"])
+        blocked = self.coordinator_for().create("blocked", "M2", self.lanes / "blocked", ["user.txt"])
+        self.assertEqual(independent["state"], "ready"); self.assertEqual(blocked["state"], "waiting-for-scope")
+        self.assertEqual(dirty.read_bytes(), before); self.assertEqual(self.git_output("ls-files", "--stage", "-z"), index_before)
+        scopes = self.store.read_scopes(self.anchor)["scopes"]
+        self.assertTrue(any(item["kind"] == "protected-user-work" and item["path"] == "user.txt" and item["owner"] is None for item in scopes))
+
+    def test_timeout_quarantines_until_explicit_terminal_close(self) -> None:
+        lane = self.coordinator_for().create("timeout", "M2", self.lanes / "timeout", ["time.py"])
+        allowed_set_digest = "a" * 64
+        lease = {
+            "lease_id": "timeout-contained",
+            "run_id": "timeout-run",
+            "allowed_set_digest": allowed_set_digest,
+            "lease_kind": "normal-contained",
+            "recovery_capable": True,
+            "state": "running",
+        }
+        active_registry = mock.Mock()
+        active_registry.state.return_value = {"lease": lease, "outbox": None, "quarantine": None, "history": []}
+        coordinator = self.coordinator_for()
+        with mock.patch.object(coordinator, "_assert_legacy_vacancy"), \
+             mock.patch("project_lanes.RecoveryRegistry", return_value=active_registry):
+            lane = coordinator.attach_contained_writer(
+                "timeout",
+                lease_id="timeout-contained",
+                run_id="timeout-run",
+                allowed_set_digest=allowed_set_digest,
+            )
+        self.assertEqual(lane["state"], "running")
+        quarantined = self.coordinator_for().cancel_or_crash("timeout", "timeout")
+        self.assertEqual(quarantined["state"], "quarantined")
+        with mock.patch("project_lanes.RecoveryRegistry", return_value=active_registry), \
+             self.assertRaisesRegex(ProjectLaneError, "not vacant"):
+            self.coordinator_for().close_terminal("timeout")
+        archive = {
+            "event": "contained-terminal-released",
+            "lease_id": "timeout-contained",
+            "lease_kind": "normal-contained",
+            "allowed_set_digest": allowed_set_digest,
+            "archive_digest": "b" * 64,
+        }
+        closed_registry = mock.Mock()
+        closed_registry.state.return_value = {
+            "lease": None,
+            "outbox": None,
+            "quarantine": None,
+            "history": [archive],
+        }
+        with mock.patch("project_lanes.RecoveryRegistry", return_value=closed_registry):
+            closed = self.coordinator_for().close_terminal("timeout")
+        self.assertEqual((closed["state"], closed["terminal_evidence"]), ("closed", "b" * 64))
+
+    def test_successful_writer_waits_for_integration_after_lane_local_release(self) -> None:
+        self.coordinator_for().create(
+            "successful",
+            "M2",
+            self.lanes / "successful",
+            ["success.py"],
+        )
+        allowed_set_digest = "a" * 64
+        writer = {
+            "lease_id": "successful-contained",
+            "run_id": "successful-run",
+            "allowed_set_digest": allowed_set_digest,
+            "lease_kind": "normal-contained",
+        }
+        active_registry = mock.Mock()
+        active_registry.state.return_value = {
+            "lease": {
+                **writer,
+                "recovery_capable": True,
+                "state": "running",
+            },
+            "outbox": None,
+            "quarantine": None,
+            "history": [],
+        }
+        coordinator = self.coordinator_for()
+        with mock.patch.object(
+            coordinator,
+            "_assert_legacy_vacancy",
+        ), mock.patch(
+            "project_lanes.RecoveryRegistry",
+            return_value=active_registry,
+        ):
+            running = coordinator.attach_contained_writer(
+                "successful",
+                lease_id=writer["lease_id"],
+                run_id=writer["run_id"],
+                allowed_set_digest=allowed_set_digest,
+            )
+        self.assertEqual(running["state"], "running")
+        release = {
+            "event": "contained-terminal-released",
+            "lease_id": writer["lease_id"],
+            "lease_kind": "normal-contained",
+            "allowed_set_digest": allowed_set_digest,
+            "terminal_success": True,
+            "semantic_disposition": None,
+            "final_state": "handoff-committed",
+            "handoff_digest": "b" * 64,
+            "archive_digest": "c" * 64,
+        }
+        closed_registry = mock.Mock()
+        closed_registry.state.return_value = {
+            "lease": None,
+            "outbox": None,
+            "quarantine": None,
+            "history": [release],
+        }
+        with mock.patch(
+            "project_lanes.RecoveryRegistry",
+            return_value=closed_registry,
+        ):
+            waiting = coordinator.record_successful_terminal("successful")
+            replay = coordinator.record_successful_terminal("successful")
+        self.assertEqual(waiting["state"], "waiting-for-integration")
+        self.assertEqual(waiting["terminal_evidence"], "c" * 64)
+        self.assertEqual(replay, waiting)
+        with self.assertRaisesRegex(ProjectLaneError, "not terminally closable"):
+            coordinator.close_terminal("successful")
+
+    def test_failed_writer_reopens_only_for_its_reserved_recovery_target(self) -> None:
+        lane = self.coordinator_for().create(
+            "recoverable",
+            "M2",
+            self.lanes / "recoverable",
+            ["recover.py"],
+        )
+        allowed_set_digest = "d" * 64
+        source_writer = {
+            "lease_id": "recoverable-contained",
+            "run_id": "recoverable-run",
+            "allowed_set_digest": allowed_set_digest,
+            "lease_kind": "normal-contained",
+        }
+        active_registry = mock.Mock()
+        active_registry.state.return_value = {
+            "lease": {
+                **source_writer,
+                "recovery_capable": True,
+                "state": "running",
+            },
+            "outbox": None,
+            "quarantine": None,
+            "history": [],
+        }
+        coordinator = self.coordinator_for()
+        with mock.patch.object(
+            coordinator,
+            "_assert_legacy_vacancy",
+        ), mock.patch(
+            "project_lanes.RecoveryRegistry",
+            return_value=active_registry,
+        ):
+            running = coordinator.attach_contained_writer(
+                "recoverable",
+                lease_id=source_writer["lease_id"],
+                run_id=source_writer["run_id"],
+                allowed_set_digest=allowed_set_digest,
+            )
+        self.assertEqual(running["state"], "running")
+        self.assertEqual(
+            coordinator.cancel_or_crash("recoverable", "crashed")["state"],
+            "quarantined",
+        )
+
+        release = {
+            "event": "contained-terminal-released",
+            "lease_id": source_writer["lease_id"],
+            "lease_kind": "normal-contained",
+            "allowed_set_digest": allowed_set_digest,
+            "terminal_success": False,
+            "semantic_disposition": None,
+            "handoff_digest": None,
+            "outbox_digest": None,
+            "archive_digest": "e" * 64,
+        }
+        vacant_registry = mock.Mock()
+        vacant_registry.state.return_value = {
+            "lease": None,
+            "outbox": None,
+            "quarantine": None,
+            "history": [release],
+        }
+        checkpoint_digest = "f" * 64
+        with mock.patch(
+            "project_lanes.RecoveryRegistry",
+            return_value=vacant_registry,
+        ):
+            recovery_ready = coordinator.record_recovery_ready(
+                "recoverable",
+                checkpoint_digest,
+            )
+            replay = coordinator.record_recovery_ready(
+                "recoverable",
+                checkpoint_digest,
+            )
+        self.assertEqual(recovery_ready["state"], "recovery-ready")
+        self.assertIsNone(recovery_ready["writer"])
+        self.assertEqual(
+            recovery_ready["recovery_checkpoint_digest"],
+            checkpoint_digest,
+        )
+        self.assertEqual(recovery_ready["terminal_evidence"], "e" * 64)
+        self.assertEqual(replay, recovery_ready)
+
+        recovery_writer = {
+            "lease_id": "recoverable-target",
+            "allowed_set_digest": allowed_set_digest,
+            "lease_kind": "recovery-target",
+            "recovery_capable": True,
+            "state": "running",
+            "plan": {"run_id": "recoverable-target-run"},
+        }
+        recovery_registry = mock.Mock()
+        recovery_registry.state.return_value = {
+            "lease": recovery_writer,
+            "outbox": None,
+            "quarantine": None,
+            "history": [release],
+        }
+        with mock.patch.object(
+            coordinator,
+            "_assert_legacy_vacancy",
+        ), mock.patch(
+            "project_lanes.RecoveryRegistry",
+            return_value=recovery_registry,
+        ):
+            recovered_running = coordinator.attach_contained_writer(
+                "recoverable",
+                lease_id=recovery_writer["lease_id"],
+                run_id=recovery_writer["plan"]["run_id"],
+                allowed_set_digest=allowed_set_digest,
+                lease_kind="recovery-target",
+                recovery_checkpoint_digest=checkpoint_digest,
+            )
+        self.assertEqual(recovered_running["state"], "running")
+        self.assertEqual(
+            recovered_running["writer"]["lease_kind"],
+            "recovery-target",
+        )
+        self.assertNotIn("recovery_checkpoint_digest", recovered_running)
+        self.assertNotIn("terminal_evidence", recovered_running)
+
+    def test_cancel_binds_an_already_active_writer_before_terminal_state(self) -> None:
+        self.coordinator_for().create("cancel-race", "M2", self.lanes / "cancel-race", ["race.py"])
+        allowed_set_digest = "c" * 64
+        lease = {
+            "lease_id": "cancel-race-contained",
+            "run_id": "cancel-race-run",
+            "allowed_set_digest": allowed_set_digest,
+            "lease_kind": "normal-contained",
+            "recovery_capable": True,
+            "state": "running",
+        }
+        active_registry = mock.Mock()
+        active_registry.state.return_value = {
+            "lease": lease,
+            "outbox": None,
+            "quarantine": None,
+            "history": [],
+        }
+        coordinator = self.coordinator_for()
+        with mock.patch.object(coordinator, "_assert_legacy_vacancy"), \
+             mock.patch("project_lanes.RecoveryRegistry", return_value=active_registry):
+            quarantined = coordinator.cancel_or_crash("cancel-race", "timeout")
+            replayed = coordinator.attach_contained_writer(
+                "cancel-race",
+                lease_id="cancel-race-contained",
+                run_id="cancel-race-run",
+                allowed_set_digest=allowed_set_digest,
+            )
+        self.assertEqual(quarantined["state"], "quarantined")
+        self.assertEqual(quarantined["writer"]["lease_id"], "cancel-race-contained")
+        self.assertEqual(replayed, quarantined)
+
+    def test_running_replay_revalidates_registry_and_allows_writer_dirties(self) -> None:
+        lane = self.coordinator_for().create("running-replay", "M2", self.lanes / "running-replay", ["running.py"])
+        writer = {
+            "lease_id": "running-contained",
+            "run_id": "running-run",
+            "allowed_set_digest": "d" * 64,
+            "lease_kind": "normal-contained",
+        }
+        state = self.store.read_state(self.anchor)["state"]
+        lane["state"] = "running"
+        lane["writer"] = writer
+        self.store.replace_lane_state(
+            self.anchor,
+            expected_generation=state["generation"],
+            lanes=[lane],
+            scopes=state["scopes"],
+        )
+        (Path(lane["worktree"]) / "running.py").write_text("writer change\n", encoding="utf-8")
+        active_registry = mock.Mock()
+        active_registry.state.return_value = {
+            "lease": {
+                **writer,
+                "recovery_capable": True,
+                "state": "running",
+            },
+            "outbox": None,
+            "quarantine": None,
+            "history": [],
+        }
+        coordinator = self.coordinator_for()
+        with mock.patch.object(coordinator, "_assert_legacy_vacancy"), \
+             mock.patch("project_lanes.RecoveryRegistry", return_value=active_registry):
+            replayed = coordinator.create(
+                "running-replay",
+                "M2",
+                self.lanes / "running-replay",
+                ["running.py"],
+            )
+        self.assertEqual(replayed["state"], "running")
+        active_registry.state.return_value["lease"] = None
+        with mock.patch.object(coordinator, "_assert_legacy_vacancy"), \
+             mock.patch("project_lanes.RecoveryRegistry", return_value=active_registry), \
+             self.assertRaisesRegex(ProjectLaneError, "not active"):
+            coordinator.attach_contained_writer(
+                "running-replay",
+                lease_id="running-contained",
+                run_id="running-run",
+                allowed_set_digest="d" * 64,
+            )
+
+    def test_project_state_rejects_malformed_nested_lane_and_scope_on_replace_and_reload(self) -> None:
+        lane = self.coordinator_for().create("schema", "M2", self.lanes / "schema", ["schema.py"])
+        state = self.store.read_state(self.anchor)["state"]
+        malformed = dict(lane)
+        malformed["worktree"] = str(self.checkout)
+        malformed["unknown"] = True
+        with self.assertRaisesRegex(ProjectStateError, "lane"):
+            self.store.replace_lane_state(
+                self.anchor,
+                expected_generation=state["generation"],
+                lanes=[malformed],
+                scopes=state["scopes"],
+            )
+        malformed_scope = {
+            "kind": "protected-user-work",
+            "path": "schema.py",
+            "owner": None,
+            "adoption": "protected",
+            "evidence": {"content": {"kind": "file"}},
+            "provenance": "e" * 64,
+        }
+        with self.assertRaisesRegex(ProjectStateError, "scope"):
+            self.store.replace_lane_state(
+                self.anchor,
+                expected_generation=state["generation"],
+                lanes=[lane],
+                scopes=[malformed_scope],
+            )
+
+        state_path = self.coordinator / "states" / f"{self.anchor}.json"
+        tampered = json.loads(state_path.read_text(encoding="utf-8"))
+        tampered["lanes"][0]["branch"] = "refs/heads/arbitrary"
+        tampered.pop("digest")
+        tampered["digest"] = hashlib.sha256(
+            json.dumps(
+                tampered,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        state_path.write_text(
+            json.dumps(
+                tampered,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
+        self.assertEqual(self.store.read_state(self.anchor), {"status": "indeterminate"})
+
+    def test_terminal_transition_is_idempotent_and_unmaterialized_lanes_close(self) -> None:
+        running = self.coordinator_for().create("terminal-replay", "M2", self.lanes / "terminal-replay", ["terminal.py"])
+        state = self.store.read_state(self.anchor)["state"]
+        running["state"] = "running"
+        running["writer"] = {
+            "lease_id": "terminal-contained",
+            "run_id": "terminal-run",
+            "allowed_set_digest": "f" * 64,
+            "lease_kind": "normal-contained",
+        }
+        self.store.replace_lane_state(
+            self.anchor,
+            expected_generation=state["generation"],
+            lanes=[running],
+            scopes=state["scopes"],
+        )
+        first = self.coordinator_for().cancel_or_crash("terminal-replay", "timeout")
+        second = self.coordinator_for().cancel_or_crash("terminal-replay", "timeout")
+        self.assertEqual((first["state"], second["state"]), ("quarantined", "quarantined"))
+        self.assertEqual(second["writer"], running["writer"])
+
+        dirty = self.checkout / "waiting.txt"
+        dirty.write_text("protected\n", encoding="utf-8")
+        waiting = self.coordinator_for().create(
+            "waiting-close",
+            "M2",
+            self.lanes / "waiting-close",
+            ["waiting.txt"],
+        )
+        self.assertEqual(waiting["state"], "waiting-for-scope")
+        waiting = self.coordinator_for().cancel_or_crash("waiting-close", "cancelled")
+        with mock.patch("project_lanes.RecoveryRegistry", side_effect=AssertionError("registry must remain absent")):
+            closed = self.coordinator_for().close_terminal("waiting-close")
+        self.assertEqual((waiting["terminal_from"], closed["state"]), ("waiting-for-scope", "closed"))
+
+        with self.assertRaisesRegex(ProjectLaneError, "after-lane-state"):
+            self.coordinator_for(fault="after-lane-state").create(
+                "creating-close",
+                "M2",
+                self.lanes / "creating-close",
+                ["creating.py"],
+            )
+        creating = self.coordinator_for().cancel_or_crash("creating-close", "cancelled")
+        with mock.patch("project_lanes.RecoveryRegistry", side_effect=AssertionError("registry must remain absent")):
+            closed = self.coordinator_for().close_terminal("creating-close")
+        self.assertEqual((creating["terminal_from"], closed["state"]), ("creating", "closed"))
+
+    def test_lane_create_replays_after_state_and_worktree_boundaries(self) -> None:
+        target = self.lanes / "replay"
+        with self.assertRaisesRegex(ProjectLaneError, "after-lane-state"):
+            self.coordinator_for(fault="after-lane-state").create(
+                "replay",
+                "M2",
+                target,
+                ["replay.py"],
+            )
+        resumed = self.coordinator_for().create("replay", "M2", target, ["replay.py"])
+        self.assertEqual(resumed["state"], "ready")
+        self.assertEqual(
+            self.coordinator_for().create("replay", "M2", target, ["replay.py"]),
+            resumed,
+        )
+        self.assertEqual(
+            len(
+                [
+                    lane
+                    for lane in self.store.read_lanes(self.anchor)["lanes"]
+                    if lane["lane_id"] == "replay"
+                ]
+            ),
+            1,
+        )
+
+    def test_simultaneous_lane_resume_and_writer_attach_converge(self) -> None:
+        target = self.lanes / "concurrent"
+        with self.assertRaisesRegex(ProjectLaneError, "after-lane-state"):
+            self.coordinator_for(fault="after-lane-state").create(
+                "concurrent",
+                "M2",
+                target,
+                ["concurrent.py"],
+            )
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            resumed = list(
+                pool.map(
+                    lambda _: self.coordinator_for().create(
+                        "concurrent",
+                        "M2",
+                        target,
+                        ["concurrent.py"],
+                    ),
+                    range(2),
+                )
+            )
+        self.assertEqual([lane["state"] for lane in resumed], ["ready", "ready"])
+
+        allowed_set_digest = "6" * 64
+        lease = {
+            "lease_id": "concurrent-contained",
+            "run_id": "concurrent-run",
+            "allowed_set_digest": allowed_set_digest,
+            "lease_kind": "normal-contained",
+            "recovery_capable": True,
+            "state": "running",
+        }
+        active_registry = mock.Mock()
+        active_registry.state.return_value = {
+            "lease": lease,
+            "outbox": None,
+            "quarantine": None,
+            "history": [],
+        }
+        with mock.patch.object(ProjectLaneCoordinator, "_assert_legacy_vacancy"), \
+             mock.patch("project_lanes.RecoveryRegistry", return_value=active_registry), \
+             concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            attached = list(
+                pool.map(
+                    lambda _: self.coordinator_for().attach_contained_writer(
+                        "concurrent",
+                        lease_id="concurrent-contained",
+                        run_id="concurrent-run",
+                        allowed_set_digest=allowed_set_digest,
+                    ),
+                    range(2),
+                )
+            )
+        self.assertEqual([lane["state"] for lane in attached], ["running", "running"])
+        stored = next(
+            lane
+            for lane in self.store.read_lanes(self.anchor)["lanes"]
+            if lane["lane_id"] == "concurrent"
+        )
+        self.assertEqual(stored["writer"]["lease_id"], "concurrent-contained")
+
+    def test_path_escape_and_common_identity_drift_fail_before_git_mutation(self) -> None:
+        outside = self.temp / "outside"
+        outside.mkdir()
+        before = self.git_output("for-each-ref", "--format=%(refname)", "refs/heads/")
+        with self.assertRaisesRegex(ProjectLaneError, "escapes"):
+            self.coordinator_for().create("escape", "M2", outside / "lane", ["a.py"])
+        coordinator = self.coordinator_for()
+        coordinator.common = {"path": "wrong", "identity": [0, 0]}
+        with self.assertRaisesRegex(ProjectLaneError, "identity drifted"):
+            coordinator.create("drift", "M2", self.lanes / "drift", ["b.py"])
+        self.assertEqual(
+            self.git_output("for-each-ref", "--format=%(refname)", "refs/heads/"),
+            before,
+        )
+
+    def test_integration_ref_is_an_authoritative_session_binding(self) -> None:
+        coordinator = self.coordinator_for()
+        coordinator.create("session", "M2", self.lanes / "session", ["session.py"])
+        before = self.store.read_state(self.anchor)["state"]
+        with self.assertRaisesRegex(ProjectLaneError, "integration"):
+            ProjectLaneCoordinator(
+                self.checkout,
+                self.store,
+                self.anchor,
+                recovery_root=self.recovery,
+                lane_root=self.lanes,
+                integration_ref="refs/openbuild/alternate",
+            )
+        self.assertEqual(self.store.read_state(self.anchor)["state"], before)
+
+    def test_scope_aliases_and_reparse_ancestors_fail_closed(self) -> None:
+        for index, scope in enumerate(("src//a.py", "src/./a.py", "src/a.py/", "C:/escape.py")):
+            with self.subTest(scope=scope), self.assertRaisesRegex(ProjectLaneError, "scope"):
+                self.coordinator_for().create(
+                    f"alias-{index}",
+                    "M2",
+                    self.lanes / f"alias-{index}",
+                    [scope],
+                )
+        (self.checkout / "Case.txt").write_text("dirty\n", encoding="utf-8")
+        case_lane = self.coordinator_for().create(
+            "case-alias",
+            "M2",
+            self.lanes / "case-alias",
+            ["case.txt"],
+        )
+        self.assertEqual(case_lane["state"], "waiting-for-scope")
+
+        real = self.checkout / "real"
+        real.mkdir()
+        link = self.checkout / "linked"
+        try:
+            link.symlink_to(real, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("directory symlink creation is not permitted")
+        with self.assertRaisesRegex(ProjectLaneError, "link"):
+            self.coordinator_for().create(
+                "linked-scope",
+                "M2",
+                self.lanes / "linked-scope",
+                ["linked/file.py"],
+            )
+
+    def test_anchor_lock_remains_readable_and_immutable_across_lane_updates(self) -> None:
+        lock = self.store.anchor_path(self.anchor) / "anchor.lock"
+        before = lock.read_bytes()
+        self.coordinator_for().create("immutable", "M2", self.lanes / "immutable", ["immutable.py"])
+        self.assertEqual(lock.read_bytes(), before)
+        self.assertTrue((self.store.anchor_path(self.anchor) / "state.lock").is_file())
+
+    def test_protected_adoption_is_explicit_replay_safe_and_integration_bound(self) -> None:
+        dirty = self.checkout / "adopt.txt"
+        dirty.write_bytes(b"adopt me\n")
+        coordinator = self.coordinator_for()
+        blocked = coordinator.create("adopt-waiter", "M2", self.lanes / "adopt-waiter", ["adopt.txt"])
+        self.assertEqual(blocked["state"], "waiting-for-scope")
+        action = "a" * 64
+        plan = "b" * 64
+        intent = coordinator.begin_protected_user_work_adoption(
+            ["adopt.txt"],
+            user_action_digest=action,
+            plan_digest=plan,
+        )
+        self.assertEqual(intent[0]["adoption"], "adoption-intent")
+        self.assertEqual(
+            coordinator.begin_protected_user_work_adoption(
+                ["adopt.txt"],
+                user_action_digest=action,
+                plan_digest=plan,
+            ),
+            intent,
+        )
+        with self.assertRaises(ProjectLaneError):
+            coordinator.begin_protected_user_work_adoption(
+                ["adopt.txt"],
+                user_action_digest="d" * 64,
+                plan_digest=plan,
+            )
+
+        integration = self.lanes / "adoption-integration"
+        self.git("worktree", "add", "-b", "adoption-integration", str(integration))
+        (integration / "adopt.txt").write_bytes(dirty.read_bytes())
+        self.git("add", "adopt.txt", cwd=integration)
+        self.git("commit", "-m", "adopt protected work", cwd=integration)
+        integrated_commit = self.git_output("rev-parse", "HEAD", cwd=integration).decode().strip()
+        self.git("update-ref", self.integration_ref, integrated_commit)
+
+        with self.assertRaises(ProjectLaneError):
+            coordinator.build_protected_user_work_acceptance_receipt(
+                ["adopt.txt"],
+                user_action_digest=action,
+                plan_digest=plan,
+                integrated_commit=self.git_output("rev-parse", "HEAD").decode().strip(),
+            )
+        integration_receipt = coordinator.build_protected_user_work_acceptance_receipt(
+            ["adopt.txt"],
+            user_action_digest=action,
+            plan_digest=plan,
+            integrated_commit=integrated_commit,
+        )
+        tampered_receipt = dict(integration_receipt)
+        tampered_receipt["digest"] = "d" * 64
+        with self.assertRaisesRegex(ProjectLaneError, "receipt binding"):
+            coordinator.finalize_protected_user_work_adoption(
+                ["adopt.txt"],
+                user_action_digest=action,
+                plan_digest=plan,
+                integration_receipt=tampered_receipt,
+            )
+        adopted = coordinator.finalize_protected_user_work_adoption(
+            ["adopt.txt"],
+            user_action_digest=action,
+            plan_digest=plan,
+            integration_receipt=integration_receipt,
+        )
+        self.assertEqual((adopted[0]["adoption"], adopted[0]["owner"]), ("adopted", "integration"))
+        self.assertEqual(
+            coordinator.finalize_protected_user_work_adoption(
+                ["adopt.txt"],
+                user_action_digest=action,
+                plan_digest=plan,
+                integration_receipt=integration_receipt,
+            ),
+            adopted,
+        )
+        independent = coordinator.create(
+            "post-adoption",
+            "M2",
+            self.lanes / "post-adoption",
+            ["adopt.txt"],
+        )
+        self.assertEqual(independent["state"], "ready")
+
+        state_path = self.coordinator / "states" / f"{self.anchor}.json"
+        tampered = json.loads(state_path.read_text(encoding="utf-8"))
+        scope = next(
+            value
+            for value in tampered["scopes"]
+            if value["path"] == "adopt.txt"
+        )
+        receipt = scope["adoption_acceptance"]["receipt"]
+        receipt["paths"][0]["path"] = "unrelated.txt"
+        receipt.pop("digest")
+        receipt["digest"] = hashlib.sha256(
+            json.dumps(
+                receipt,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        scope["adoption_acceptance"]["integration_receipt_digest"] = receipt["digest"]
+        tampered.pop("digest")
+        tampered["digest"] = hashlib.sha256(
+            json.dumps(
+                tampered,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        state_path.write_text(
+            json.dumps(
+                tampered,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
+        self.assertEqual(self.store.read_state(self.anchor), {"status": "indeterminate"})
+
+    def test_protected_adoption_fault_and_rollback_never_free_scope(self) -> None:
+        (self.checkout / "rollback.txt").write_text("protected\n", encoding="utf-8")
+        self.coordinator_for().create(
+            "rollback-waiter",
+            "M2",
+            self.lanes / "rollback-waiter",
+            ["rollback.txt"],
+        )
+        action = "e" * 64
+        plan = "f" * 64
+        with self.assertRaisesRegex(ProjectLaneError, "after-adoption-intent"):
+            self.coordinator_for(fault="after-adoption-intent").begin_protected_user_work_adoption(
+                ["rollback.txt"],
+                user_action_digest=action,
+                plan_digest=plan,
+            )
+        recovered = self.coordinator_for().recover_protected_user_work_adoption(
+            ["rollback.txt"],
+            user_action_digest=action,
+            plan_digest=plan,
+        )
+        self.assertEqual(recovered[0]["adoption"], "protected")
+        replay = self.coordinator_for().begin_protected_user_work_adoption(
+            ["rollback.txt"],
+            user_action_digest=action,
+            plan_digest=plan,
+        )
+        self.assertEqual(replay[0]["adoption"], "adoption-intent")
+        rolled_back = self.coordinator_for().rollback_protected_user_work_adoption(
+            ["rollback.txt"],
+            user_action_digest=action,
+            plan_digest=plan,
+        )
+        self.assertEqual(rolled_back[0]["adoption"], "protected")
+        scope = next(
+            item
+            for item in self.store.read_scopes(self.anchor)["scopes"]
+            if item["path"] == "rollback.txt"
+        )
+        self.assertEqual((scope["adoption"], scope["owner"]), ("protected", None))
+
+    def test_adoption_verification_and_publish_faults_recover_exactly_once(self) -> None:
+        action = "1" * 64
+        plan = "2" * 64
+        for name, fault in (("verify", "after-adoption-verify"), ("publish", "after-adoption-accept")):
+            with self.subTest(fault=fault):
+                path = f"{name}.txt"
+                (self.checkout / path).write_text(f"{name}\n", encoding="utf-8")
+                coordinator = self.coordinator_for()
+                coordinator.create(
+                    f"{name}-waiter",
+                    "M2",
+                    self.lanes / f"{name}-waiter",
+                    [path],
+                )
+                coordinator.begin_protected_user_work_adoption(
+                    [path],
+                    user_action_digest=action,
+                    plan_digest=plan,
+                )
+                integration = self.lanes / f"{name}-integration"
+                self.git("worktree", "add", "-b", f"{name}-integration", str(integration))
+                (integration / path).write_bytes((self.checkout / path).read_bytes())
+                self.git("add", path, cwd=integration)
+                self.git("commit", "-m", f"adopt {name}", cwd=integration)
+                commit = self.git_output("rev-parse", "HEAD", cwd=integration).decode().strip()
+                self.git("update-ref", self.integration_ref, commit)
+                receipt = coordinator.build_protected_user_work_acceptance_receipt(
+                    [path],
+                    user_action_digest=action,
+                    plan_digest=plan,
+                    integrated_commit=commit,
+                )
+                with self.assertRaisesRegex(ProjectLaneError, fault):
+                    self.coordinator_for(fault=fault).finalize_protected_user_work_adoption(
+                        [path],
+                        user_action_digest=action,
+                        plan_digest=plan,
+                        integration_receipt=receipt,
+                    )
+                adopted = self.coordinator_for().recover_protected_user_work_adoption(
+                    [path],
+                    user_action_digest=action,
+                    plan_digest=plan,
+                    integration_receipt=receipt,
+                )
+                self.assertEqual(adopted[0]["adoption"], "adopted")
+
+    def test_protected_deletion_rejects_git_failure_and_accepts_exact_tree_absence(self) -> None:
+        tracked = self.checkout / "delete.txt"
+        tracked.write_text("delete me\n", encoding="utf-8")
+        self.git("add", "delete.txt")
+        self.git("commit", "-m", "add deletion target")
+        self.git("update-ref", self.integration_ref, "HEAD")
+        tracked.unlink()
+        self.git("add", "delete.txt")
+        coordinator = self.coordinator_for()
+        coordinator.create(
+            "delete-waiter",
+            "M2",
+            self.lanes / "delete-waiter",
+            ["delete.txt"],
+        )
+        action = "3" * 64
+        plan = "4" * 64
+        coordinator.begin_protected_user_work_adoption(
+            ["delete.txt"],
+            user_action_digest=action,
+            plan_digest=plan,
+        )
+        with self.assertRaises(ProjectLaneError):
+            coordinator.build_protected_user_work_acceptance_receipt(
+                ["delete.txt"],
+                user_action_digest=action,
+                plan_digest=plan,
+                integrated_commit="0" * 40,
+            )
+        integration = self.lanes / "deletion-integration"
+        self.git("worktree", "add", "-b", "deletion-integration", str(integration))
+        (integration / "delete.txt").unlink()
+        self.git("add", "delete.txt", cwd=integration)
+        self.git("commit", "-m", "accept protected deletion", cwd=integration)
+        commit = self.git_output("rev-parse", "HEAD", cwd=integration).decode().strip()
+        self.git("update-ref", self.integration_ref, commit)
+        receipt = coordinator.build_protected_user_work_acceptance_receipt(
+            ["delete.txt"],
+            user_action_digest=action,
+            plan_digest=plan,
+            integrated_commit=commit,
+        )
+        adopted = coordinator.finalize_protected_user_work_adoption(
+            ["delete.txt"],
+            user_action_digest=action,
+            plan_digest=plan,
+            integration_receipt=receipt,
+        )
+        self.assertEqual(adopted[0]["adoption"], "adopted")
+
+    def test_retained_legacy_checkout_registry_blocks_lane_admission(self) -> None:
+        registry = RecoveryRegistry(self.checkout, state_root=self.recovery)
+        registry.reserve_normal(
+            "legacy-retained",
+            allowed_set_digest="5" * 64,
+            recovery_capable=False,
+        )
+        before = self.git_output("for-each-ref", "--format=%(refname)", "refs/heads/")
+        with self.assertRaisesRegex(ProjectLaneError, "not vacant"):
+            self.coordinator_for().create(
+                "blocked-by-legacy",
+                "M2",
+                self.lanes / "blocked-by-legacy",
+                ["legacy.py"],
+            )
+        self.assertEqual(self.store.read_lanes(self.anchor)["lanes"], [])
+        self.assertEqual(
+            self.git_output("for-each-ref", "--format=%(refname)", "refs/heads/"),
+            before,
+        )
+
+    def test_retained_legacy_registry_blocks_replay_after_durable_lane_intent(self) -> None:
+        target = self.lanes / "legacy-replay"
+        with self.assertRaisesRegex(ProjectLaneError, "after-lane-state"):
+            self.coordinator_for(fault="after-lane-state").create(
+                "legacy-replay",
+                "M2",
+                target,
+                ["legacy-replay.py"],
+            )
+        RecoveryRegistry(self.checkout, state_root=self.recovery).reserve_normal(
+            "legacy-after-intent",
+            allowed_set_digest="7" * 64,
+            recovery_capable=False,
+        )
+        with self.assertRaisesRegex(ProjectLaneError, "not vacant"):
+            self.coordinator_for().create(
+                "legacy-replay",
+                "M2",
+                target,
+                ["legacy-replay.py"],
+            )
+        lane = next(
+            item
+            for item in self.store.read_lanes(self.anchor)["lanes"]
+            if item["lane_id"] == "legacy-replay"
+        )
+        self.assertEqual(lane["state"], "creating")
+        self.assertFalse(target.exists())
+
+    def test_staged_and_unstaged_renames_protect_both_paths(self) -> None:
+        for name in ("staged-old.txt", "unstaged-old.txt"):
+            (self.checkout / name).write_text(name, encoding="utf-8")
+        self.git("add", "staged-old.txt", "unstaged-old.txt")
+        self.git("commit", "-m", "add rename targets")
+        self.git("update-ref", self.integration_ref, "HEAD")
+        self.git("mv", "staged-old.txt", "staged-new.txt")
+        os.replace(
+            self.checkout / "unstaged-old.txt",
+            self.checkout / "unstaged-new.txt",
+        )
+        for index, path in enumerate(
+            (
+                "staged-old.txt",
+                "staged-new.txt",
+                "unstaged-old.txt",
+                "unstaged-new.txt",
+            )
+        ):
+            with self.subTest(path=path):
+                lane = self.coordinator_for().create(
+                    f"rename-{index}",
+                    "M2",
+                    self.lanes / f"rename-{index}",
+                    [path],
+                )
+                self.assertEqual(lane["state"], "waiting-for-scope")
+
+    def test_adoption_rejects_symlink_or_executable_mode_substitution(self) -> None:
+        target = "same-blob"
+        link = self.checkout / "protected-link"
+        try:
+            link.symlink_to(target)
+        except (OSError, NotImplementedError):
+            self.skipTest("file symlink creation is not permitted")
+        coordinator = self.coordinator_for()
+        coordinator.create(
+            "link-waiter",
+            "M2",
+            self.lanes / "link-waiter",
+            ["protected-link"],
+        )
+        action = "8" * 64
+        plan = "9" * 64
+        coordinator.begin_protected_user_work_adoption(
+            ["protected-link"],
+            user_action_digest=action,
+            plan_digest=plan,
+        )
+        integration = self.lanes / "link-integration"
+        self.git("worktree", "add", "-b", "link-integration", str(integration))
+        (integration / "protected-link").write_bytes(os.fsencode(target))
+        self.git("add", "protected-link", cwd=integration)
+        self.git("commit", "-m", "substitute regular file", cwd=integration)
+        commit = self.git_output("rev-parse", "HEAD", cwd=integration).decode().strip()
+        self.git("update-ref", self.integration_ref, commit)
+        receipt = coordinator.build_protected_user_work_acceptance_receipt(
+            ["protected-link"],
+            user_action_digest=action,
+            plan_digest=plan,
+            integrated_commit=commit,
+        )
+        with self.assertRaisesRegex(ProjectLaneError, "does not match"):
+            coordinator.finalize_protected_user_work_adoption(
+                ["protected-link"],
+                user_action_digest=action,
+                plan_digest=plan,
+                integration_receipt=receipt,
+            )
+
+        executable = self.checkout / "protected-executable"
+        executable.write_bytes(b"same executable blob\n")
+        executable.chmod(0o755)
+        coordinator.create(
+            "executable-waiter",
+            "M2",
+            self.lanes / "executable-waiter",
+            ["protected-executable"],
+        )
+        coordinator.begin_protected_user_work_adoption(
+            ["protected-executable"],
+            user_action_digest=action,
+            plan_digest=plan,
+        )
+        executable_integration = self.lanes / "executable-integration"
+        self.git(
+            "worktree",
+            "add",
+            "-b",
+            "executable-integration",
+            str(executable_integration),
+            self.integration_ref,
+        )
+        (executable_integration / "protected-executable").write_bytes(executable.read_bytes())
+        (executable_integration / "protected-executable").chmod(0o644)
+        self.git("add", "protected-executable", cwd=executable_integration)
+        self.git("commit", "-m", "substitute executable mode", cwd=executable_integration)
+        executable_commit = self.git_output("rev-parse", "HEAD", cwd=executable_integration).decode().strip()
+        self.git("update-ref", self.integration_ref, executable_commit)
+        executable_receipt = coordinator.build_protected_user_work_acceptance_receipt(
+            ["protected-executable"],
+            user_action_digest=action,
+            plan_digest=plan,
+            integrated_commit=executable_commit,
+        )
+        with self.assertRaisesRegex(ProjectLaneError, "does not match"):
+            coordinator.finalize_protected_user_work_adoption(
+                ["protected-executable"],
+                user_action_digest=action,
+                plan_digest=plan,
+                integration_receipt=executable_receipt,
+            )
+
+    def git_output(self, *args: str, cwd: Path | None = None) -> bytes:
+        return subprocess.run(
+            ["git", *args],
+            cwd=cwd or self.checkout,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ).stdout
 
 
 if __name__ == "__main__":

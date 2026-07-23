@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import importlib.util
 import inspect
 import io
@@ -12,6 +13,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from argparse import Namespace
 from contextlib import nullcontext, redirect_stdout
@@ -27,6 +29,9 @@ if SPEC is None or SPEC.loader is None:
     raise RuntimeError(f"cannot load agent runner from {RUNNER_PATH}")
 agent_runner = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(agent_runner)
+from project_lanes import ProjectLaneCoordinator  # type: ignore[import-not-found]
+from project_state import ProjectStateStore  # type: ignore[import-not-found]
+from recovery_state import RecoveryRegistry  # type: ignore[import-not-found]
 
 
 def _attempt_linux_cgroup_migration(targets: dict[str, str]) -> dict[str, bool]:
@@ -1319,6 +1324,32 @@ class CodexInvocationTests(unittest.TestCase):
                 "M2b-recovery",
             )
 
+    def test_project_lane_options_are_exact_and_implementation_only(self) -> None:
+        partial = Namespace(project_lane_id="lane-one")
+        with self.assertRaisesRegex(agent_runner.RunnerError, "supplied together"):
+            agent_runner.resolve_project_lane_start(
+                partial,
+                agent_name="openbuild_implementation_fast",
+                repo=ROOT,
+                allowed_files=["owned.py"],
+            )
+        complete = Namespace(
+            project_lane_id="lane-one",
+            project_checkout=str(ROOT),
+            project_coordinator_root=str(ROOT),
+            project_anchor_id="a" * 64,
+            project_recovery_root=str(ROOT),
+            project_lane_root=str(ROOT),
+            project_integration_ref="refs/openbuild/integration",
+        )
+        with self.assertRaisesRegex(agent_runner.RunnerError, "implementation"):
+            agent_runner.resolve_project_lane_start(
+                complete,
+                agent_name="openbuild_review_fast",
+                repo=ROOT,
+                allowed_files=["owned.py"],
+            )
+
     def test_start_rejects_a_preexisting_activation_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1995,6 +2026,184 @@ class CodexInvocationTests(unittest.TestCase):
                 "guardian-process-stopped",
             )
 
+    def test_guardian_loss_quarantines_the_bound_project_lane_immediately(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            request = {
+                "profile": {"name": "openbuild_implementation_fast"},
+                "repo": str(run_dir),
+                "lease_id": "lane-lease",
+                "project_lane": {"schema": "fixture"},
+            }
+            agent_runner.atomic_write_json(run_dir / "request.json", request)
+            secret = bytes.fromhex("56" * 32)
+            agent_runner.atomic_write_bytes(run_dir / "guardian.key", secret)
+            agent_runner.write_guardian_message(
+                run_dir / "guardian-ready.json",
+                secret,
+                "guardian-ready",
+                {
+                    "guardian_id": "guardian-1",
+                    "guardian_pid": 999,
+                    "guardian_identity": "guardian-created-1",
+                },
+            )
+            registry = mock.Mock()
+            registry.state.return_value = {"quarantine": None}
+            with mock.patch.object(
+                agent_runner,
+                "recovery_registry_for_request",
+                return_value=registry,
+            ), mock.patch.object(
+                agent_runner,
+                "process_record_state",
+                return_value="stopped",
+            ), mock.patch.object(
+                agent_runner,
+                "quarantine_project_lane_writer",
+            ) as quarantine_lane, self.assertRaisesRegex(
+                agent_runner.RunnerError,
+                "quarantined",
+            ):
+                agent_runner.audit_guardian_health(run_dir)
+
+            registry.quarantine_containment_loss.assert_called_once_with(
+                "lane-lease",
+                "guardian-process-stopped",
+            )
+            quarantine_lane.assert_called_once_with(
+                request,
+                "crashed",
+            )
+
+    def test_completed_containment_loss_replay_closes_the_bound_project_lane(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp) / "run-1"
+            run_dir.mkdir()
+            request = {
+                "profile": {"name": "openbuild_implementation_fast"},
+                "repo": str(run_dir),
+                "lease_id": "lane-lease",
+                "project_lane": {"schema": "fixture"},
+                **self.private_run_request_identity(run_dir),
+            }
+            agent_runner.atomic_write_json(run_dir / "request.json", request)
+            registry = mock.Mock()
+            registry.state.return_value = {
+                "lease": None,
+                "outbox": None,
+                "quarantine": None,
+                "history": [],
+            }
+            with mock.patch.object(
+                agent_runner,
+                "recovery_registry_for_request",
+                return_value=registry,
+            ), mock.patch.object(
+                agent_runner,
+                "_containment_loss_release_is_complete",
+                return_value=True,
+            ), mock.patch.object(
+                agent_runner,
+                "finalize_project_lane_terminal",
+            ) as finalize_lane, redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    agent_runner.reconcile_containment_loss_run(
+                        Namespace(run_dir=str(run_dir))
+                    ),
+                    0,
+                )
+
+            finalize_lane.assert_called_once_with(request, "crashed")
+
+    def test_post_containment_reconciliation_audit_is_replay_safe(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp) / "run-1"
+            run_dir.mkdir()
+            request = {
+                "profile": {"name": "openbuild_implementation_fast"},
+                "repo": str(run_dir),
+                "lease_id": "lease-1",
+                **self.private_run_request_identity(run_dir),
+            }
+            agent_runner.atomic_write_json(run_dir / "request.json", request)
+            secret = bytes.fromhex("57" * 32)
+            agent_runner.atomic_write_bytes(run_dir / "guardian.key", secret)
+            agent_runner.write_guardian_message(
+                run_dir / "guardian-ready.json",
+                secret,
+                "guardian-ready",
+                {
+                    "guardian_id": "guardian-1",
+                    "guardian_pid": 999,
+                    "guardian_identity": "guardian-created-1",
+                },
+            )
+            state = {
+                "lease": None,
+                "outbox": None,
+                "quarantine": None,
+                "history": [
+                    {
+                        "event": "containment-loss-reconciled",
+                        "lease_id": "lease-1",
+                        "run_id": "run-1",
+                    },
+                    {
+                        "event": "terminal-abandonment-recorded",
+                        "lease_id": "lease-1",
+                        "run_id": "run-1",
+                        "disposition": "abandoned",
+                    },
+                    {
+                        "event": "terminal-abandonment-completed",
+                        "lease_id": "lease-1",
+                        "run_id": "run-1",
+                    },
+                    {
+                        "event": "contained-terminal-released",
+                        "lease_id": "lease-1",
+                        "semantic_disposition": "abandoned",
+                        "terminal_success": False,
+                        "handoff_digest": None,
+                        "outbox_digest": None,
+                    },
+                ],
+            }
+            agent_runner.atomic_write_json(
+                run_dir / "containment-loss-reconciliation.json",
+                agent_runner._containment_loss_reconciliation_result(
+                    "lease-1"
+                ),
+            )
+            registry = mock.Mock()
+            registry.state.return_value = state
+            with mock.patch.object(
+                agent_runner,
+                "recovery_registry_for_request",
+                return_value=registry,
+            ), mock.patch.object(
+                agent_runner,
+                "process_record_state",
+                return_value="stopped",
+            ):
+                agent_runner.audit_guardian_health(run_dir)
+
+            registry.quarantine_containment_loss.assert_not_called()
+            registry.state.return_value = {
+                **state,
+                "history": state["history"][:-1],
+            }
+            with mock.patch.object(
+                agent_runner,
+                "recovery_registry_for_request",
+                return_value=registry,
+            ), self.assertRaisesRegex(
+                agent_runner.RunnerError,
+                "completed containment-loss reconciliation evidence drifted",
+            ):
+                agent_runner.audit_guardian_health(run_dir)
+
     def test_containment_loss_completed_replay_requires_the_recorded_abandonment(self) -> None:
         state = {
             "lease": None,
@@ -2175,7 +2384,7 @@ class CodexInvocationTests(unittest.TestCase):
                 preflight["source_state_id"]
             ).read_bytes()
             with self.assertRaisesRegex(
-                agent_runner.RecoveryStateError, "exact outside-set-drift"
+                agent_runner.RecoveryStateError, "exact supported drift shape"
             ):
                 owner.record_terminal_abandonment("lease-1")
             self.assertEqual(owner.path.read_bytes(), registry_before_ordinary)
@@ -3732,6 +3941,191 @@ class CodexInvocationTests(unittest.TestCase):
             self.assertEqual(allowed.read_text(encoding="utf-8"), "writer change\n")
             self.assertEqual(outside.read_text(encoding="utf-8"), "outside drift\n")
 
+    def test_legacy_normal_single_dirty_overlap_reconciles_v5_without_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "config", "core.autocrlf", "false"], cwd=repo, check=True
+            )
+            subprocess.run(
+                ["git", "config", "user.email", "tests@example.invalid"],
+                cwd=repo,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "Tests"], cwd=repo, check=True
+            )
+            seed = repo / "seed.txt"
+            seed.write_text("seed\n", encoding="utf-8", newline="\n")
+            subprocess.run(["git", "add", "seed.txt"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "--quiet", "-m", "baseline"],
+                cwd=repo,
+                check=True,
+            )
+            harness = repo / "test-market-model-contracts.ps1"
+            harness.write_text(
+                "preexisting user harness\n", encoding="utf-8", newline="\n"
+            )
+
+            run_dir = root / "single-dirty-overlap-run"
+            owner = agent_runner.RecoveryRegistry(repo, state_root=root / "state")
+            owner.initialize()
+            preflight = owner.prepare_source_checkpoint(
+                source_id=run_dir.name,
+                source_lease_id="normal-lease",
+                source_milestone="M-001",
+                target_milestone="M-001-recovery",
+                allowed_paths=["test-market-model-contracts.ps1"],
+                specification_revision="R-010",
+            )
+            owner.reserve_normal(
+                "normal-lease",
+                allowed_set_digest=preflight["allowed_set_digest"],
+                recovery_capable=True,
+                source_state_id=preflight["source_state_id"],
+                run_id=run_dir.name,
+                prompt_sha256="a" * 64,
+                containment_plan=_containment_plan(),
+            )
+            owner.bind_reserved_source_snapshot("normal-lease", preflight)
+            owner.claim_contained_launch("normal-lease", "contained-token")
+            owner.bind_process_unactivated(
+                "normal-lease",
+                allowed_set_digest=preflight["allowed_set_digest"],
+                provider_receipt=_provider_receipt(),
+                process_receipt=_process_receipt(),
+            )
+            owner.commit_activation("normal-lease", preflight["allowed_set_digest"])
+
+            agent_runner.ensure_private_run_dir(run_dir)
+            agent_runner.atomic_write_json(
+                run_dir / "request.json",
+                {
+                    "profile": {"name": "openbuild_implementation_strong"},
+                    "task_name": "M-001",
+                    "repo": str(repo),
+                    "lease_id": "normal-lease",
+                    "lifecycle_allowed_set_digest": preflight[
+                        "allowed_set_digest"
+                    ],
+                    "recovery_preflight": preflight,
+                    **self.private_run_request_identity(run_dir),
+                },
+            )
+            secret = bytes.fromhex("55" * 32)
+            agent_runner.atomic_write_bytes(run_dir / "guardian.key", secret)
+            agent_runner.write_guardian_message(
+                run_dir / "guardian-zero.json",
+                secret,
+                "guardian-zero",
+                _zero_proof(),
+            )
+            agent_runner.write_guardian_message(
+                run_dir / "guardian-closed.json",
+                secret,
+                "guardian-closed",
+                _guardian_close(),
+            )
+            receipt = {
+                "run_dir": str(run_dir),
+                "status": "completed",
+                "agent_name": "openbuild_implementation_strong",
+                "task_name": "M-001",
+                "lease_id": "normal-lease",
+                "activated": True,
+                "configured_model": "fixture",
+                "model_reasoning_effort": "xhigh",
+                "sandbox": "workspace-write",
+                "worker_pid": 123,
+                "worker_process_identity": "worker-1",
+                "codex_pid": 456,
+                "codex_process_identity": "codex-1",
+                "terminal_event": "turn.completed",
+                "codex_exit_evidence": "valid",
+                "codex_exit_code": 0,
+                "result_evidence": "valid",
+                "process_tree_stopped": True,
+            }
+            harness.write_text("writer remediation\n", encoding="utf-8", newline="\n")
+            status_before = subprocess.run(
+                ["git", "status", "--porcelain=v2", "-z"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+            ).stdout
+            diff_before = subprocess.run(
+                ["git", "diff", "--binary", "--no-ext-diff"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+            ).stdout
+            index_before = (repo / ".git" / "index").read_bytes()
+
+            with mock.patch.object(
+                agent_runner, "recovery_registry_for_agent", return_value=owner
+            ), mock.patch.object(
+                agent_runner, "audit_guardian_health"
+            ), mock.patch.object(
+                agent_runner, "public_receipt", return_value=receipt
+            ), redirect_stdout(io.StringIO()):
+                agent_runner.reconcile_implementation_registry(run_dir, receipt)
+                checkpoint = agent_runner.read_json(
+                    run_dir / "recovery-checkpoint.json"
+                )
+                self.assertEqual(
+                    checkpoint["reasons"],
+                    ["preexisting-dirty-overlap"],
+                )
+                self.assertEqual(
+                    agent_runner.reconcile_terminal_abandonment_run(
+                        Namespace(run_dir=str(run_dir))
+                    ),
+                    0,
+                )
+                self.assertEqual(
+                    agent_runner.reconcile_terminal_abandonment_run(
+                        Namespace(run_dir=str(run_dir))
+                    ),
+                    0,
+                )
+
+            state = owner.state()
+            abandonment = agent_runner.read_json(run_dir / "terminal-abandonment.json")
+            self.assertIsNone(state["lease"])
+            self.assertIsNone(state["outbox"])
+            self.assertEqual(abandonment["schema"], "terminal-abandonment-v5")
+            self.assertEqual(
+                abandonment["cause"],
+                "legacy-normal-preexisting-dirty-overlap",
+            )
+            self.assertFalse(abandonment["checkpoint_allowed"])
+            self.assertFalse((run_dir / "implementation-handoffs.jsonl").exists())
+            self.assertFalse((run_dir / "root-completion-authorized.json").exists())
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "status", "--porcelain=v2", "-z"],
+                    cwd=repo,
+                    check=True,
+                    stdout=subprocess.PIPE,
+                ).stdout,
+                status_before,
+            )
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "diff", "--binary", "--no-ext-diff"],
+                    cwd=repo,
+                    check=True,
+                    stdout=subprocess.PIPE,
+                ).stdout,
+                diff_before,
+            )
+            self.assertEqual((repo / ".git" / "index").read_bytes(), index_before)
+            self.assertEqual(harness.read_text(encoding="utf-8"), "writer remediation\n")
+
     def test_root_completion_source_binding_preserves_descriptive_task_names(self) -> None:
         for lease_kind in ("normal-legacy", "normal-contained", "recovery-target"):
             with self.subTest(lease_kind=lease_kind):
@@ -4005,6 +4399,16 @@ class CodexInvocationTests(unittest.TestCase):
                 }
             )
         )
+        legacy_normal_single_dirty_overlap_abandoned = (
+            agent_runner.classify_recovery_outcome(
+                terminal_abandonment={
+                    "outcome": "terminal-abandoned",
+                    "schema": "terminal-abandonment-v5",
+                    "cause": "legacy-normal-preexisting-dirty-overlap",
+                    "checkpoint_invalidation": "completed",
+                }
+            )
+        )
         audit = agent_runner.root_completion_authorization_record(
             specification_revision="R-005",
             milestone="M2",
@@ -4024,6 +4428,10 @@ class CodexInvocationTests(unittest.TestCase):
             legacy_normal_control_plane_overlap_abandoned["schema"],
             "terminal-abandonment-v4",
         )
+        self.assertEqual(
+            legacy_normal_single_dirty_overlap_abandoned["schema"],
+            "terminal-abandonment-v5",
+        )
         self.assertEqual(audit["event"], "root-completion-authorized")
         self.assertEqual(audit["authority"], "original-build-request")
         self.assertTrue(audit["automatic"])
@@ -4035,12 +4443,819 @@ class CodexInvocationTests(unittest.TestCase):
             recovery_overlap_abandoned,
             legacy_normal_overlap_abandoned,
             legacy_normal_control_plane_overlap_abandoned,
+            legacy_normal_single_dirty_overlap_abandoned,
             audit,
         ):
             self.assertEqual(record["writer_action"], "none")
             rendered = json.dumps(record)
             self.assertNotIn(str(ROOT), rendered)
             self.assertNotIn("authorize-recovery", rendered)
+
+    def test_project_lane_bridge_concurrently_attaches_two_real_registries(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="openbuild-runner-project-lanes-") as temp:
+            root = Path(temp)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            subprocess.run(["git", "init", "--quiet"], cwd=checkout, check=True)
+            subprocess.run(
+                ["git", "config", "core.autocrlf", "false"],
+                cwd=checkout,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.email", "tests@example.invalid"],
+                cwd=checkout,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "Tests"],
+                cwd=checkout,
+                check=True,
+            )
+            (checkout / "base.txt").write_text(
+                "base\n", encoding="utf-8", newline="\n"
+            )
+            subprocess.run(["git", "add", "base.txt"], cwd=checkout, check=True)
+            subprocess.run(
+                ["git", "commit", "--quiet", "-m", "baseline"],
+                cwd=checkout,
+                check=True,
+            )
+            integration_ref = "refs/openbuild/integration"
+            subprocess.run(
+                ["git", "update-ref", integration_ref, "HEAD"],
+                cwd=checkout,
+                check=True,
+            )
+            coordinator_root = root / "coordinator"
+            recovery_root = root / "recovery"
+            lane_root = root / "lanes"
+            lane_root.mkdir()
+            store = ProjectStateStore(
+                checkout,
+                coordinator_root=coordinator_root,
+            )
+            capability = store.issue_bootstrap_capability(
+                "plan", "attempt"
+            )["bootstrap_capability"]
+            anchor_id = store.create_anchor(
+                capability, "plan", "attempt"
+            )["anchor_id"]
+            store.bootstrap(anchor_id, "clean")
+            coordinator = ProjectLaneCoordinator(
+                checkout,
+                store,
+                anchor_id,
+                recovery_root=recovery_root,
+                lane_root=lane_root,
+                integration_ref=integration_ref,
+            )
+            lanes = {
+                "lane-one": coordinator.create(
+                    "lane-one",
+                    "M2-one",
+                    lane_root / "one",
+                    ["one.py"],
+                ),
+                "lane-two": coordinator.create(
+                    "lane-two",
+                    "M2-two",
+                    lane_root / "two",
+                    ["two.py"],
+                ),
+            }
+
+            requests: dict[str, dict[str, object]] = {}
+            registries: dict[str, RecoveryRegistry] = {}
+            digests: dict[str, str] = {}
+            for ordinal, (lane_id, lane) in enumerate(lanes.items(), start=1):
+                allowed_path = f"{'one' if lane_id == 'lane-one' else 'two'}.py"
+                lane_args = Namespace(
+                    project_lane_id=lane_id,
+                    project_checkout=str(checkout),
+                    project_coordinator_root=str(coordinator_root),
+                    project_anchor_id=anchor_id,
+                    project_recovery_root=str(recovery_root),
+                    project_lane_root=str(lane_root),
+                    project_integration_ref=integration_ref,
+                )
+                lane_binding = agent_runner.resolve_project_lane_start(
+                    lane_args,
+                    agent_name="openbuild_implementation_balanced",
+                    repo=Path(lane["worktree"]),
+                    allowed_files=[allowed_path],
+                )
+                self.assertIsNotNone(lane_binding)
+                lease_id = f"{lane_id}-lease"
+                run_id = f"{lane_id}-run"
+                guardian_id = f"{lane_id}-guardian"
+                provider_plan_id = f"{lane_id}-provider"
+                ipc_plan_id = f"{lane_id}-ipc"
+                worker = _process_receipt(
+                    pid=120 + ordinal,
+                    identity=f"{lane_id}-worker",
+                )
+                registry = RecoveryRegistry(
+                    Path(lane["worktree"]),
+                    state_root=recovery_root,
+                )
+                preflight = registry.prepare_source_checkpoint(
+                    source_id=f"{lane_id}-source",
+                    source_lease_id=lease_id,
+                    source_milestone=f"M2-{ordinal}",
+                    target_milestone=f"M2-{ordinal}-recovery",
+                    allowed_paths=[allowed_path],
+                    specification_revision="R-031",
+                )
+                registry.reserve_normal(
+                    lease_id,
+                    allowed_set_digest=preflight["allowed_set_digest"],
+                    recovery_capable=True,
+                    source_state_id=preflight["source_state_id"],
+                    run_id=run_id,
+                    containment_plan=_containment_plan(
+                        guardian_id=guardian_id,
+                        provider_plan_id=provider_plan_id,
+                        ipc_plan_id=ipc_plan_id,
+                    ),
+                )
+                registry.bind_reserved_source_snapshot(lease_id, preflight)
+                registry.claim_contained_launch(lease_id, "contained-token")
+                registry.bind_process_unactivated(
+                    lease_id,
+                    allowed_set_digest=preflight["allowed_set_digest"],
+                    provider_receipt=_provider_receipt(
+                        guardian_id=guardian_id,
+                        provider_plan_id=provider_plan_id,
+                        ipc_plan_id=ipc_plan_id,
+                        worker=worker,
+                        precommit_nonce=f"{lane_id}-precommit",
+                    ),
+                    process_receipt=worker,
+                )
+                registry.commit_activation(
+                    lease_id,
+                    preflight["allowed_set_digest"],
+                )
+                requests[lane_id] = {
+                    "profile": {"name": "openbuild_implementation_balanced"},
+                    "repo": lane["worktree"],
+                    "lease_id": lease_id,
+                    "lifecycle_allowed_set_digest": preflight[
+                        "allowed_set_digest"
+                    ],
+                    "project_lane": lane_binding,
+                }
+                registries[lane_id] = registry
+                digests[lane_id] = preflight["allowed_set_digest"]
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                attached = list(
+                    pool.map(
+                        agent_runner.attach_project_lane_writer,
+                        requests.values(),
+                    )
+                )
+            self.assertEqual(
+                {lane["lane_id"] for lane in attached},
+                {"lane-one", "lane-two"},
+            )
+            project_state = store.read_state(anchor_id)["state"]
+            self.assertEqual(
+                {
+                    lane["lane_id"]: lane["state"]
+                    for lane in project_state["lanes"]
+                },
+                {"lane-one": "running", "lane-two": "running"},
+            )
+
+            quarantined = agent_runner.quarantine_project_lane_writer(
+                requests["lane-one"],
+                "timeout",
+            )
+            self.assertEqual(quarantined["state"], "quarantined")
+            with self.assertRaisesRegex(agent_runner.RunnerError, "not vacant"):
+                agent_runner.close_project_lane_writer(requests["lane-one"])
+            project_state = store.read_state(anchor_id)["state"]
+            self.assertEqual(
+                next(
+                    lane
+                    for lane in project_state["lanes"]
+                    if lane["lane_id"] == "lane-two"
+                )["state"],
+                "running",
+            )
+            self.assertEqual(
+                registries["lane-two"].state()["lease"]["state"],
+                "running",
+            )
+
+            lane_one_registry = registries["lane-one"]
+            lane_one_registry.record_terminal_evidence(
+                "lane-one-lease",
+                {
+                    "success": False,
+                    "binding_digest": "e" * 64,
+                    "binding_format": "run-id-v2",
+                    "terminal_event": "turn.failed",
+                },
+                digests["lane-one"],
+            )
+            lane_one_registry.prove_contained_tree_empty(
+                "lane-one-lease",
+                _zero_proof(
+                    guardian_id="lane-one-guardian",
+                    worker_pid=121,
+                    worker_identity="lane-one-worker",
+                ),
+                digests["lane-one"],
+            )
+            lane_one_registry.acknowledge_guardian_close(
+                "lane-one-lease",
+                _guardian_close(guardian_id="lane-one-guardian"),
+            )
+            lane_one_registry.release_contained_terminal("lane-one-lease")
+            closed = agent_runner.close_project_lane_writer(
+                requests["lane-one"]
+            )
+            self.assertEqual(closed["state"], "closed")
+            self.assertEqual(
+                agent_runner.finalize_project_lane_terminal(
+                    requests["lane-one"],
+                    "timeout",
+                ),
+                closed,
+            )
+            final_state = store.read_state(anchor_id)["state"]
+            self.assertEqual(
+                next(
+                    lane
+                    for lane in final_state["lanes"]
+                    if lane["lane_id"] == "lane-two"
+                )["state"],
+                "running",
+            )
+
+    def test_two_real_runner_guardian_worker_trees_execute_in_parallel_lanes(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="openbuild-real-runner-lanes-"
+        ) as temp:
+            root = Path(temp)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            subprocess.run(
+                ["git", "init", "--quiet"],
+                cwd=checkout,
+                check=True,
+            )
+            for key, value in (
+                ("core.autocrlf", "false"),
+                ("user.email", "tests@example.invalid"),
+                ("user.name", "Tests"),
+            ):
+                subprocess.run(
+                    ["git", "config", key, value],
+                    cwd=checkout,
+                    check=True,
+                )
+            (checkout / "base.txt").write_text(
+                "base\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            subprocess.run(
+                ["git", "add", "base.txt"],
+                cwd=checkout,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "commit", "--quiet", "-m", "baseline"],
+                cwd=checkout,
+                check=True,
+            )
+            integration_ref = "refs/openbuild/integration"
+            subprocess.run(
+                ["git", "update-ref", integration_ref, "HEAD"],
+                cwd=checkout,
+                check=True,
+            )
+
+            coordinator_root = root / "coordinator"
+            recovery_root = root / "recovery"
+            lane_root = root / "lanes"
+            lane_root.mkdir()
+            store = ProjectStateStore(
+                checkout,
+                coordinator_root=coordinator_root,
+            )
+            capability = store.issue_bootstrap_capability(
+                "plan",
+                "attempt",
+            )["bootstrap_capability"]
+            anchor_id = store.create_anchor(
+                capability,
+                "plan",
+                "attempt",
+            )["anchor_id"]
+            store.bootstrap(anchor_id, "clean")
+            coordinator = ProjectLaneCoordinator(
+                checkout,
+                store,
+                anchor_id,
+                recovery_root=recovery_root,
+                lane_root=lane_root,
+                integration_ref=integration_ref,
+            )
+            lanes = {
+                "lane-one": coordinator.create(
+                    "lane-one",
+                    "M2-one",
+                    lane_root / "one",
+                    ["one.py"],
+                ),
+                "lane-two": coordinator.create(
+                    "lane-two",
+                    "M2-two",
+                    lane_root / "two",
+                    ["two.py"],
+                ),
+            }
+
+            barrier = root / "barrier"
+            barrier.mkdir()
+            fake_codex_source = root / "fake_codex.py"
+            fake_codex_source.write_text(
+                "\n".join(
+                    [
+                        "import json",
+                        "import sys",
+                        "import time",
+                        "from pathlib import Path",
+                        "",
+                        "if sys.argv[1:] == ['login', 'status']:",
+                        "    print('Logged in using ChatGPT')",
+                        "    raise SystemExit(0)",
+                        "prompt = sys.stdin.read()",
+                        "prefix = 'OPENBUILD_TEST_PAYLOAD='",
+                        "line = next(item for item in prompt.splitlines() if item.startswith(prefix))",
+                        "payload = json.loads(line[len(prefix):])",
+                        "barrier = Path(payload['barrier'])",
+                        "lane = payload['lane']",
+                        "group = payload.get('group', 'normal')",
+                        "repo = Path(sys.argv[sys.argv.index('-C') + 1])",
+                        "(barrier / f'{group}-{lane}.ready').write_text('ready\\n', encoding='utf-8')",
+                        "deadline = time.monotonic() + 30.0",
+                        "while len(list(barrier.glob(f'{group}-*.ready'))) != payload.get('expected', 2):",
+                        "    if time.monotonic() >= deadline:",
+                        "        raise SystemExit(23)",
+                        "    time.sleep(0.05)",
+                        "(repo / payload['allowed']).write_text(",
+                        "    f'{lane} worker wrote concurrently\\n',",
+                        "    encoding='utf-8',",
+                        "    newline='\\n',",
+                        ")",
+                        "(barrier / f'{group}-{lane}.working').write_text('working\\n', encoding='utf-8')",
+                        "while not (barrier / 'release').exists():",
+                        "    time.sleep(0.05)",
+                        "result_index = sys.argv.index('-o') + 1",
+                        "Path(sys.argv[result_index]).write_text('completed\\n', encoding='utf-8')",
+                        "print(json.dumps({'type': 'thread.started', 'thread_id': f'thread-{lane}'}), flush=True)",
+                        "print(json.dumps({'type': 'turn.completed', 'usage': {'output_tokens': 1}}), flush=True)",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            if os.name == "nt":
+                fake_codex = root / "fake-codex.cmd"
+                fake_codex.write_text(
+                    f'@echo off\r\n"{sys.executable}" "{fake_codex_source}" %*\r\n',
+                    encoding="utf-8",
+                    newline="",
+                )
+            else:
+                fake_codex = root / "fake-codex"
+                fake_codex.write_text(
+                    f'#!/bin/sh\nexec "{sys.executable}" "{fake_codex_source}" "$@"\n',
+                    encoding="utf-8",
+                    newline="\n",
+                )
+                fake_codex.chmod(0o700)
+
+            codex_home = root / "codex-home"
+            codex_home.mkdir()
+            run_dirs = {
+                lane_id: root / "runs" / lane_id
+                for lane_id in lanes
+            }
+            environment = dict(os.environ)
+            environment["CODEX_HOME"] = str(codex_home)
+            for credential in agent_runner.API_CREDENTIALS:
+                environment.pop(credential, None)
+
+            def runner_command(lane_id: str) -> list[str]:
+                allowed = "one.py" if lane_id == "lane-one" else "two.py"
+                prompt = (
+                    "Run the bounded test worker.\n"
+                    f"OPENBUILD_TEST_PAYLOAD={json.dumps({'barrier': str(barrier), 'lane': lane_id, 'allowed': allowed, 'group': 'normal', 'expected': 2})}\n"
+                )
+                lane = lanes[lane_id]
+                prompt_binding = agent_runner.stage_owner_prompt_snapshot(
+                    RecoveryRegistry(
+                        Path(lane["worktree"]),
+                        state_root=recovery_root,
+                    ),
+                    prompt.encode("utf-8"),
+                )
+                return [
+                    sys.executable,
+                    str(RUNNER_PATH),
+                    "dispatch",
+                    "--agent",
+                    "openbuild_implementation_fast",
+                    "--task-name",
+                    f"{lane_id}-real-worker",
+                    "--repo",
+                    str(lane["worktree"]),
+                    "--prompt-snapshot-id",
+                    prompt_binding["prompt_snapshot_id"],
+                    "--prompt-sha256",
+                    prompt_binding["prompt_sha256"],
+                    "--lease-id",
+                    f"{lane_id}-lease",
+                    "--allowed-file",
+                    allowed,
+                    "--specification-revision",
+                    "R-031",
+                    "--recovery-target-milestone",
+                    f"{lane_id}-recovery",
+                    "--run-dir",
+                    str(run_dirs[lane_id]),
+                    "--codex-bin",
+                    str(fake_codex),
+                    "--project-lane-id",
+                    lane_id,
+                    "--project-checkout",
+                    str(checkout),
+                    "--project-coordinator-root",
+                    str(coordinator_root),
+                    "--project-anchor-id",
+                    anchor_id,
+                    "--project-recovery-root",
+                    str(recovery_root),
+                    "--project-lane-root",
+                    str(lane_root),
+                    "--project-integration-ref",
+                    integration_ref,
+                ]
+
+            def cancel(lane_id: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [
+                        sys.executable,
+                        str(RUNNER_PATH),
+                        "cancel",
+                        "--run-dir",
+                        str(run_dirs[lane_id]),
+                        "--grace-seconds",
+                        "20",
+                    ],
+                    cwd=ROOT,
+                    env=environment,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=60,
+                    check=False,
+                )
+
+            dispatches: dict[str, subprocess.Popen[str]] = {}
+            try:
+                for lane_id in lanes:
+                    dispatches[lane_id] = subprocess.Popen(
+                        runner_command(lane_id),
+                        cwd=ROOT,
+                        env=environment,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                    )
+                dispatch_results = {
+                    lane_id: process.communicate(timeout=60)
+                    for lane_id, process in dispatches.items()
+                }
+                failed = {
+                    lane_id: {
+                        "exit": dispatches[lane_id].returncode,
+                        "stdout": output,
+                        "stderr": error,
+                    }
+                    for lane_id, (output, error) in dispatch_results.items()
+                    if dispatches[lane_id].returncode != 0
+                }
+                if failed and os.name != "nt" and all(
+                    "containment provider" in item["stderr"].lower()
+                    or "cgroup" in item["stderr"].lower()
+                    for item in failed.values()
+                ):
+                    self.skipTest(
+                        "requires a publication-gate Linux cgroup v2 delegation fixture"
+                    )
+                self.assertEqual(failed, {})
+
+                deadline = time.monotonic() + 30.0
+                while len(list(barrier.glob("normal-*.working"))) != 2:
+                    if time.monotonic() >= deadline:
+                        self.fail("two real lane workers did not reach the live barrier")
+                    time.sleep(0.05)
+                self.assertEqual(
+                    (
+                        Path(lanes["lane-one"]["worktree"]) / "one.py"
+                    ).read_text(encoding="utf-8"),
+                    "lane-one worker wrote concurrently\n",
+                )
+                self.assertEqual(
+                    (
+                        Path(lanes["lane-two"]["worktree"]) / "two.py"
+                    ).read_text(encoding="utf-8"),
+                    "lane-two worker wrote concurrently\n",
+                )
+                self.assertFalse((ROOT / "one.py").exists())
+                self.assertFalse((ROOT / "two.py").exists())
+
+                receipts = {
+                    lane_id: agent_runner.public_receipt(run_dir)
+                    for lane_id, run_dir in run_dirs.items()
+                }
+                guardian_receipts = {
+                    lane_id: agent_runner.read_guardian_message(
+                        run_dir / "guardian-ready.json",
+                        agent_runner._guardian_secret(run_dir),
+                        "guardian-ready",
+                    )
+                    for lane_id, run_dir in run_dirs.items()
+                }
+                self.assertTrue(
+                    all(receipt["status"] == "running" for receipt in receipts.values())
+                )
+                self.assertEqual(
+                    len({receipt["worker_pid"] for receipt in receipts.values()}),
+                    2,
+                )
+                self.assertEqual(
+                    len({receipt["codex_pid"] for receipt in receipts.values()}),
+                    2,
+                )
+                self.assertEqual(
+                    len(
+                        {
+                            receipt["guardian_pid"]
+                            for receipt in guardian_receipts.values()
+                        }
+                    ),
+                    2,
+                )
+                self.assertTrue(
+                    all(
+                        agent_runner.process_record_state(
+                            {
+                                "pid": receipt["codex_pid"],
+                                "identity": receipt["codex_process_identity"],
+                            }
+                        )
+                        == "running"
+                        for receipt in receipts.values()
+                    )
+                )
+                self.assertTrue(
+                    all(
+                        agent_runner.process_record_state(
+                            {
+                                "pid": receipt["guardian_pid"],
+                                "identity": receipt["guardian_identity"],
+                            }
+                        )
+                        == "running"
+                        for receipt in guardian_receipts.values()
+                    )
+                )
+                project_state = store.read_state(anchor_id)["state"]
+                self.assertEqual(
+                    {
+                        lane["lane_id"]: lane["state"]
+                        for lane in project_state["lanes"]
+                    },
+                    {"lane-one": "running", "lane-two": "running"},
+                )
+
+                cancelled_one = cancel("lane-one")
+                self.assertEqual(cancelled_one.returncode, 1, cancelled_one.stderr)
+                project_state = store.read_state(anchor_id)["state"]
+                self.assertEqual(
+                    next(
+                        lane
+                        for lane in project_state["lanes"]
+                        if lane["lane_id"] == "lane-one"
+                    )["state"],
+                    "recovery-ready",
+                )
+                self.assertEqual(
+                    next(
+                        lane
+                        for lane in project_state["lanes"]
+                        if lane["lane_id"] == "lane-two"
+                    )["state"],
+                    "running",
+                )
+                lane_two_receipt = agent_runner.public_receipt(
+                    run_dirs["lane-two"]
+                )
+                self.assertEqual(lane_two_receipt["status"], "running")
+                self.assertEqual(
+                    agent_runner.process_record_state(
+                        {
+                            "pid": lane_two_receipt["codex_pid"],
+                            "identity": lane_two_receipt[
+                                "codex_process_identity"
+                            ],
+                        }
+                    ),
+                    "running",
+                )
+
+                recovery_execution = "lane-one-recovery"
+                run_dirs[recovery_execution] = (
+                    root / "runs" / recovery_execution
+                )
+                recovery_prompt = (
+                    "Continue the exact lane checkpoint.\n"
+                    f"OPENBUILD_TEST_PAYLOAD={json.dumps({'barrier': str(barrier), 'lane': recovery_execution, 'allowed': 'one.py', 'group': 'recovery', 'expected': 1})}\n"
+                )
+                lane_one_registry = RecoveryRegistry(
+                    Path(lanes["lane-one"]["worktree"]),
+                    state_root=recovery_root,
+                )
+                recovery_prompt_binding = (
+                    agent_runner.stage_owner_prompt_snapshot(
+                        lane_one_registry,
+                        recovery_prompt.encode("utf-8"),
+                    )
+                )
+                project_arguments = [
+                    "--project-lane-id",
+                    "lane-one",
+                    "--project-checkout",
+                    str(checkout),
+                    "--project-coordinator-root",
+                    str(coordinator_root),
+                    "--project-anchor-id",
+                    anchor_id,
+                    "--project-recovery-root",
+                    str(recovery_root),
+                    "--project-lane-root",
+                    str(lane_root),
+                    "--project-integration-ref",
+                    integration_ref,
+                ]
+                authorization = subprocess.run(
+                    [
+                        sys.executable,
+                        str(RUNNER_PATH),
+                        "_authorize-recovery",
+                        "--repo",
+                        str(lanes["lane-one"]["worktree"]),
+                        "--checkpoint-file",
+                        str(
+                            run_dirs["lane-one"]
+                            / "recovery-checkpoint.json"
+                        ),
+                        "--prompt-snapshot-id",
+                        recovery_prompt_binding["prompt_snapshot_id"],
+                        "--prompt-sha256",
+                        recovery_prompt_binding["prompt_sha256"],
+                        "--run-dir",
+                        str(run_dirs[recovery_execution]),
+                        "--lease-id",
+                        "lane-one-recovery-lease",
+                        "--user-action-digest",
+                        "a" * 64,
+                        "--specification-revision",
+                        "R-031",
+                        *project_arguments,
+                    ],
+                    cwd=ROOT,
+                    env=environment,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=60,
+                    check=False,
+                )
+                self.assertEqual(
+                    authorization.returncode,
+                    0,
+                    authorization.stderr,
+                )
+                dispatches[recovery_execution] = subprocess.Popen(
+                    [
+                        sys.executable,
+                        str(RUNNER_PATH),
+                        "dispatch",
+                        "--agent",
+                        "openbuild_implementation_fast",
+                        "--task-name",
+                        recovery_execution,
+                        "--repo",
+                        str(lanes["lane-one"]["worktree"]),
+                        "--prompt-snapshot-id",
+                        recovery_prompt_binding["prompt_snapshot_id"],
+                        "--prompt-sha256",
+                        recovery_prompt_binding["prompt_sha256"],
+                        "--lease-id",
+                        "lane-one-recovery-lease",
+                        "--allowed-file",
+                        "one.py",
+                        "--specification-revision",
+                        "R-031",
+                        "--recovery-target-milestone",
+                        "lane-one-recovery-next",
+                        "--run-dir",
+                        str(run_dirs[recovery_execution]),
+                        "--codex-bin",
+                        str(fake_codex),
+                        *project_arguments,
+                    ],
+                    cwd=ROOT,
+                    env=environment,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                recovery_output, recovery_error = dispatches[
+                    recovery_execution
+                ].communicate(timeout=60)
+                self.assertEqual(
+                    dispatches[recovery_execution].returncode,
+                    0,
+                    {
+                        "stdout": recovery_output,
+                        "stderr": recovery_error,
+                    },
+                )
+                deadline = time.monotonic() + 30.0
+                while not (
+                    barrier / f"recovery-{recovery_execution}.working"
+                ).is_file():
+                    if time.monotonic() >= deadline:
+                        self.fail(
+                            "the reserved same-lane recovery worker did not run"
+                        )
+                    time.sleep(0.05)
+                self.assertEqual(
+                    (
+                        Path(lanes["lane-one"]["worktree"]) / "one.py"
+                    ).read_text(encoding="utf-8"),
+                    "lane-one-recovery worker wrote concurrently\n",
+                )
+                recovered_state = store.read_state(anchor_id)["state"]
+                recovered_lane = next(
+                    lane
+                    for lane in recovered_state["lanes"]
+                    if lane["lane_id"] == "lane-one"
+                )
+                self.assertEqual(recovered_lane["state"], "running")
+                self.assertEqual(
+                    recovered_lane["writer"]["lease_kind"],
+                    "recovery-target",
+                )
+                self.assertEqual(
+                    next(
+                        lane
+                        for lane in recovered_state["lanes"]
+                        if lane["lane_id"] == "lane-two"
+                    )["state"],
+                    "running",
+                )
+            finally:
+                for lane_id, process in dispatches.items():
+                    if process.poll() is None:
+                        process.kill()
+                        process.wait(timeout=10)
+                    if run_dirs[lane_id].is_dir():
+                        receipt = agent_runner.public_receipt(
+                            run_dirs[lane_id]
+                        )
+                        if receipt.get("status") == "running":
+                            cancel(lane_id)
 
     def test_implementation_start_commits_containment_before_worker_release(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -5624,6 +6839,70 @@ class CodexInvocationTests(unittest.TestCase):
             result = agent_runner.activate_run(Namespace(run_dir=temp))
 
         self.assertEqual(result, 1)
+
+    def test_project_lane_attach_precedes_prompt_activation(self) -> None:
+        running = {
+            "status": "running",
+            "codex_pid": 123,
+            "codex_process_identity": "codex-created-1",
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            request = {
+                "profile": {"name": "openbuild_implementation_balanced"},
+                "repo": str(run_dir),
+                "lease_id": "lane-lease",
+                "lifecycle_allowed_set_digest": "a" * 64,
+                "root_completion_source_binding": None,
+                "project_lane": {"schema": "fixture"},
+            }
+            agent_runner.atomic_write_json(run_dir / "request.json", request)
+            registry = mock.Mock()
+            registry.state_for_activation.return_value = {
+                "lease": {
+                    "lease_id": "lane-lease",
+                    "state": "process-bound-unactivated",
+                }
+            }
+            sequence: list[str] = []
+
+            def commit_activation(*_args: object) -> None:
+                sequence.append("lane-local-running")
+
+            def attach(bound_request: dict[str, object]) -> dict[str, object]:
+                self.assertEqual(bound_request, request)
+                self.assertEqual(sequence, ["lane-local-running"])
+                self.assertFalse((run_dir / "activate.json").exists())
+                sequence.append("project-lane-running")
+                return {"state": "running"}
+
+            registry.commit_activation.side_effect = commit_activation
+            with mock.patch.object(
+                agent_runner,
+                "audit_guardian_health",
+            ), mock.patch.object(
+                agent_runner,
+                "public_receipt",
+                side_effect=[running, running],
+            ), mock.patch.object(
+                agent_runner,
+                "recovery_registry_for_request",
+                return_value=registry,
+            ), mock.patch.object(
+                agent_runner,
+                "attach_project_lane_writer",
+                side_effect=attach,
+            ), redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    agent_runner.activate_run(Namespace(run_dir=str(run_dir))),
+                    0,
+                )
+
+            self.assertEqual(
+                sequence,
+                ["lane-local-running", "project-lane-running"],
+            )
+            self.assertTrue((run_dir / "activate.json").is_file())
 
     def test_dispatch_starts_then_immediately_activates_the_same_run(self) -> None:
         args = Namespace(run_dir=str(ROOT))
