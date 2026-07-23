@@ -16,6 +16,8 @@ import os
 import re
 import secrets
 import stat
+import subprocess
+import unicodedata
 from contextlib import contextmanager
 from pathlib import Path
 from types import MappingProxyType
@@ -673,6 +675,7 @@ def _is_normalized_relative_path(value: Any) -> bool:
     return (
         isinstance(value, str)
         and bool(value)
+        and value == unicodedata.normalize("NFC", value)
         and len(value) <= 4096
         and "\\" not in value
         and not value.startswith("/")
@@ -819,6 +822,90 @@ def _validate_lane_projection(value: Any) -> dict[str, Any]:
         expected_fields.add("terminal_evidence")
         if not _is_hex_identifier(value.get("terminal_evidence")):
             raise ProjectStateError("lane terminal evidence is invalid")
+    safe_stop = value.get("safe_stop")
+    if safe_stop is not None:
+        if (
+            state not in {"running", "quarantined", "waiting-for-integration"}
+            or not isinstance(safe_stop, dict)
+            or set(safe_stop) != {"reason", "reservation"}
+            or safe_stop.get("reason") not in {
+                "scope-wait-cycle",
+                "scope-expansion-wait",
+            }
+            or not isinstance(safe_stop.get("reservation"), str)
+            or not safe_stop["reservation"]
+            or len(safe_stop["reservation"]) > 256
+        ):
+            raise ProjectStateError("lane safe-stop binding is invalid")
+        expected_fields.add("safe_stop")
+    scope_wait_from = value.get("scope_wait_from")
+    if scope_wait_from is not None:
+        if (
+            state != "waiting-for-scope"
+            or scope_wait_from not in {"creating", "ready"}
+        ):
+            raise ProjectStateError("lane scope-wait origin is invalid")
+        expected_fields.add("scope_wait_from")
+    scope_schema = value.get("scope_schema")
+    if scope_schema is not None:
+        if scope_schema != "project-scopes-v1":
+            raise ProjectStateError("lane scope schema is invalid")
+        scope_enqueue_sequence = value.get("scope_enqueue_sequence")
+        if (
+            not isinstance(scope_enqueue_sequence, int)
+            or scope_enqueue_sequence < 1
+        ):
+            raise ProjectStateError("lane scope enqueue sequence is invalid")
+        scope_requests = value.get("scope_requests")
+        if not isinstance(scope_requests, list) or not scope_requests:
+            raise ProjectStateError("lane scope requests are invalid")
+        kind_order = {
+            "file": 0,
+            "directory": 1,
+            "contract": 2,
+            "resource": 3,
+        }
+        normalized_requests: list[dict[str, str]] = []
+        for request in scope_requests:
+            if (
+                not isinstance(request, dict)
+                or set(request) != {"kind", "path", "mode"}
+                or request.get("kind") not in kind_order
+                or request.get("mode") not in {"hard", "soft"}
+                or not _is_normalized_relative_path(request.get("path"))
+            ):
+                raise ProjectStateError("lane scope request is invalid")
+            normalized_requests.append(dict(request))
+        ordered_requests = sorted(
+            normalized_requests,
+            key=lambda request: (
+                kind_order[request["kind"]],
+                request["path"].casefold(),
+                request["path"],
+                request["mode"],
+            ),
+        )
+        request_keys = [
+            (request["kind"], request["path"].casefold(), request["mode"])
+            for request in ordered_requests
+        ]
+        flattened: list[str] = []
+        seen_paths: set[str] = set()
+        for request in ordered_requests:
+            key = request["path"].casefold()
+            if key not in seen_paths:
+                flattened.append(request["path"])
+                seen_paths.add(key)
+        flattened.sort(key=lambda path: (path.casefold(), path))
+        if (
+            normalized_requests != ordered_requests
+            or len(request_keys) != len(set(request_keys))
+            or scopes != flattened
+        ):
+            raise ProjectStateError("lane scope request binding is invalid")
+        expected_fields.update(
+            {"scope_schema", "scope_requests", "scope_enqueue_sequence"}
+        )
     if set(value) != expected_fields:
         raise ProjectStateError("lane fields are incomplete or unknown")
     return dict(value)
@@ -840,6 +927,124 @@ def _validate_protected_content(value: Any) -> dict[str, Any]:
     ):
         raise ProjectStateError("protected scope content evidence is invalid")
     return dict(value)
+
+
+def _protected_scope_snapshot(
+    project: Path,
+    common: Mapping[str, Any],
+    path: str,
+) -> dict[str, Any]:
+    """Capture one protected path with the same content/index provenance owner."""
+
+    if not _is_normalized_relative_path(path):
+        raise ProjectStateError("protected scope path is invalid")
+    absolute = project / Path(path)
+    try:
+        metadata = absolute.lstat()
+    except FileNotFoundError:
+        content: dict[str, Any] = {"kind": "missing", "digest": None}
+    except OSError as exc:
+        raise ProjectStateError("protected-user-work is unreadable") from exc
+    else:
+        if _is_link_or_reparse(metadata):
+            try:
+                target = os.readlink(absolute)
+            except OSError as exc:
+                raise ProjectStateError(
+                    "protected-user-work link is unreadable"
+                ) from exc
+            content = {
+                "kind": "link",
+                "digest": hashlib.sha256(os.fsencode(target)).hexdigest(),
+            }
+            blob = subprocess.run(
+                ["git", "hash-object", "--stdin"],
+                cwd=project,
+                input=os.fsencode(target),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+        elif stat.S_ISREG(metadata.st_mode):
+            try:
+                content_digest = hashlib.sha256(absolute.read_bytes()).hexdigest()
+            except OSError as exc:
+                raise ProjectStateError(
+                    "protected-user-work is unreadable"
+                ) from exc
+            content = {"kind": "file", "digest": content_digest}
+            blob = subprocess.run(
+                ["git", "hash-object", f"--path={path}", "--", path],
+                cwd=project,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+        else:
+            raise ProjectStateError("protected-user-work type is unsupported")
+        try:
+            blob_id = blob.stdout.decode("ascii").strip()
+        except UnicodeDecodeError as exc:
+            raise ProjectStateError(
+                "protected-user-work Git blob identity is unavailable"
+            ) from exc
+        if blob.returncode != 0 or not _GIT_OBJECT.fullmatch(blob_id):
+            raise ProjectStateError(
+                "protected-user-work Git blob identity is unavailable"
+            )
+        content["git_blob_id"] = blob_id
+
+    index = subprocess.run(
+        ["git", "ls-files", "--stage", "-z", "--", path],
+        cwd=project,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if index.returncode != 0:
+        raise ProjectStateError("protected-user-work index is unavailable")
+    index_fields = index.stdout.split(b"\t", 1)[0].split() if index.stdout else []
+    try:
+        index_mode = (
+            index_fields[0].decode("ascii")
+            if len(index_fields) >= 3
+            else None
+        )
+        index_blob_id = (
+            index_fields[1].decode("ascii")
+            if len(index_fields) >= 3
+            else None
+        )
+    except UnicodeDecodeError as exc:
+        raise ProjectStateError("protected-user-work index is invalid") from exc
+    if content["kind"] == "link":
+        content["git_mode"] = "120000"
+    elif content["kind"] == "file":
+        executable = bool(
+            metadata.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        )
+        content["git_mode"] = (
+            index_mode
+            if os.name == "nt" and index_mode in {"100644", "100755"}
+            else ("100755" if executable else "100644")
+        )
+    evidence = {
+        "common": dict(common),
+        "path": path,
+        "content": content,
+        "index_digest": hashlib.sha256(index.stdout).hexdigest(),
+        "index_blob_id": index_blob_id,
+    }
+    return {
+        "kind": "protected-user-work",
+        "path": path,
+        "owner": None,
+        "adoption": "protected",
+        "evidence": evidence,
+        "provenance": hashlib.sha256(_canonical(evidence)).hexdigest(),
+    }
 
 
 def _validate_adoption_receipt(value: Any) -> dict[str, Any]:
@@ -896,6 +1101,47 @@ def _validate_project_scope(
 ) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ProjectStateError("project scope is invalid")
+    if value.get("kind") in {"file", "directory", "contract", "resource"} and "owner" in value:
+        required = {
+            "kind",
+            "path",
+            "mode",
+            "owner",
+            "status",
+            "sequence",
+            "reservation",
+            "phase",
+        }
+        if value.get("status") == "released":
+            required.add("release")
+        if set(value) != required:
+            raise ProjectStateError("project scope lease fields are incomplete or unknown")
+        if (
+            value.get("kind") not in {"file", "directory", "contract", "resource"}
+            or value.get("mode") not in {"hard", "soft"}
+            or not _is_normalized_relative_path(value.get("path"))
+            or not isinstance(value.get("owner"), str)
+            or not _LANE_ID.fullmatch(value["owner"])
+            or not isinstance(value.get("sequence"), int)
+            or value["sequence"] < 1
+            or not isinstance(value.get("reservation"), str)
+            or not value["reservation"]
+            or len(value["reservation"]) > 256
+            or value.get("phase") not in {"planned", "expansion"}
+        ):
+            raise ProjectStateError("project scope lease is invalid")
+        if value["mode"] == "hard":
+            if value.get("status") not in {"active", "waiting", "cancelled", "released"}:
+                raise ProjectStateError("hard scope lease state is invalid")
+            if value["status"] == "released":
+                raise ProjectStateError(
+                    "project scope release owner is unavailable"
+                )
+            elif "release" in value:
+                raise ProjectStateError("unreleased project scope has release authority")
+        elif value.get("status") != "intent":
+            raise ProjectStateError("soft scope intent has write authority")
+        return dict(value)
     if value.get("kind") != "protected-user-work":
         return validate_scope_state(value)
     base_fields = {"kind", "path", "owner", "adoption", "evidence", "provenance"}
@@ -1022,6 +1268,373 @@ def _validate_lane_scope_uniqueness(
         or len(scope_paths) != len(set(scope_paths))
     ):
         raise ProjectStateError("project lane or scope identities are not unique")
+    lane_id_set = set(lane_ids)
+    leases = [
+        value
+        for value in scopes
+        if value.get("kind") in {"file", "directory", "contract", "resource"}
+        and "owner" in value
+    ]
+    if any(value["owner"] not in lane_id_set for value in leases):
+        raise ProjectStateError("project scope owner lane is absent")
+    reservations: dict[str, list[Mapping[str, Any]]] = {}
+    for value in leases:
+        reservations.setdefault(str(value["reservation"]), []).append(value)
+    for reservation in reservations.values():
+        ordered = sorted(
+            reservation,
+            key=lambda item: (
+                {"file": 0, "directory": 1, "contract": 2, "resource": 3}[item["kind"]],
+                item["path"].casefold(),
+                item["path"],
+                item["mode"],
+            ),
+        )
+        if list(reservation) != ordered:
+            raise ProjectStateError("project scope reservation ordering is invalid")
+        keys = [(item["kind"], item["path"].casefold(), item["mode"]) for item in reservation]
+        if len(keys) != len(set(keys)):
+            raise ProjectStateError("project scope reservation aliases are invalid")
+    active = [value for value in leases if value.get("mode") == "hard" and value.get("status") == "active"]
+    for index, left in enumerate(active):
+        for right in active[index + 1 :]:
+            if left["owner"] == right["owner"]:
+                continue
+            left_path, right_path = left["path"].casefold(), right["path"].casefold()
+            path_overlap = (
+                left_path == right_path
+                or left_path.startswith(right_path + "/")
+                or right_path.startswith(left_path + "/")
+            )
+            file_overlap = (
+                left["kind"] in {"file", "directory"}
+                and right["kind"] in {"file", "directory"}
+                and path_overlap
+            )
+            named_overlap = left["kind"] == right["kind"] and left_path == right_path
+            if file_overlap or named_overlap:
+                raise ProjectStateError("project active hard scopes overlap")
+
+
+def _validate_scope_projection_transition(
+    current: Sequence[Mapping[str, Any]],
+    proposed: Sequence[Mapping[str, Any]],
+    *,
+    protected_transition: str | None = None,
+) -> None:
+    """Keep an admitted lease until its owning lifecycle can prove release."""
+
+    def identity(value: Mapping[str, Any]) -> tuple[Any, ...]:
+        return (
+            value.get("kind"),
+            str(value.get("path", "")).casefold(),
+            value.get("mode"),
+            value.get("owner"),
+            value.get("sequence"),
+            value.get("reservation"),
+            value.get("phase"),
+        )
+
+    proposed_leases = {
+        identity(value): value
+        for value in proposed
+        if value.get("kind") in {"file", "directory", "contract", "resource"}
+        and "owner" in value
+    }
+    allowed_status_transitions = {
+        "active": {"active"},
+        "waiting": {"waiting", "active", "cancelled"},
+        "cancelled": {"cancelled"},
+        "intent": {"intent"},
+    }
+    for existing in current:
+        if existing.get("kind") == "protected-user-work":
+            updated = next(
+                (
+                    value
+                    for value in proposed
+                    if value.get("kind") == "protected-user-work"
+                    and str(value.get("path", "")).casefold()
+                    == str(existing.get("path", "")).casefold()
+                ),
+                None,
+            )
+            if updated is None:
+                raise ProjectStateError(
+                    "protected user work requires its owning lifecycle"
+                )
+            if dict(updated) == dict(existing):
+                continue
+            stable_fields = ("kind", "path", "evidence", "provenance")
+            if any(
+                updated.get(field) != existing.get(field)
+                for field in stable_fields
+            ):
+                raise ProjectStateError(
+                    "protected user work requires its owning lifecycle"
+                )
+            transition = (
+                existing.get("adoption"),
+                updated.get("adoption"),
+            )
+            if (
+                protected_transition == "intent"
+                and transition == ("protected", "adoption-intent")
+            ):
+                if (
+                    existing.get("owner") is not None
+                    or updated.get("owner") is not None
+                ):
+                    raise ProjectStateError(
+                        "protected user work requires its owning lifecycle"
+                    )
+                continue
+            if (
+                protected_transition == "rollback"
+                and transition == ("adoption-intent", "protected")
+            ):
+                if (
+                    existing.get("owner") is not None
+                    or updated.get("owner") is not None
+                ):
+                    raise ProjectStateError(
+                        "protected user work requires its owning lifecycle"
+                    )
+                continue
+            if (
+                protected_transition == "adopt"
+                and transition == ("adoption-intent", "adopted")
+            ):
+                continue
+            raise ProjectStateError(
+                "purpose-specific protected adoption sink is required"
+            )
+        if (
+            existing.get("kind")
+            not in {"file", "directory", "contract", "resource"}
+            or "owner" not in existing
+        ):
+            continue
+        updated = proposed_leases.get(identity(existing))
+        if updated is None:
+            raise ProjectStateError(
+                "project scope release requires its owning lifecycle"
+            )
+        if any(
+            updated.get(field) != existing.get(field)
+            for field in (
+                "kind",
+                "path",
+                "mode",
+                "owner",
+                "sequence",
+                "reservation",
+                "phase",
+            )
+        ):
+            raise ProjectStateError(
+                "project scope release requires its owning lifecycle"
+            )
+        existing_status = existing.get("status")
+        if updated.get("status") not in allowed_status_transitions.get(
+            str(existing_status),
+            set(),
+        ):
+            raise ProjectStateError(
+                "project scope release requires its owning lifecycle"
+            )
+
+
+def _verify_protected_adoption_transition(
+    project: Path,
+    lane_session: Mapping[str, Any],
+    current: Sequence[Mapping[str, Any]],
+    proposed: Sequence[Mapping[str, Any]],
+    integration_receipt: Mapping[str, Any],
+) -> None:
+    receipt = _validate_adoption_receipt(integration_receipt)
+    if (
+        receipt["project_common_digest"]
+        != hashlib.sha256(_canonical(lane_session["common"])).hexdigest()
+        or receipt["integration_ref"] != lane_session["integration_ref"]
+    ):
+        raise ProjectStateError("protected adoption receipt session drifted")
+    integrated_commit = receipt["integrated_commit"]
+    commit = subprocess.run(
+        ["git", "rev-parse", "--verify", f"{integrated_commit}^{{commit}}"],
+        cwd=project,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    accepted_tip = subprocess.run(
+        [
+            "git",
+            "rev-parse",
+            "--verify",
+            f"{lane_session['integration_ref']}^{{commit}}",
+        ],
+        cwd=project,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    try:
+        commit_id = commit.stdout.decode("ascii").strip()
+        tip_id = accepted_tip.stdout.decode("ascii").strip()
+    except UnicodeDecodeError as exc:
+        raise ProjectStateError("protected adoption Git identity is invalid") from exc
+    if (
+        commit.returncode != 0
+        or accepted_tip.returncode != 0
+        or commit_id != integrated_commit
+        or tip_id != integrated_commit
+    ):
+        raise ProjectStateError(
+            "adoption commit is not the accepted integration ref tip"
+        )
+
+    current_by_path = {
+        str(scope["path"]).casefold(): scope
+        for scope in current
+        if scope.get("kind") == "protected-user-work"
+    }
+    proposed_by_path = {
+        str(scope["path"]).casefold(): scope
+        for scope in proposed
+        if scope.get("kind") == "protected-user-work"
+    }
+    receipt_paths = {
+        str(entry["path"]).casefold(): entry
+        for entry in receipt["paths"]
+    }
+    changed_paths = {
+        path
+        for path, existing in current_by_path.items()
+        if proposed_by_path.get(path) != existing
+    }
+    if changed_paths != set(receipt_paths):
+        raise ProjectStateError("protected adoption path set changed")
+    for path_key in sorted(changed_paths):
+        existing = current_by_path[path_key]
+        updated = proposed_by_path.get(path_key)
+        entry = receipt_paths[path_key]
+        intent = existing.get("adoption_intent")
+        acceptance = (
+            updated.get("adoption_acceptance")
+            if isinstance(updated, Mapping)
+            else None
+        )
+        if (
+            existing.get("adoption") != "adoption-intent"
+            or not isinstance(intent, Mapping)
+            or not isinstance(updated, Mapping)
+            or updated.get("adoption") != "adopted"
+            or updated.get("owner") != "integration"
+            or not isinstance(acceptance, Mapping)
+            or entry.get("path") != existing.get("path")
+            or entry.get("provenance") != existing.get("provenance")
+            or entry.get("intent_generation") != intent.get(
+                "intent_generation"
+            )
+            or receipt["user_action_digest"]
+            != intent.get("user_action_digest")
+            or receipt["plan_digest"] != intent.get("plan_digest")
+            or acceptance.get("receipt") != receipt
+            or acceptance.get("integration_receipt_digest")
+            != receipt["digest"]
+            or acceptance.get("integrated_commit") != integrated_commit
+            or acceptance.get("user_action_digest")
+            != receipt["user_action_digest"]
+            or acceptance.get("plan_digest") != receipt["plan_digest"]
+        ):
+            raise ProjectStateError("protected adoption intent is stale")
+        observed = _protected_scope_snapshot(
+            project,
+            lane_session["common"],
+            str(existing["path"]),
+        )
+        if (
+            observed["provenance"] != existing.get("provenance")
+            or observed["evidence"] != existing.get("evidence")
+        ):
+            raise ProjectStateError("protected adoption provenance changed")
+        content = existing.get("evidence", {}).get("content")
+        if not isinstance(content, Mapping):
+            raise ProjectStateError("protected adoption evidence is invalid")
+        tree = subprocess.run(
+            [
+                "git",
+                "ls-tree",
+                "-z",
+                integrated_commit,
+                "--",
+                str(existing["path"]),
+            ],
+            cwd=project,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if tree.returncode != 0:
+            raise ProjectStateError(
+                "integrated commit tree could not be inspected"
+            )
+        if content.get("kind") == "missing":
+            if tree.stdout:
+                raise ProjectStateError(
+                    "integrated commit retained a protected deletion"
+                )
+            continue
+        try:
+            tree_fields = tree.stdout.split(b"\t", 1)[0].split()
+            committed_mode = tree_fields[0].decode("ascii")
+            committed_blob = tree_fields[2].decode("ascii")
+        except (IndexError, UnicodeDecodeError) as exc:
+            raise ProjectStateError(
+                "integrated commit tree entry is malformed"
+            ) from exc
+        if (
+            committed_mode != content.get("git_mode")
+            or committed_blob != content.get("git_blob_id")
+        ):
+            raise ProjectStateError(
+                "integrated commit does not match protected content"
+            )
+def _validate_lane_projection_transition(
+    current: Sequence[Mapping[str, Any]],
+    proposed: Sequence[Mapping[str, Any]],
+) -> None:
+    current_by_id = {str(lane["lane_id"]): lane for lane in current}
+    for lane in proposed:
+        existing = current_by_id.get(str(lane["lane_id"]))
+        if (
+            existing is not None
+            and existing.get("scope_schema") is None
+            and lane.get("scope_schema") is not None
+        ):
+            raise ProjectStateError(
+                "legacy lane scope migration requires explicit project claims"
+            )
+        if (
+            existing is None
+            and lane.get("scope_schema") == "project-scopes-v1"
+            and (
+                lane.get("state") not in {"creating", "waiting-for-scope"}
+                or lane.get("writer") is not None
+            )
+        ):
+            raise ProjectStateError("new typed lane state is invalid")
+        if (
+            existing is not None
+            and existing.get("scope_schema") == "project-scopes-v1"
+            and lane.get("scope_enqueue_sequence")
+            != existing.get("scope_enqueue_sequence")
+        ):
+            raise ProjectStateError("lane scope enqueue sequence changed")
 
 
 class ProjectStateStore:
@@ -1452,9 +2065,93 @@ class ProjectStateStore:
     ) -> dict[str, Any]:
         """Atomically publish the M2 lane projection under the established locks.
 
-        This deliberately has no policy: lifecycle validation remains in the lane
-        owner, while this M1 owner retains the sole generationed state sink.
+        Lifecycle owners derive the projection. The sink still prevents an
+        admitted lease from disappearing or being downgraded without the future
+        integration-owner release transition.
         """
+        return self._replace_lane_state(
+            anchor_id,
+            expected_generation=expected_generation,
+            lanes=lanes,
+            scopes=scopes,
+            protected_transition=None,
+            protected_adoption_receipt=None,
+        )
+
+    def begin_protected_adoption(
+        self,
+        anchor_id: str,
+        *,
+        expected_generation: int,
+        lanes: Sequence[Mapping[str, Any]],
+        scopes: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        """Publish only structurally bound protected-to-intent transitions."""
+
+        return self._replace_lane_state(
+            anchor_id,
+            expected_generation=expected_generation,
+            lanes=lanes,
+            scopes=scopes,
+            protected_transition="intent",
+            protected_adoption_receipt=None,
+        )
+
+    def rollback_protected_adoption(
+        self,
+        anchor_id: str,
+        *,
+        expected_generation: int,
+        lanes: Sequence[Mapping[str, Any]],
+        scopes: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        """Publish only adoption-intent-to-protected rollback transitions."""
+
+        return self._replace_lane_state(
+            anchor_id,
+            expected_generation=expected_generation,
+            lanes=lanes,
+            scopes=scopes,
+            protected_transition="rollback",
+            protected_adoption_receipt=None,
+        )
+
+    def accept_protected_adoption(
+        self,
+        anchor_id: str,
+        *,
+        expected_generation: int,
+        lanes: Sequence[Mapping[str, Any]],
+        scopes: Sequence[Mapping[str, Any]],
+        integration_receipt: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Publish only a Git/provenance-verified intent-to-adopted transition."""
+
+        return self._replace_lane_state(
+            anchor_id,
+            expected_generation=expected_generation,
+            lanes=lanes,
+            scopes=scopes,
+            protected_transition="adopt",
+            protected_adoption_receipt=integration_receipt,
+        )
+
+    def _replace_lane_state(
+        self,
+        anchor_id: str,
+        *,
+        expected_generation: int,
+        lanes: Sequence[Mapping[str, Any]],
+        scopes: Sequence[Mapping[str, Any]],
+        protected_transition: str | None,
+        protected_adoption_receipt: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        if protected_transition not in {None, "intent", "rollback", "adopt"}:
+            raise ProjectStateError("protected transition is invalid")
+        if (protected_transition == "adopt") != (
+            protected_adoption_receipt is not None
+        ):
+            raise ProjectStateError("protected adoption receipt is invalid")
         if not isinstance(expected_generation, int) or expected_generation < 0:
             raise ProjectStateError("expected project generation is invalid")
         validated_lanes = [_validate_lane_projection(value) for value in lanes]
@@ -1474,6 +2171,23 @@ class ProjectStateStore:
                     for value in scopes
                 ]
                 _validate_lane_scope_uniqueness(validated_lanes, validated_scopes)
+                if protected_adoption_receipt is not None:
+                    _verify_protected_adoption_transition(
+                        self.project,
+                        lane_session,
+                        state["scopes"],
+                        validated_scopes,
+                        protected_adoption_receipt,
+                    )
+                _validate_scope_projection_transition(
+                    state["scopes"],
+                    validated_scopes,
+                    protected_transition=protected_transition,
+                )
+                _validate_lane_projection_transition(
+                    state["lanes"],
+                    validated_lanes,
+                )
                 if any(
                     lane["common"] != lane_session["common"]
                     for lane in validated_lanes

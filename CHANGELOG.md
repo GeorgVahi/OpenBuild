@@ -4,6 +4,21 @@ OpenBuild follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### 2.4.0-alpha.3
+
+#### Added
+
+- Added a durable project-wide scope/resource lease manager for canonical file, directory, contract, and resource scopes, while keeping soft intents non-authoritative.
+- Added atomic pre-start scope expansion, deterministic inactive-reservation cycle handling, and monotonic waiter fairness.
+- Added focused collision, alias, resource, fairness, expansion, cycle, and synchronized two-contender CAS fixtures.
+
+#### Changed
+
+- Made concurrent lane admission retry the project generation CAS so two simultaneous claims converge on exactly one active owner and one `waiting-for-scope` lane.
+- Required an active project hard-scope grant before runner allowed paths or a contained writer can become write-capable.
+- Kept live-writer expansion, live-cycle safe-stop and scope release fail-closed until the R-032 runner/integration owner handshakes land in the next prerelease.
+- Synchronized the README version pins for the `2.4.0-alpha.3` development snapshot; the M3 cross-owner bridge, DAG scheduling and integration remain later milestones.
+
 ### 2.4.0-alpha.2
 
 #### Added

@@ -15,7 +15,8 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from project_state import ProjectStateError, ProjectStateStore, _assert_no_link_or_reparse_ancestors, _identity, _is_link_or_reparse
+from project_state import ProjectStateError, ProjectStateStore, _assert_no_link_or_reparse_ancestors, _identity, _is_link_or_reparse, _protected_scope_snapshot
+from project_scopes import ProjectScopeError, ProjectScopeManager
 from recovery_state import RecoveryRegistry, RecoveryStateError
 
 
@@ -80,6 +81,11 @@ class ProjectLaneCoordinator:
         if not re.fullmatch(r"[0-9a-f]{40,64}", self.base):
             raise ProjectLaneError("admitted Git base is invalid")
         self.integration_ref = self._bind_session(integration_ref)
+        self.scope_manager = ProjectScopeManager(
+            self.store,
+            self.anchor_id,
+            checkout=self.checkout,
+        )
 
     def _trip(self, stage: str) -> None:
         if self.fault == stage:
@@ -194,19 +200,6 @@ class ProjectLaneCoordinator:
     def _scope_key(value: str) -> str:
         return value.casefold()
 
-    def _assert_scope_ancestors(self, value: str) -> None:
-        current = self.checkout
-        for part in value.split("/")[:-1]:
-            current = current / part
-            try:
-                metadata = current.lstat()
-            except FileNotFoundError:
-                return
-            except OSError as exc:
-                raise ProjectLaneError("lane scope ancestor is unreadable") from exc
-            if _is_link_or_reparse(metadata) or not stat.S_ISDIR(metadata.st_mode):
-                raise ProjectLaneError("lane scope has a link or non-directory ancestor")
-
     def _assert_binding(self, state: Mapping[str, Any]) -> None:
         current = self._common_identity()
         if self.common != current:
@@ -220,7 +213,6 @@ class ProjectLaneCoordinator:
                 raise ProjectLaneError("registered lane escapes the managed lane root") from exc
             if (
                 lane.get("common") != current
-                or lane.get("base") != self.base
                 or lane.get("branch") != f"refs/heads/openbuild/lanes/{lane_id}"
                 or relative == Path(".")
             ):
@@ -255,84 +247,16 @@ class ProjectLaneCoordinator:
             paths.update(self._decode_paths(self._git(*command)))
         output: list[dict[str, Any]] = []
         for path in sorted(paths):
-            absolute = self.checkout / Path(path)
             try:
-                metadata = absolute.lstat()
-            except FileNotFoundError:
-                content = {"kind": "missing", "digest": None}
-            except OSError as exc:
-                raise ProjectLaneError("protected-user-work is unreadable") from exc
-            else:
-                if _is_link_or_reparse(metadata):
-                    try:
-                        target = os.readlink(absolute)
-                    except OSError as exc:
-                        raise ProjectLaneError("protected-user-work link is unreadable") from exc
-                    content = {
-                        "kind": "link",
-                        "digest": hashlib.sha256(os.fsencode(target)).hexdigest(),
-                    }
-                    blob = self._git_checked_result(
-                        "hash-object",
-                        "--stdin",
-                        input_data=os.fsencode(target),
-                    )
-                elif stat.S_ISREG(metadata.st_mode):
-                    try:
-                        content_digest = hashlib.sha256(absolute.read_bytes()).hexdigest()
-                    except OSError as exc:
-                        raise ProjectLaneError("protected-user-work is unreadable") from exc
-                    content = {"kind": "file", "digest": content_digest}
-                    blob = self._git_checked_result(
-                        "hash-object",
-                        f"--path={path}",
-                        "--",
+                output.append(
+                    _protected_scope_snapshot(
+                        self.checkout,
+                        self.common,
                         path,
                     )
-                else:
-                    raise ProjectLaneError("protected-user-work type is unsupported")
-                blob_id = blob.stdout.decode("ascii").strip() if blob.returncode == 0 else ""
-                if not re.fullmatch(r"[0-9a-f]{40,64}", blob_id):
-                    raise ProjectLaneError("protected-user-work Git blob identity is unavailable")
-                content["git_blob_id"] = blob_id
-            index = self._git("ls-files", "--stage", "-z", "--", path)
-            index_fields = index.split(b"\t", 1)[0].split() if index else []
-            index_mode = (
-                index_fields[0].decode("ascii")
-                if len(index_fields) >= 3
-                else None
-            )
-            index_blob_id = (
-                index_fields[1].decode("ascii")
-                if len(index_fields) >= 3
-                else None
-            )
-            if content["kind"] == "link":
-                content["git_mode"] = "120000"
-            elif content["kind"] == "file":
-                executable = bool(metadata.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
-                content["git_mode"] = (
-                    index_mode
-                    if os.name == "nt" and index_mode in {"100644", "100755"}
-                    else ("100755" if executable else "100644")
                 )
-            evidence = {
-                "common": self.common,
-                "path": path,
-                "content": content,
-                "index_digest": hashlib.sha256(index).hexdigest(),
-                "index_blob_id": index_blob_id,
-            }
-            output.append(
-                {
-                    "kind": "protected-user-work",
-                    "path": path,
-                    "owner": None,
-                    "adoption": "protected",
-                    "evidence": evidence,
-                    "provenance": hashlib.sha256(_canonical(evidence)).hexdigest(),
-                }
-            )
+            except ProjectStateError as exc:
+                raise ProjectLaneError(str(exc)) from exc
         return output
 
     @staticmethod
@@ -434,18 +358,37 @@ class ProjectLaneCoordinator:
             raise ProjectLaneError("lane-local contained writer is not active")
         return writer
 
-    def create(self, lane_id: str, milestone: str, worktree: Path, scopes: Sequence[str]) -> dict[str, Any]:
+    def create(
+        self,
+        lane_id: str,
+        milestone: str,
+        worktree: Path,
+        scopes: Sequence[object],
+        *,
+        _cas_budget: int = 8,
+    ) -> dict[str, Any]:
         if not _LANE.fullmatch(lane_id) or not isinstance(milestone, str) or not milestone or len(milestone) > 256:
             raise ProjectLaneError("lane identifier or milestone is invalid")
-        if not scopes:
-            raise ProjectLaneError("lane scopes are invalid")
-        canonical_scopes = [self._canonical_scope(item) for item in scopes]
-        scope_keys = [self._scope_key(item) for item in canonical_scopes]
-        if len(set(scope_keys)) != len(scope_keys):
-            raise ProjectLaneError("lane scopes contain aliases")
-        canonical_scopes = sorted(canonical_scopes, key=self._scope_key)
-        for scope in canonical_scopes:
-            self._assert_scope_ancestors(scope)
+        self.base = self._git(
+            "rev-parse",
+            "--verify",
+            self.integration_ref,
+        ).decode("ascii").strip()
+        try:
+            requested_scopes = self.scope_manager.normalize(scopes)
+        except ProjectScopeError as exc:
+            raise ProjectLaneError(str(exc)) from exc
+        canonical_scopes = []
+        seen_scope_paths: set[str] = set()
+        for item in requested_scopes:
+            key = self._scope_key(item["path"])
+            if key not in seen_scope_paths:
+                canonical_scopes.append(item["path"])
+                seen_scope_paths.add(key)
+        canonical_scopes = sorted(
+            canonical_scopes,
+            key=lambda path: (self._scope_key(path), path),
+        )
         worktree = Path(os.path.abspath(os.fspath(worktree)))
         try:
             worktree.relative_to(self.lane_root)
@@ -456,22 +399,144 @@ class ProjectLaneCoordinator:
         _assert_no_link_or_reparse_ancestors(worktree.parent)
         state = self._state()
         self._assert_binding(state)
+        self._assert_legacy_vacancy()
         lanes = list(state["lanes"])
+        inventory = self._dirty_scopes()
+        merged_scopes = self._merge_protected(state["scopes"], inventory)
+        try:
+            self.scope_manager.preflight_legacy_claims(merged_scopes)
+        except ProjectScopeError as exc:
+            raise ProjectLaneError(str(exc)) from exc
+        if merged_scopes != state["scopes"]:
+            try:
+                self._publish(state, lanes, merged_scopes)
+            except ProjectLaneError as exc:
+                if str(exc) != "project generation changed" or _cas_budget <= 1:
+                    raise
+            if _cas_budget <= 1:
+                raise ProjectLaneError(
+                    "protected scope inventory could not win the project generation CAS"
+                )
+            return self.create(
+                lane_id,
+                milestone,
+                worktree,
+                scopes,
+                _cas_budget=_cas_budget - 1,
+            )
         branch = f"refs/heads/openbuild/lanes/{lane_id}"
         existing_lane = next((lane for lane in lanes if lane.get("lane_id") == lane_id), None)
         if isinstance(existing_lane, dict):
+            if (
+                existing_lane.get("state") == "waiting-for-scope"
+                and existing_lane.get("base") != self.base
+                and existing_lane.get("writer") is None
+                and not Path(str(existing_lane["worktree"])).exists()
+                and not self._git(
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    branch,
+                    allow_failure=True,
+                )
+            ):
+                physical = [
+                    request
+                    for request in requested_scopes
+                    if request["kind"] in {"file", "directory"}
+                    and request["mode"] == "hard"
+                ]
+                adopted = [
+                    item
+                    for item in state["scopes"]
+                    if item.get("kind") == "protected-user-work"
+                    and item.get("adoption") == "adopted"
+                    and any(
+                        self.scope_manager._overlaps(
+                            request,
+                            {"kind": "file", "path": item["path"]},
+                        )
+                        for request in physical
+                    )
+                ]
+                accepted_commits = [
+                    item.get("adoption_acceptance", {}).get(
+                        "integrated_commit"
+                    )
+                    for item in adopted
+                ]
+                if adopted and all(
+                    isinstance(commit, str)
+                    and re.fullmatch(r"[0-9a-f]{40,64}", commit)
+                    and self._git_checked_result(
+                        "merge-base",
+                        "--is-ancestor",
+                        commit,
+                        self.base,
+                    ).returncode
+                    == 0
+                    for commit in accepted_commits
+                ):
+                    refreshed = dict(existing_lane)
+                    refreshed["base"] = self.base
+                    refreshed_lanes = [
+                        refreshed
+                        if lane.get("lane_id") == lane_id
+                        else lane
+                        for lane in lanes
+                    ]
+                    try:
+                        self._publish(
+                            state,
+                            refreshed_lanes,
+                            state["scopes"],
+                        )
+                    except ProjectLaneError as exc:
+                        if (
+                            str(exc) != "project generation changed"
+                            or _cas_budget <= 1
+                        ):
+                            raise
+                    if _cas_budget <= 1:
+                        raise ProjectLaneError(
+                            "adopted lane refresh could not win the project generation CAS"
+                        )
+                    return self.create(
+                        lane_id,
+                        milestone,
+                        worktree,
+                        scopes,
+                        _cas_budget=_cas_budget - 1,
+                    )
             if (
                 existing_lane.get("milestone") != milestone
                 or existing_lane.get("branch") != branch
                 or existing_lane.get("worktree") != str(worktree)
                 or existing_lane.get("scopes") != canonical_scopes
+                or (
+                    existing_lane.get("scope_schema") == "project-scopes-v1"
+                    and existing_lane.get("scope_requests") != requested_scopes
+                )
                 or existing_lane.get("base") != self.base
                 or existing_lane.get("common") != self.common
             ):
                 raise ProjectLaneError("lane replay binding changed")
             if existing_lane.get("state") == "waiting-for-scope":
-                return existing_lane
+                try:
+                    reservation = self.scope_manager.reserve_planned(lane_id, scopes)
+                except ProjectScopeError as exc:
+                    raise ProjectLaneError(str(exc)) from exc
+                refreshed = self.lane_projection(lane_id)
+                if reservation["status"] == "waiting-for-scope":
+                    return refreshed
+                return self._materialize(refreshed)
             if existing_lane.get("state") in {"creating", "ready", "running"}:
+                try:
+                    reservation = self.scope_manager.reserve_planned(lane_id, scopes)
+                except ProjectScopeError as exc:
+                    raise ProjectLaneError(str(exc)) from exc
+                if reservation["status"] == "waiting-for-scope":
+                    return self.lane_projection(lane_id)
                 return self._materialize(existing_lane)
             raise ProjectLaneError("lane already reached a terminal state")
         if worktree.exists():
@@ -480,21 +545,59 @@ class ProjectLaneCoordinator:
             raise ProjectLaneError("lane Git identity is already registered")
         if self._git("rev-parse", "--verify", "--quiet", branch, allow_failure=True):
             raise ProjectLaneError("managed lane ref already exists")
-        self._assert_legacy_vacancy()
-        inventory = self._dirty_scopes()
-        merged_scopes = self._merge_protected(state["scopes"], inventory)
+        try:
+            migration = self.scope_manager.migrate_legacy_claims()
+        except ProjectScopeError as exc:
+            raise ProjectLaneError(str(exc)) from exc
+        if migration["migrated"]:
+            if _cas_budget <= 1:
+                raise ProjectLaneError(
+                    "legacy scope migration did not reach a stable generation"
+                )
+            return self.create(
+                lane_id,
+                milestone,
+                worktree,
+                scopes,
+                _cas_budget=_cas_budget - 1,
+            )
         external = [
             scope
             for scope in merged_scopes
             if scope.get("kind") == "protected-user-work"
             and scope.get("adoption") != "adopted"
         ]
-        waiting = any(self._overlaps(scope, protected["path"]) for scope in canonical_scopes for protected in external)
-        lane = {"lane_id": lane_id, "milestone": milestone, "reader_floor": PROJECT_LANE_READER_FLOOR, "common": self.common, "base": self.base, "branch": branch, "worktree": str(worktree), "scopes": canonical_scopes, "state": "waiting-for-scope" if waiting else "creating", "writer": None}
+        waiting = any(
+            self.scope_manager._overlaps(
+                request,
+                {"kind": "file", "path": protected["path"]},
+            )
+            for request in requested_scopes
+            if request["kind"] in {"file", "directory"}
+            and request["mode"] == "hard"
+            for protected in external
+        )
+        lane = {"lane_id": lane_id, "milestone": milestone, "reader_floor": PROJECT_LANE_READER_FLOOR, "common": self.common, "base": self.base, "branch": branch, "worktree": str(worktree), "scopes": canonical_scopes, "scope_schema": "project-scopes-v1", "scope_requests": requested_scopes, "scope_enqueue_sequence": int(state["generation"]) + 1, "state": "waiting-for-scope" if waiting else "creating", "writer": None}
         self._trip("before-lane-state")
-        self._publish(state, [*lanes, lane], merged_scopes)
+        try:
+            self._publish(state, [*lanes, lane], merged_scopes)
+        except ProjectLaneError as exc:
+            if str(exc) != "project generation changed" or _cas_budget <= 1:
+                raise
+            return self.create(
+                lane_id,
+                milestone,
+                worktree,
+                scopes,
+                _cas_budget=_cas_budget - 1,
+            )
         self._trip("after-lane-state")
-        if waiting:
+        try:
+            reservation = self.scope_manager.reserve_planned(lane_id, scopes)
+        except ProjectScopeError as exc:
+            raise ProjectLaneError(str(exc)) from exc
+        lane = self.lane_projection(lane_id)
+        if reservation["status"] == "waiting-for-scope":
             return lane
         return self._materialize(lane)
 
@@ -591,6 +694,10 @@ class ProjectLaneCoordinator:
         canonical_allowed = sorted(canonical_allowed, key=self._scope_key)
         expected_worktree = _safe_dir(Path(worktree))
         self._assert_legacy_vacancy()
+        try:
+            self.scope_manager.migrate_legacy_claims()
+        except ProjectScopeError as exc:
+            raise ProjectLaneError(str(exc)) from exc
         state = self._state()
         self._assert_binding(state)
         lane = next(
@@ -671,13 +778,10 @@ class ProjectLaneCoordinator:
             cwd=registered_worktree,
         ):
             raise ProjectLaneError("runner lane worktree is dirty before activation")
-        scope_keys = [self._scope_key(path) for path in lane["scopes"]]
-        for allowed in allowed_keys:
-            if not any(
-                allowed == scope or allowed.startswith(scope + "/")
-                for scope in scope_keys
-            ):
-                raise ProjectLaneError("runner allowed path escapes the lane hard scopes")
+        try:
+            self.scope_manager.assert_write_authority(lane_id, canonical_allowed)
+        except ProjectScopeError as exc:
+            raise ProjectLaneError(str(exc)) from exc
         binding = {
             "schema": "project-lane-runner-v1",
             "anchor_id": self.anchor_id,
@@ -762,6 +866,10 @@ class ProjectLaneCoordinator:
             raise ProjectLaneError("contained writer binding is invalid")
         for _ in range(8):
             self._assert_legacy_vacancy()
+            try:
+                self.scope_manager.migrate_legacy_claims()
+            except ProjectScopeError as exc:
+                raise ProjectLaneError(str(exc)) from exc
             state = self._state()
             self._assert_binding(state)
             lanes = list(state["lanes"])
@@ -774,6 +882,10 @@ class ProjectLaneCoordinator:
                 "quarantined",
             }:
                 raise ProjectLaneError("lane is not ready for a contained writer")
+            try:
+                self.scope_manager.assert_lane_authority(lane_id)
+            except ProjectScopeError as exc:
+                raise ProjectLaneError(str(exc)) from exc
             writer = {
                 "lease_id": lease_id,
                 "run_id": run_id,
@@ -1174,7 +1286,15 @@ class ProjectLaneCoordinator:
         ):
             return selected
         self._trip("before-adoption-intent")
-        self._publish(state, state["lanes"], scopes)
+        try:
+            self.store.begin_protected_adoption(
+                self.anchor_id,
+                expected_generation=state["generation"],
+                lanes=state["lanes"],
+                scopes=scopes,
+            )
+        except ProjectStateError as exc:
+            raise ProjectLaneError(str(exc)) from exc
         self._trip("after-adoption-intent")
         return selected
 
@@ -1207,7 +1327,15 @@ class ProjectLaneCoordinator:
             selected.append(scope)
         if {scope["path"] for scope in selected} != set(paths):
             raise ProjectLaneError("protected adoption rollback scope is incomplete")
-        self._publish(state, state["lanes"], scopes)
+        try:
+            self.store.rollback_protected_adoption(
+                self.anchor_id,
+                expected_generation=state["generation"],
+                lanes=state["lanes"],
+                scopes=scopes,
+            )
+        except ProjectStateError as exc:
+            raise ProjectLaneError(str(exc)) from exc
         return selected
 
     def _adoption_acceptance_receipt(
@@ -1414,7 +1542,16 @@ class ProjectLaneCoordinator:
         ):
             return selected
         self._trip("before-adoption-accept")
-        self._publish(state, state["lanes"], scopes)
+        try:
+            self.store.accept_protected_adoption(
+                self.anchor_id,
+                expected_generation=state["generation"],
+                lanes=state["lanes"],
+                scopes=scopes,
+                integration_receipt=expected_receipt,
+            )
+        except ProjectStateError as exc:
+            raise ProjectLaneError(str(exc)) from exc
         self._trip("after-adoption-accept")
         return selected
 

@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -24,10 +25,12 @@ from project_state import (  # type: ignore[import-not-found]
     PROMPT_READ_REFERENCE_MAP,
     TRANSITION_REGISTRY,
     TRANSITION_IDS,
+    _digest,
     validate_transition_registry,
     validate_scope_state,
 )
 from project_lanes import ProjectLaneCoordinator, ProjectLaneError  # type: ignore[import-not-found]
+from project_scopes import ProjectScopeError, ProjectScopeManager  # type: ignore[import-not-found]
 from recovery_state import RecoveryRegistry, RecoveryStateError  # type: ignore[import-not-found]
 
 
@@ -810,6 +813,181 @@ class ProjectLaneM2Tests(unittest.TestCase):
             1,
         )
 
+    def test_claimless_protected_waiter_replays_its_reservation(self) -> None:
+        protected = self.checkout / "protected-replay.py"
+        protected.write_text("user work\n", encoding="utf-8", newline="\n")
+        target = self.lanes / "protected-replay"
+        with self.assertRaisesRegex(ProjectLaneError, "after-lane-state"):
+            self.coordinator_for(fault="after-lane-state").create(
+                "protected-replay",
+                "M2",
+                target,
+                ["protected-replay.py"],
+            )
+        interrupted = next(
+            lane
+            for lane in self.store.read_lanes(self.anchor)["lanes"]
+            if lane["lane_id"] == "protected-replay"
+        )
+        self.assertEqual(interrupted["state"], "waiting-for-scope")
+        self.assertEqual(
+            [
+                record
+                for record in self.store.read_scopes(self.anchor)["scopes"]
+                if record.get("owner") == "protected-replay"
+            ],
+            [],
+        )
+        newer = self.coordinator_for().create(
+            "protected-newer",
+            "M2",
+            self.lanes / "protected-newer",
+            ["protected-replay.py"],
+        )
+        self.assertEqual(newer["state"], "waiting-for-scope")
+
+        resumed = self.coordinator_for().create(
+            "protected-replay",
+            "M2",
+            target,
+            ["protected-replay.py"],
+        )
+        self.assertEqual(resumed["state"], "waiting-for-scope")
+        self.assertEqual(
+            [
+                (record["path"], record["status"])
+                for record in self.store.read_scopes(self.anchor)["scopes"]
+                if record.get("owner") == "protected-replay"
+            ],
+            [("protected-replay.py", "waiting")],
+        )
+        claims = self.store.read_scopes(self.anchor)["scopes"]
+        older_claim = next(
+            record
+            for record in claims
+            if record.get("owner") == "protected-replay"
+        )
+        newer_claim = next(
+            record
+            for record in claims
+            if record.get("owner") == "protected-newer"
+        )
+        self.assertLess(older_claim["sequence"], newer_claim["sequence"])
+
+    def test_generic_sink_rejects_forged_protected_adoption(self) -> None:
+        protected = self.checkout / "sink-adoption.txt"
+        protected.write_text("adopt me\n", encoding="utf-8", newline="\n")
+        coordinator = self.coordinator_for()
+        coordinator.create(
+            "sink-adoption-waiter",
+            "M2",
+            self.lanes / "sink-adoption-waiter",
+            ["sink-adoption.txt"],
+        )
+        action = "1" * 64
+        plan = "2" * 64
+        protected_state = self.store.read_state(self.anchor)["state"]
+        forged_intent_scopes = [
+            dict(scope) for scope in protected_state["scopes"]
+        ]
+        forged_intent = next(
+            scope
+            for scope in forged_intent_scopes
+            if scope.get("path") == "sink-adoption.txt"
+            and scope.get("kind") == "protected-user-work"
+        )
+        forged_intent["adoption"] = "adoption-intent"
+        forged_intent["adoption_intent"] = {
+            "user_action_digest": action,
+            "plan_digest": plan,
+            "provenance": forged_intent["provenance"],
+            "intent_generation": protected_state["generation"],
+        }
+        with self.assertRaisesRegex(
+            ProjectStateError,
+            "purpose-specific protected adoption",
+        ):
+            self.store.replace_lane_state(
+                self.anchor,
+                expected_generation=protected_state["generation"],
+                lanes=protected_state["lanes"],
+                scopes=forged_intent_scopes,
+            )
+        coordinator.begin_protected_user_work_adoption(
+            ["sink-adoption.txt"],
+            user_action_digest=action,
+            plan_digest=plan,
+        )
+        integration = self.lanes / "sink-adoption-integration"
+        self.git(
+            "worktree",
+            "add",
+            "-b",
+            "sink-adoption-integration",
+            str(integration),
+        )
+        (integration / "sink-adoption.txt").write_bytes(protected.read_bytes())
+        self.git("add", "sink-adoption.txt", cwd=integration)
+        self.git("commit", "-m", "accept protected sink fixture", cwd=integration)
+        integrated_commit = self.git_output(
+            "rev-parse",
+            "HEAD",
+            cwd=integration,
+        ).decode().strip()
+        self.git("update-ref", self.integration_ref, integrated_commit)
+        receipt = coordinator.build_protected_user_work_acceptance_receipt(
+            ["sink-adoption.txt"],
+            user_action_digest=action,
+            plan_digest=plan,
+            integrated_commit=integrated_commit,
+        )
+
+        state = self.store.read_state(self.anchor)["state"]
+        forged_scopes = [dict(scope) for scope in state["scopes"]]
+        forged = next(
+            scope
+            for scope in forged_scopes
+            if scope.get("path") == "sink-adoption.txt"
+            and scope.get("kind") == "protected-user-work"
+        )
+        forged["adoption"] = "adopted"
+        forged["owner"] = "integration"
+        forged["adoption_acceptance"] = {
+            "user_action_digest": action,
+            "plan_digest": plan,
+            "integrated_commit": integrated_commit,
+            "integration_receipt_digest": receipt["digest"],
+            "receipt": receipt,
+        }
+        forged.pop("adoption_intent")
+        with self.assertRaisesRegex(
+            ProjectStateError,
+            "purpose-specific protected adoption",
+        ):
+            self.store.replace_lane_state(
+                self.anchor,
+                expected_generation=state["generation"],
+                lanes=state["lanes"],
+                scopes=forged_scopes,
+            )
+        unchanged = self.store.read_state(self.anchor)["state"]
+        self.assertEqual(unchanged["generation"], state["generation"])
+        self.assertEqual(
+            next(
+                scope["adoption"]
+                for scope in unchanged["scopes"]
+                if scope.get("path") == "sink-adoption.txt"
+            ),
+            "adoption-intent",
+        )
+        adopted = coordinator.finalize_protected_user_work_adoption(
+            ["sink-adoption.txt"],
+            user_action_digest=action,
+            plan_digest=plan,
+            integration_receipt=receipt,
+        )
+        self.assertEqual(adopted[0]["adoption"], "adopted")
+
     def test_simultaneous_lane_resume_and_writer_attach_converge(self) -> None:
         target = self.lanes / "concurrent"
         with self.assertRaisesRegex(ProjectLaneError, "after-lane-state"):
@@ -1016,13 +1194,34 @@ class ProjectLaneM2Tests(unittest.TestCase):
             ),
             adopted,
         )
-        independent = coordinator.create(
-            "post-adoption",
+        (integration / "follow-up.txt").write_text(
+            "accepted follow-up\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        self.git("add", "follow-up.txt", cwd=integration)
+        self.git("commit", "-m", "accepted integration follow-up", cwd=integration)
+        accepted_tip = self.git_output(
+            "rev-parse",
+            "HEAD",
+            cwd=integration,
+        ).decode().strip()
+        self.git("update-ref", self.integration_ref, accepted_tip)
+        resumed = coordinator.create(
+            "adopt-waiter",
             "M2",
-            self.lanes / "post-adoption",
+            self.lanes / "adopt-waiter",
             ["adopt.txt"],
         )
-        self.assertEqual(independent["state"], "ready")
+        self.assertEqual(resumed["state"], "ready")
+        self.assertEqual(
+            self.git_output(
+                "rev-parse",
+                "HEAD",
+                cwd=Path(resumed["worktree"]),
+            ).decode().strip(),
+            accepted_tip,
+        )
 
         state_path = self.coordinator / "states" / f"{self.anchor}.json"
         tampered = json.loads(state_path.read_text(encoding="utf-8"))
@@ -1372,6 +1571,1092 @@ class ProjectLaneM2Tests(unittest.TestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         ).stdout
+
+
+class ProjectScopeM3Tests(unittest.TestCase):
+    """R-031 M3 scope-resource lease policy at the project owner layer."""
+
+    def setUp(self) -> None:
+        self.temp_root = Path(__file__).resolve().parents[1] / ".tmp"
+        self.temp_root.mkdir(exist_ok=True)
+        self.temp = self.temp_root / f"openbuild-project-scopes-{next(tempfile._get_candidate_names())}"
+        self.temp.mkdir()
+        self.checkout = self.temp / "checkout"
+        self.checkout.mkdir(parents=True)
+        self.git("init")
+        self.git("config", "user.email", "test@example.invalid")
+        self.git("config", "user.name", "Test")
+        (self.checkout / "base.txt").write_text("base\n", encoding="utf-8")
+        self.git("add", "base.txt")
+        self.git("commit", "-m", "base")
+        self.integration_ref = "refs/openbuild/integration"
+        self.git("update-ref", self.integration_ref, "HEAD")
+        self.coordinator_root = self.temp / "coordinator"
+        self.recovery = self.temp / "recovery"
+        self.lanes = self.temp / "lanes"
+        self.lanes.mkdir()
+        self.store = ProjectStateStore(self.checkout, coordinator_root=self.coordinator_root)
+        capability = self.store.issue_bootstrap_capability("plan", "attempt")["bootstrap_capability"]
+        self.anchor = self.store.create_anchor(capability, "plan", "attempt")["anchor_id"]
+        self.store.bootstrap(self.anchor, "clean")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.temp, ignore_errors=True)
+
+    def git(self, *args: str, cwd: Path | None = None) -> None:
+        subprocess.run(
+            ["git", *args],
+            cwd=cwd or self.checkout,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+    def lanes_coordinator(self) -> ProjectLaneCoordinator:
+        return ProjectLaneCoordinator(
+            self.checkout,
+            self.store,
+            self.anchor,
+            recovery_root=self.recovery,
+            lane_root=self.lanes,
+            integration_ref=self.integration_ref,
+        )
+
+    def scopes(self) -> ProjectScopeManager:
+        return ProjectScopeManager(self.store, self.anchor, checkout=self.checkout)
+
+    def create(self, lane_id: str, scopes: list[object]) -> dict[str, object]:
+        return self.lanes_coordinator().create(
+            lane_id,
+            "M3",
+            self.lanes / lane_id,
+            scopes,  # type: ignore[arg-type]
+        )
+
+    def scope_records(self, owner: str) -> list[dict[str, object]]:
+        return [
+            item
+            for item in self.store.read_scopes(self.anchor)["scopes"]
+            if item.get("owner") == owner
+        ]
+
+    def mark_waiting_for_integration(self, lane_id: str) -> dict[str, object]:
+        state = self.store.read_state(self.anchor)["state"]
+        lanes = list(state["lanes"])
+        lane = next(item for item in lanes if item["lane_id"] == lane_id)
+        lane["state"] = "waiting-for-integration"
+        lane["writer"] = {
+            "lease_id": f"{lane_id}-writer",
+            "run_id": f"{lane_id}-run",
+            "allowed_set_digest": "c" * 64,
+            "lease_kind": "normal-contained",
+        }
+        lane["terminal_evidence"] = "d" * 64
+        self.store.replace_lane_state(
+            self.anchor,
+            expected_generation=state["generation"],
+            lanes=lanes,
+            scopes=state["scopes"],
+        )
+        return lane
+
+    def integration_release_receipt(
+        self,
+        lane: dict[str, object],
+    ) -> dict[str, object]:
+        receipt: dict[str, object] = {
+            "schema": "project-scope-release-v1",
+            "kind": "coherent-integration",
+            "lane_id": lane["lane_id"],
+            "admitted_base": lane["base"],
+            "accepted_commit": lane["base"],
+            "terminal_evidence": lane["terminal_evidence"],
+            "writer_binding_digest": _digest(lane["writer"]),
+            "validation_evidence": "e" * 64,
+        }
+        receipt["digest"] = _digest(receipt)
+        return receipt
+
+    def test_double_claim_and_case_ancestor_aliases_wait_without_worktree_activation(self) -> None:
+        first = self.create("first", ["Src"])
+        alias = self.create("alias", ["src/File.py"])
+        duplicate = self.create("duplicate", ["SRC"])
+        self.assertEqual(first["state"], "ready")
+        self.assertEqual((alias["state"], duplicate["state"]), ("waiting-for-scope", "waiting-for-scope"))
+        self.assertFalse((self.lanes / "alias").exists())
+        self.assertEqual(
+            [record["status"] for record in self.scope_records("first")],
+            ["active"],
+        )
+        self.assertEqual(
+            [record["status"] for record in self.scope_records("alias")],
+            ["waiting"],
+        )
+
+    def test_concurrent_double_claim_retries_generation_cas_to_owner_and_waiter(self) -> None:
+        first = self.lanes_coordinator()
+        second = self.lanes_coordinator()
+        original = self.store.replace_lane_state
+        barrier = threading.Barrier(2)
+        counter_lock = threading.Lock()
+        publish_count = 0
+
+        def synchronized_publish(*args: object, **kwargs: object) -> dict[str, object]:
+            nonlocal publish_count
+            with counter_lock:
+                publish_count += 1
+                ordinal = publish_count
+            if ordinal <= 2:
+                barrier.wait(timeout=10)
+            return original(*args, **kwargs)
+
+        def create_lane(
+            coordinator: ProjectLaneCoordinator,
+            lane_id: str,
+        ) -> dict[str, object]:
+            return coordinator.create(
+                lane_id,
+                "M3",
+                self.lanes / lane_id,
+                ["shared.py"],
+            )
+
+        with mock.patch.object(
+            self.store,
+            "replace_lane_state",
+            side_effect=synchronized_publish,
+        ):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [
+                    pool.submit(create_lane, first, "concurrent-first"),
+                    pool.submit(create_lane, second, "concurrent-second"),
+                ]
+                lanes = [future.result(timeout=30) for future in futures]
+
+        self.assertEqual(
+            sorted(lane["state"] for lane in lanes),
+            ["ready", "waiting-for-scope"],
+        )
+        claims = [
+            item
+            for item in self.store.read_scopes(self.anchor)["scopes"]
+            if item.get("path") == "shared.py"
+        ]
+        self.assertEqual(
+            sorted(item["status"] for item in claims),
+            ["active", "waiting"],
+        )
+
+    def test_claimless_alpha2_running_lane_migrates_before_new_overlap(self) -> None:
+        coordinator = self.lanes_coordinator()
+        legacy_worktree = self.lanes / "legacy-running"
+        self.git(
+            "worktree",
+            "add",
+            "-b",
+            "openbuild/lanes/legacy-running",
+            str(legacy_worktree),
+        )
+        state = self.store.read_state(self.anchor)["state"]
+        writer = {
+            "lease_id": "legacy-lease",
+            "run_id": "legacy-run",
+            "allowed_set_digest": "9" * 64,
+            "lease_kind": "normal-contained",
+        }
+        legacy_lane = {
+            "lane_id": "legacy-running",
+            "milestone": "M2",
+            "reader_floor": "2.3.6",
+            "common": coordinator.common,
+            "base": coordinator.base,
+            "branch": "refs/heads/openbuild/lanes/legacy-running",
+            "worktree": str(legacy_worktree),
+            "scopes": ["shared.py"],
+            "state": "running",
+            "writer": writer,
+        }
+        self.store.replace_lane_state(
+            self.anchor,
+            expected_generation=state["generation"],
+            lanes=[legacy_lane],
+            scopes=state["scopes"],
+        )
+        admitted = self.store.read_state(self.anchor)["state"]
+        forged = dict(legacy_lane)
+        forged["scope_schema"] = "project-scopes-v1"
+        forged["scope_requests"] = [
+            {"kind": "directory", "path": "shared.py", "mode": "hard"}
+        ]
+        forged["scope_enqueue_sequence"] = admitted["generation"] + 1
+        with self.assertRaisesRegex(
+            ProjectStateError,
+            "migration requires explicit project claims",
+        ):
+            self.store.replace_lane_state(
+                self.anchor,
+                expected_generation=admitted["generation"],
+                lanes=[forged],
+                scopes=admitted["scopes"],
+            )
+        waiting = self.create("new-overlap", ["shared.py"])
+        self.assertEqual(waiting["state"], "waiting-for-scope")
+        claims = self.store.read_scopes(self.anchor)["scopes"]
+        self.assertEqual(
+            [
+                (item["owner"], item["status"])
+                for item in claims
+                if item.get("path") == "shared.py"
+            ],
+            [
+                ("legacy-running", "active"),
+                ("new-overlap", "waiting"),
+            ],
+        )
+        binding = self.lanes_coordinator().runner_writer_binding(
+            "legacy-running",
+            legacy_worktree,
+            ["shared.py"],
+            require_ready=False,
+        )
+        self.assertEqual(binding["allowed_paths"], ["shared.py"])
+
+    def test_overlapping_live_alpha2_lanes_fail_closed_before_migration(self) -> None:
+        coordinator = self.lanes_coordinator()
+        state = self.store.read_state(self.anchor)["state"]
+        lanes = []
+        for lane_id in ("legacy-live-a", "legacy-live-b"):
+            lanes.append(
+                {
+                    "lane_id": lane_id,
+                    "milestone": "M2",
+                    "reader_floor": "2.3.6",
+                    "common": coordinator.common,
+                    "base": coordinator.base,
+                    "branch": f"refs/heads/openbuild/lanes/{lane_id}",
+                    "worktree": str(self.lanes / lane_id),
+                    "scopes": ["shared.py"],
+                    "state": "running",
+                    "writer": {
+                        "lease_id": f"{lane_id}-lease",
+                        "run_id": f"{lane_id}-run",
+                        "allowed_set_digest": "8" * 64,
+                        "lease_kind": "normal-contained",
+                    },
+                }
+            )
+        self.store.replace_lane_state(
+            self.anchor,
+            expected_generation=state["generation"],
+            lanes=lanes,
+            scopes=state["scopes"],
+        )
+        before = self.store.read_state(self.anchor)["state"]
+        with self.assertRaisesRegex(
+            ProjectScopeError,
+            "overlapping live legacy lanes",
+        ):
+            self.scopes().migrate_legacy_claims()
+        after = self.store.read_state(self.anchor)["state"]
+        self.assertEqual(after["generation"], before["generation"])
+        self.assertEqual(after["scopes"], before["scopes"])
+
+    def test_real_admission_rejects_overlapping_live_alpha2_before_mutation(self) -> None:
+        coordinator = self.lanes_coordinator()
+        lanes = []
+        for lane_id in ("legacy-admission-a", "legacy-admission-b"):
+            worktree = self.lanes / lane_id
+            self.git(
+                "worktree",
+                "add",
+                "-b",
+                f"openbuild/lanes/{lane_id}",
+                str(worktree),
+            )
+            lanes.append(
+                {
+                    "lane_id": lane_id,
+                    "milestone": "M2",
+                    "reader_floor": "2.3.6",
+                    "common": coordinator.common,
+                    "base": coordinator.base,
+                    "branch": f"refs/heads/openbuild/lanes/{lane_id}",
+                    "worktree": str(worktree),
+                    "scopes": ["shared.py"],
+                    "state": "running",
+                    "writer": {
+                        "lease_id": f"{lane_id}-lease",
+                        "run_id": f"{lane_id}-run",
+                        "allowed_set_digest": "6" * 64,
+                        "lease_kind": "normal-contained",
+                    },
+                }
+            )
+        state = self.store.read_state(self.anchor)["state"]
+        self.store.replace_lane_state(
+            self.anchor,
+            expected_generation=state["generation"],
+            lanes=lanes,
+            scopes=state["scopes"],
+        )
+        before = self.store.read_state(self.anchor)["state"]
+        with self.assertRaisesRegex(
+            ProjectLaneError,
+            "overlapping live legacy lanes",
+        ):
+            coordinator.create(
+                "fresh-after-legacy",
+                "M3",
+                self.lanes / "fresh-after-legacy",
+                ["fresh.py"],
+            )
+        after = self.store.read_state(self.anchor)["state"]
+        self.assertEqual(after["generation"], before["generation"])
+        self.assertEqual(after["lanes"], before["lanes"])
+
+    def test_existing_waiter_preflights_live_alpha2_before_base_refresh(self) -> None:
+        protected = self.checkout / "waiter.py"
+        protected.write_text("protected\n", encoding="utf-8", newline="\n")
+        coordinator = self.lanes_coordinator()
+        waiter = coordinator.create(
+            "legacy-refresh-waiter",
+            "M3",
+            self.lanes / "legacy-refresh-waiter",
+            ["waiter.py"],
+        )
+        self.assertEqual(waiter["state"], "waiting-for-scope")
+
+        action = "4" * 64
+        plan = "5" * 64
+        coordinator.begin_protected_user_work_adoption(
+            ["waiter.py"],
+            user_action_digest=action,
+            plan_digest=plan,
+        )
+        integration = self.lanes / "legacy-refresh-integration"
+        self.git(
+            "worktree",
+            "add",
+            "-b",
+            "legacy-refresh-integration",
+            str(integration),
+        )
+        (integration / "waiter.py").write_bytes(protected.read_bytes())
+        self.git("add", "waiter.py", cwd=integration)
+        self.git("commit", "-m", "accept waiter", cwd=integration)
+        accepted = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=integration,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ).stdout.decode().strip()
+        self.git("update-ref", self.integration_ref, accepted)
+        receipt = coordinator.build_protected_user_work_acceptance_receipt(
+            ["waiter.py"],
+            user_action_digest=action,
+            plan_digest=plan,
+            integrated_commit=accepted,
+        )
+        coordinator.finalize_protected_user_work_adoption(
+            ["waiter.py"],
+            user_action_digest=action,
+            plan_digest=plan,
+            integration_receipt=receipt,
+        )
+
+        state = self.store.read_state(self.anchor)["state"]
+        legacy_lanes = []
+        for lane_id in ("legacy-refresh-a", "legacy-refresh-b"):
+            worktree = self.lanes / lane_id
+            self.git(
+                "worktree",
+                "add",
+                "-b",
+                f"openbuild/lanes/{lane_id}",
+                str(worktree),
+            )
+            legacy_lanes.append(
+                {
+                    "lane_id": lane_id,
+                    "milestone": "M2",
+                    "reader_floor": "2.3.6",
+                    "common": coordinator.common,
+                    "base": waiter["base"],
+                    "branch": f"refs/heads/openbuild/lanes/{lane_id}",
+                    "worktree": str(worktree),
+                    "scopes": ["shared-legacy.py"],
+                    "state": "running",
+                    "writer": {
+                        "lease_id": f"{lane_id}-lease",
+                        "run_id": f"{lane_id}-run",
+                        "allowed_set_digest": "7" * 64,
+                        "lease_kind": "normal-contained",
+                    },
+                }
+            )
+        self.store.replace_lane_state(
+            self.anchor,
+            expected_generation=state["generation"],
+            lanes=[*state["lanes"], *legacy_lanes],
+            scopes=state["scopes"],
+        )
+        before = self.store.read_state(self.anchor)["state"]
+        with self.assertRaisesRegex(
+            ProjectLaneError,
+            "overlapping live legacy lanes",
+        ):
+            coordinator.create(
+                "legacy-refresh-waiter",
+                "M3",
+                self.lanes / "legacy-refresh-waiter",
+                ["waiter.py"],
+            )
+        after = self.store.read_state(self.anchor)["state"]
+        self.assertEqual(after["generation"], before["generation"])
+        current_waiter = next(
+            lane
+            for lane in after["lanes"]
+            if lane["lane_id"] == "legacy-refresh-waiter"
+        )
+        self.assertEqual(current_waiter["base"], waiter["base"])
+        self.assertFalse((self.lanes / "fresh-after-legacy").exists())
+
+    def test_legacy_migration_revalidates_paths_before_active_claims(self) -> None:
+        coordinator = self.lanes_coordinator()
+        state = self.store.read_state(self.anchor)["state"]
+        legacy = {
+            "lane_id": "legacy-alias",
+            "milestone": "M2",
+            "reader_floor": "2.3.6",
+            "common": coordinator.common,
+            "base": coordinator.base,
+            "branch": "refs/heads/openbuild/lanes/legacy-alias",
+            "worktree": str(self.lanes / "legacy-alias"),
+            "scopes": ["alias.py"],
+            "state": "ready",
+            "writer": None,
+        }
+        self.store.replace_lane_state(
+            self.anchor,
+            expected_generation=state["generation"],
+            lanes=[legacy],
+            scopes=state["scopes"],
+        )
+        manager = self.scopes()
+        before = self.store.read_state(self.anchor)["state"]
+        with mock.patch.object(
+            manager,
+            "_assert_real_path",
+            side_effect=ProjectScopeError(
+                "scope target is a link or reparse point"
+            ),
+        ), self.assertRaisesRegex(ProjectScopeError, "link or reparse"):
+            manager.migrate_legacy_claims()
+        after = self.store.read_state(self.anchor)["state"]
+        self.assertEqual(after["generation"], before["generation"])
+        self.assertEqual(after["scopes"], before["scopes"])
+
+    def test_migrated_waiter_ticket_precedes_lexically_earlier_new_lane(self) -> None:
+        coordinator = self.lanes_coordinator()
+        state = self.store.read_state(self.anchor)["state"]
+        legacy_lanes = [
+            {
+                "lane_id": lane_id,
+                "milestone": "M2",
+                "reader_floor": "2.3.6",
+                "common": coordinator.common,
+                "base": coordinator.base,
+                "branch": f"refs/heads/openbuild/lanes/{lane_id}",
+                "worktree": str(self.lanes / lane_id),
+                "scopes": ["shared.py"],
+                "state": "ready",
+                "writer": None,
+            }
+            for lane_id in ("legacy-ticket-a", "legacy-ticket-b")
+        ]
+        self.store.replace_lane_state(
+            self.anchor,
+            expected_generation=state["generation"],
+            lanes=legacy_lanes,
+            scopes=state["scopes"],
+        )
+        manager = self.scopes()
+        manager.migrate_legacy_claims()
+        migrated = self.store.read_state(self.anchor)["state"]
+        new_lane = {
+            "lane_id": "aaa-new",
+            "milestone": "M3",
+            "reader_floor": "2.3.6",
+            "common": coordinator.common,
+            "base": coordinator.base,
+            "branch": "refs/heads/openbuild/lanes/aaa-new",
+            "worktree": str(self.lanes / "aaa-new"),
+            "scopes": ["shared.py"],
+            "scope_schema": "project-scopes-v1",
+            "scope_requests": [
+                {"kind": "directory", "path": "shared.py", "mode": "hard"}
+            ],
+            "scope_enqueue_sequence": migrated["generation"] + 1,
+            "state": "creating",
+            "writer": None,
+        }
+        self.store.replace_lane_state(
+            self.anchor,
+            expected_generation=migrated["generation"],
+            lanes=[*migrated["lanes"], new_lane],
+            scopes=migrated["scopes"],
+        )
+        manager.reserve_planned("aaa-new", ["shared.py"])
+        claims = self.store.read_scopes(self.anchor)["scopes"]
+        migrated_waiter = next(
+            item for item in claims if item.get("owner") == "legacy-ticket-b"
+        )
+        new_waiter = next(
+            item for item in claims if item.get("owner") == "aaa-new"
+        )
+        self.assertLess(migrated_waiter["sequence"], new_waiter["sequence"])
+        waiters = [migrated_waiter, new_waiter]
+        self.assertTrue(
+            manager._group_is_eligible([migrated_waiter], waiters)
+        )
+        self.assertFalse(manager._group_is_eligible([new_waiter], waiters))
+
+    def test_contract_resource_collisions_and_soft_intents(self) -> None:
+        contract = {"kind": "contract", "path": "api/v1", "mode": "hard"}
+        resource = {"kind": "resource", "path": "postgres/main", "mode": "hard"}
+        self.assertEqual(self.create("contract-one", [contract])["state"], "ready")
+        self.assertEqual(self.create("contract-two", [contract])["state"], "waiting-for-scope")
+        self.assertEqual(self.create("resource-one", [resource])["state"], "ready")
+        self.assertEqual(self.create("resource-two", [resource])["state"], "waiting-for-scope")
+        self.assertEqual(
+            self.create(
+                "soft-intent",
+                [{"kind": "resource", "path": "redis/cache", "mode": "soft"}],
+            )["state"],
+            "ready",
+        )
+        self.assertEqual(
+            self.create(
+                "hard-after-soft",
+                [{"kind": "resource", "path": "redis/cache", "mode": "hard"}],
+            )["state"],
+            "ready",
+        )
+
+    def test_logical_scope_keys_ignore_filesystem_ancestors_and_dirty_paths(self) -> None:
+        (self.checkout / "api").write_text("not a directory\n", encoding="utf-8")
+        lane = self.create(
+            "logical-only",
+            [
+                {"kind": "contract", "path": "api/users", "mode": "hard"},
+                {"kind": "resource", "path": "api/users", "mode": "hard"},
+            ],
+        )
+        self.assertEqual(lane["state"], "ready")
+        self.assertEqual(
+            [
+                (item["kind"], item["status"])
+                for item in self.scope_records("logical-only")
+            ],
+            [("contract", "active"), ("resource", "active")],
+        )
+        protected = [
+            item
+            for item in self.store.read_scopes(self.anchor)["scopes"]
+            if item.get("kind") == "protected-user-work"
+        ]
+        self.assertEqual([item["path"] for item in protected], ["api"])
+
+    def test_protected_work_blocks_expansion_and_ready_legacy_migration(self) -> None:
+        (self.checkout / "protected.py").write_text(
+            "user work\n",
+            encoding="utf-8",
+        )
+        holder = self.create("protected-expander", ["owned.py"])
+        expansion = self.scopes().expand(
+            "protected-expander",
+            ["protected.py"],
+            pre_write=True,
+        )
+        self.assertEqual(expansion["status"], "waiting-for-scope")
+        self.assertEqual(
+            [
+                item["status"]
+                for item in self.scope_records("protected-expander")
+                if item["phase"] == "expansion"
+            ],
+            ["waiting"],
+        )
+        state = self.store.read_state(self.anchor)["state"]
+        coordinator = self.lanes_coordinator()
+        legacy = {
+            "lane_id": "legacy-protected",
+            "milestone": "M2",
+            "reader_floor": "2.3.6",
+            "common": coordinator.common,
+            "base": coordinator.base,
+            "branch": "refs/heads/openbuild/lanes/legacy-protected",
+            "worktree": str(self.lanes / "legacy-protected"),
+            "scopes": ["protected.py"],
+            "state": "ready",
+            "writer": None,
+        }
+        self.store.replace_lane_state(
+            self.anchor,
+            expected_generation=state["generation"],
+            lanes=[*state["lanes"], legacy],
+            scopes=state["scopes"],
+        )
+        self.scopes().migrate_legacy_claims()
+        migrated = self.store.read_state(self.anchor)["state"]
+        legacy_lane = next(
+            lane
+            for lane in migrated["lanes"]
+            if lane["lane_id"] == "legacy-protected"
+        )
+        self.assertEqual(legacy_lane["state"], "waiting-for-scope")
+        self.assertEqual(
+            [
+                item["status"]
+                for item in migrated["scopes"]
+                if item.get("owner") == "legacy-protected"
+            ],
+            ["waiting"],
+        )
+        self.assertTrue(Path(str(holder["worktree"])).is_dir())
+
+    def test_same_text_file_and_contract_keep_typed_replay_binding(self) -> None:
+        requests = [
+            {"kind": "file", "path": "shared-key", "mode": "hard"},
+            {"kind": "contract", "path": "shared-key", "mode": "hard"},
+        ]
+        lane = self.create("typed-same-text", requests)
+        self.assertEqual(lane["scopes"], ["shared-key"])
+        self.assertEqual(lane["scope_requests"], requests)
+        self.assertEqual(
+            [item["kind"] for item in self.scope_records("typed-same-text")],
+            ["file", "contract"],
+        )
+        with self.assertRaisesRegex(ProjectLaneError, "replay binding changed"):
+            self.create(
+                "typed-same-text",
+                [{"kind": "contract", "path": "shared-key", "mode": "hard"}],
+            )
+
+    def test_mixed_file_and_logical_scopes_attach_one_contained_writer(self) -> None:
+        lane = self.create(
+            "mixed-authority",
+            [
+                {"kind": "file", "path": "owned.py", "mode": "hard"},
+                {"kind": "contract", "path": "api/users", "mode": "hard"},
+                {"kind": "resource", "path": "postgres/main", "mode": "hard"},
+            ],
+        )
+        coordinator = self.lanes_coordinator()
+        binding = coordinator.runner_writer_binding(
+            "mixed-authority",
+            Path(str(lane["worktree"])),
+            ["owned.py"],
+            require_ready=True,
+        )
+        writer = {
+            "lease_id": "mixed-authority-lease",
+            "run_id": "mixed-authority-run",
+            "allowed_set_digest": "7" * 64,
+            "lease_kind": "normal-contained",
+        }
+        active_registry = mock.Mock()
+        active_registry.state.return_value = {
+            "lease": {
+                **writer,
+                "recovery_capable": True,
+                "state": "running",
+            },
+            "outbox": None,
+            "quarantine": None,
+            "history": [],
+        }
+        with mock.patch.object(
+            coordinator,
+            "_assert_legacy_vacancy",
+        ), mock.patch(
+            "project_lanes.RecoveryRegistry",
+            return_value=active_registry,
+        ):
+            attached = coordinator.attach_contained_writer(
+                "mixed-authority",
+                lease_id=writer["lease_id"],
+                run_id=writer["run_id"],
+                allowed_set_digest=writer["allowed_set_digest"],
+            )
+        self.assertEqual(binding["allowed_paths"], ["owned.py"])
+        self.assertEqual(attached["state"], "running")
+
+    def test_final_file_and_directory_links_are_rejected(self) -> None:
+        target_file = self.checkout / "target.txt"
+        target_file.write_text("target\n", encoding="utf-8")
+        target_directory = self.checkout / "target-directory"
+        target_directory.mkdir()
+        file_link = self.checkout / "file-link"
+        directory_link = self.checkout / "directory-link"
+        try:
+            os.symlink(target_file, file_link)
+            os.symlink(
+                target_directory,
+                directory_link,
+                target_is_directory=True,
+            )
+        except (NotImplementedError, OSError):
+            self.skipTest("final-component symlink creation is not permitted")
+        with self.assertRaisesRegex(ProjectScopeError, "link or reparse"):
+            self.scopes().normalize(
+                [{"kind": "file", "path": "file-link", "mode": "hard"}]
+            )
+        with self.assertRaisesRegex(ProjectScopeError, "link or reparse"):
+            self.scopes().normalize(
+                [
+                    {
+                        "kind": "directory",
+                        "path": "directory-link",
+                        "mode": "hard",
+                    }
+                ]
+            )
+
+    def test_oldest_eligible_waiter_policy_precedes_newer_waiter(self) -> None:
+        manager = self.scopes()
+        oldest = {
+            "kind": "file",
+            "path": "shared.py",
+            "mode": "hard",
+            "owner": "oldest",
+            "status": "waiting",
+            "sequence": 10,
+            "reservation": "oldest:planned:10",
+            "phase": "planned",
+        }
+        newest = {
+            **oldest,
+            "owner": "newest",
+            "sequence": 11,
+            "reservation": "newest:planned:11",
+        }
+        self.assertTrue(manager._group_is_eligible([oldest], [oldest, newest]))
+        self.assertFalse(manager._group_is_eligible([newest], [oldest, newest]))
+
+    def test_release_remains_fail_closed_without_integration_owner(self) -> None:
+        self.create("holder", ["shared.py"])
+        self.create("oldest", ["shared.py"])
+        self.create("newest", ["shared.py"])
+        holder = self.mark_waiting_for_integration("holder")
+        receipt = self.integration_release_receipt(holder)
+        with self.assertRaisesRegex(
+            ProjectScopeError,
+            "registry-resident integration-owner acceptance",
+        ):
+            self.scopes().release(
+                "holder",
+                acceptance=receipt,
+            )
+        self.assertEqual(
+            [record["status"] for record in self.scope_records("holder")],
+            ["active"],
+        )
+        self.assertEqual(
+            [record["status"] for record in self.scope_records("oldest")],
+            ["waiting"],
+        )
+
+    def test_durable_sink_rejects_caller_generated_release_without_mutation(self) -> None:
+        self.create("release-bypass", ["shared.py"])
+        self.mark_waiting_for_integration("release-bypass")
+        state = self.store.read_state(self.anchor)["state"]
+        for mutation in ("delete", "cancel", "reticket"):
+            with self.subTest(mutation=mutation):
+                scopes = [dict(item) for item in state["scopes"]]
+                if mutation == "delete":
+                    scopes = [
+                        item
+                        for item in scopes
+                        if item.get("owner") != "release-bypass"
+                    ]
+                elif mutation == "cancel":
+                    scope = next(
+                        item
+                        for item in scopes
+                        if item.get("owner") == "release-bypass"
+                    )
+                    scope["status"] = "cancelled"
+                else:
+                    scope = next(
+                        item
+                        for item in scopes
+                        if item.get("owner") == "release-bypass"
+                    )
+                    scope["reservation"] = "release-bypass:planned:forged"
+                with self.assertRaisesRegex(
+                    ProjectStateError,
+                    "release requires its owning lifecycle",
+                ):
+                    self.store.replace_lane_state(
+                        self.anchor,
+                        expected_generation=state["generation"],
+                        lanes=state["lanes"],
+                        scopes=scopes,
+                    )
+                reloaded = self.store.read_state(self.anchor)["state"]
+                self.assertEqual(reloaded["generation"], state["generation"])
+                self.assertEqual(
+                    [
+                        item["status"]
+                        for item in reloaded["scopes"]
+                        if item.get("owner") == "release-bypass"
+                    ],
+                    ["active"],
+                )
+
+    def test_prewrite_expansion_is_atomic_and_postwrite_expansion_is_rejected(self) -> None:
+        self.create("expand-one", ["one.py"])
+        self.create("expand-two", ["two.py"])
+        waiting = self.scopes().expand(
+            "expand-one",
+            ["two.py", "three.py"],
+            pre_write=True,
+        )
+        self.assertEqual(waiting["status"], "waiting-for-scope")
+        expansion = [
+            record
+            for record in self.scope_records("expand-one")
+            if record["phase"] == "expansion"
+        ]
+        self.assertEqual([record["status"] for record in expansion], ["waiting", "waiting"])
+        self.assertEqual(
+            [record["path"] for record in expansion],
+            ["three.py", "two.py"],
+        )
+        replayed = self.scopes().expand(
+            "expand-one",
+            ["two.py", "three.py"],
+            pre_write=True,
+        )
+        self.assertEqual(replayed["reservation"], waiting["reservation"])
+        replayed_lane = next(
+            item
+            for item in self.store.read_state(self.anchor)["state"]["lanes"]
+            if item["lane_id"] == "expand-one"
+        )
+        self.assertEqual(replayed_lane["state"], "waiting-for-scope")
+        self.assertEqual(replayed_lane["scope_wait_from"], "ready")
+        self.assertEqual(
+            len(
+                [
+                    record
+                    for record in self.scope_records("expand-one")
+                    if record["phase"] == "expansion"
+                ]
+            ),
+            2,
+        )
+        state = self.store.read_state(self.anchor)["state"]
+        lanes = list(state["lanes"])
+        lane = next(item for item in lanes if item["lane_id"] == "expand-one")
+        lane["state"] = "running"
+        lane.pop("scope_wait_from")
+        lane["writer"] = {
+            "lease_id": "expand-one-writer",
+            "run_id": "expand-one-run",
+            "allowed_set_digest": "a" * 64,
+            "lease_kind": "normal-contained",
+        }
+        self.store.replace_lane_state(
+            self.anchor,
+            expected_generation=state["generation"],
+            lanes=lanes,
+            scopes=state["scopes"],
+        )
+        with self.assertRaisesRegex(ProjectScopeError, "post-write"):
+            self.scopes().expand("expand-one", ["four.py"], pre_write=False)
+
+    def test_successful_prestart_expansion_enters_fresh_runner_binding(self) -> None:
+        lane = self.create("expand-granted", ["original.py"])
+        expanded = self.scopes().expand(
+            "expand-granted",
+            [{"kind": "file", "path": "added.py", "mode": "hard"}],
+            pre_write=True,
+        )
+        self.assertEqual(expanded["status"], "active")
+        binding = self.lanes_coordinator().runner_writer_binding(
+            "expand-granted",
+            Path(str(lane["worktree"])),
+            ["added.py"],
+            require_ready=True,
+        )
+        self.assertEqual(binding["allowed_paths"], ["added.py"])
+        with self.assertRaisesRegex(ProjectLaneError, "escapes active"):
+            self.lanes_coordinator().runner_writer_binding(
+                "expand-granted",
+                Path(str(lane["worktree"])),
+                ["added.py/child"],
+                require_ready=True,
+            )
+
+    def test_live_prewrite_expansion_fails_closed_until_runner_bridge(self) -> None:
+        self.create("live-expand", ["one.py"])
+        self.create("live-blocker", ["two.py"])
+        state = self.store.read_state(self.anchor)["state"]
+        lanes = list(state["lanes"])
+        lane = next(item for item in lanes if item["lane_id"] == "live-expand")
+        lane["state"] = "running"
+        lane["writer"] = {
+            "lease_id": "live-expand-writer",
+            "run_id": "live-expand-run",
+            "allowed_set_digest": "f" * 64,
+            "lease_kind": "normal-contained",
+        }
+        self.store.replace_lane_state(
+            self.anchor,
+            expected_generation=state["generation"],
+            lanes=lanes,
+            scopes=state["scopes"],
+        )
+        with self.assertRaisesRegex(ProjectScopeError, "post-write"):
+            self.scopes().expand(
+                "live-expand",
+                ["two.py", "three.py"],
+                pre_write=True,
+            )
+        state = self.store.read_state(self.anchor)["state"]
+        lane = next(item for item in state["lanes"] if item["lane_id"] == "live-expand")
+        self.assertNotIn("safe_stop", lane)
+        claims = self.scope_records("live-expand")
+        self.assertEqual(
+            [(claim["path"], claim["status"]) for claim in claims],
+            [("one.py", "active")],
+        )
+
+    def test_cycle_cancels_newer_cycle_edge_not_unrelated_newer_wait(self) -> None:
+        self.create("cycle-a", ["a.py"])
+        self.create("cycle-b", ["b.py"])
+        self.create("outside", ["c.py"])
+        self.assertEqual(
+            self.scopes().expand("cycle-a", ["b.py"], pre_write=True)["status"],
+            "waiting-for-scope",
+        )
+        state = self.store.read_state(self.anchor)["state"]
+        lanes = list(state["lanes"])
+        injected = {
+            "kind": "file",
+            "path": "a.py",
+            "mode": "hard",
+            "owner": "cycle-b",
+            "status": "waiting",
+            "sequence": state["generation"] + 1,
+            "reservation": "cycle-b:expansion:injected",
+            "phase": "expansion",
+        }
+        unrelated = {
+            "kind": "file",
+            "path": "c.py",
+            "mode": "hard",
+            "owner": "cycle-b",
+            "status": "waiting",
+            "sequence": state["generation"] + 2,
+            "reservation": "cycle-b:expansion:unrelated",
+            "phase": "expansion",
+        }
+        self.store.replace_lane_state(
+            self.anchor,
+            expected_generation=state["generation"],
+            lanes=lanes,
+            scopes=[*state["scopes"], injected, unrelated],
+        )
+        result = self.scopes().resolve_wait_cycles()
+        self.assertEqual(result["cancelled"], ["cycle-b:expansion:injected"])
+        cancelled = [
+            record
+            for record in self.scope_records("cycle-b")
+            if record["reservation"] in {
+                "cycle-b:expansion:injected",
+                "cycle-b:expansion:unrelated",
+            }
+        ]
+        self.assertEqual(
+            [(record["reservation"], record["status"]) for record in cancelled],
+            [
+                ("cycle-b:expansion:injected", "cancelled"),
+                ("cycle-b:expansion:unrelated", "waiting"),
+            ],
+        )
+
+    def test_two_inactive_expansions_cancel_victim_edge_and_leave_progress(self) -> None:
+        self.create("cycle-progress-a", ["a.py"])
+        second = self.create("cycle-progress-b", ["b.py"])
+        self.assertEqual(
+            self.scopes().expand(
+                "cycle-progress-a",
+                ["b.py"],
+                pre_write=True,
+            )["status"],
+            "waiting-for-scope",
+        )
+        victim = self.scopes().expand(
+            "cycle-progress-b",
+            ["a.py"],
+            pre_write=True,
+        )
+        self.assertEqual(victim["status"], "cancelled")
+        state = self.store.read_state(self.anchor)["state"]
+        lanes = {lane["lane_id"]: lane for lane in state["lanes"]}
+        self.assertEqual(lanes["cycle-progress-a"]["state"], "waiting-for-scope")
+        self.assertEqual(lanes["cycle-progress-b"]["state"], "ready")
+        self.assertEqual(self.scopes()._cycle_nodes(self.scopes()._wait_edges(state["scopes"])), [])
+        binding = self.lanes_coordinator().runner_writer_binding(
+            "cycle-progress-b",
+            Path(str(second["worktree"])),
+            ["b.py"],
+            require_ready=True,
+        )
+        self.assertEqual(binding["allowed_paths"], ["b.py"])
+
+    def test_live_cycle_fails_closed_without_runner_safe_stop_bridge(self) -> None:
+        self.create("cycle-live-a", ["a.py"])
+        self.create("cycle-live-b", ["b.py"])
+        self.scopes().expand("cycle-live-a", ["b.py"], pre_write=True)
+        state = self.store.read_state(self.anchor)["state"]
+        lanes = list(state["lanes"])
+        victim = next(item for item in lanes if item["lane_id"] == "cycle-live-b")
+        victim["state"] = "running"
+        victim["writer"] = {
+            "lease_id": "cycle-live-b-writer",
+            "run_id": "cycle-live-b-run",
+            "allowed_set_digest": "b" * 64,
+            "lease_kind": "normal-contained",
+        }
+        injected = {
+            "kind": "file",
+            "path": "a.py",
+            "mode": "hard",
+            "owner": "cycle-live-b",
+            "status": "waiting",
+            "sequence": state["generation"] + 1,
+            "reservation": "cycle-live-b:expansion:injected",
+            "phase": "expansion",
+        }
+        self.store.replace_lane_state(
+            self.anchor,
+            expected_generation=state["generation"],
+            lanes=lanes,
+            scopes=[*state["scopes"], injected],
+        )
+        with self.assertRaisesRegex(ProjectScopeError, "runner safe-stop bridge"):
+            self.scopes().resolve_wait_cycles()
+        claims = [
+            record
+            for record in self.scope_records("cycle-live-b")
+            if record["reservation"] == "cycle-live-b:expansion:injected"
+        ]
+        self.assertEqual([record["status"] for record in claims], ["waiting"])
 
 
 if __name__ == "__main__":

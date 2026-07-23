@@ -25,6 +25,7 @@ MODEL_MAP_RESOLVER = SKILL / "scripts" / "model_map.py"
 DISCOVERY_CONTRACT = SKILL / "scripts" / "discovery_contract.py"
 PROJECT_STATE = SKILL / "scripts" / "project_state.py"
 PROJECT_LANES = SKILL / "scripts" / "project_lanes.py"
+PROJECT_SCOPES = SKILL / "scripts" / "project_scopes.py"
 PACKAGED_MODEL_MAP = SKILL / "profiles" / "openbuild_model_map.toml"
 MODEL_MAP_INTERVIEW = SKILL / "references" / "model-map-interview.md"
 PACKAGED_SEARCH_MODEL = "gpt-5.3-codex-spark"
@@ -99,6 +100,7 @@ REQUIRED = [
     DISCOVERY_CONTRACT,
     PROJECT_STATE,
     PROJECT_LANES,
+    PROJECT_SCOPES,
     PACKAGED_MODEL_MAP,
     *PACKAGED_AGENT_PROFILES.values(),
     SKILL / "references" / "tdd-workflow.md",
@@ -4726,6 +4728,7 @@ def validate_safe_artifact_reader_contract(
 def validate_project_lane_runner_bridge(
     runner_text: str,
     project_lanes_text: str,
+    project_scopes_text: str,
 ) -> list[str]:
     errors: list[str] = []
     runner_contract = [
@@ -4765,10 +4768,6 @@ def validate_project_lane_runner_bridge(
         ("class ProjectLaneCoordinator:", "project lane owner"),
         ("def runner_writer_binding(", "runner lane binding"),
         ("def verify_runner_writer_binding(", "runner lane binding replay"),
-        (
-            "runner allowed path escapes the lane hard scopes",
-            "runner allowed-set confinement",
-        ),
         ("def attach_contained_writer(", "contained writer attach"),
         ("def record_recovery_ready(", "lane recovery-ready transition"),
         ('"recovery-ready"', "recovery-ready lane state"),
@@ -4784,6 +4783,17 @@ def validate_project_lane_runner_bridge(
     for token, label in project_contract:
         if token not in project_lanes_text:
             errors.append(f"project_lanes.py: missing {label}")
+    for token, label in [
+        ("def migrate_legacy_claims(", "legacy lane scope migration"),
+        ("def assert_lane_authority(", "typed lane authority owner"),
+        ("def assert_write_authority(", "runner scope-authority owner"),
+        (
+            "runner allowed path escapes active file or directory scopes",
+            "runner allowed-set confinement",
+        ),
+    ]:
+        if token not in project_scopes_text:
+            errors.append(f"project_scopes.py: missing {label}")
     activation_start = runner_text.find("def activate_run(")
     activation_end = runner_text.find("\ndef dispatch_run(", activation_start)
     activation = (
@@ -5551,10 +5561,12 @@ def main() -> int:
     recovery_text = read_text(RECOVERY_STATE, errors)
     errors.extend(validate_recovery_control_plane(runner_text, recovery_text))
     project_lanes_text = read_text(PROJECT_LANES, errors)
+    project_scopes_text = read_text(PROJECT_SCOPES, errors)
     errors.extend(
         validate_project_lane_runner_bridge(
             runner_text,
             project_lanes_text,
+            project_scopes_text,
         )
     )
     for token in [

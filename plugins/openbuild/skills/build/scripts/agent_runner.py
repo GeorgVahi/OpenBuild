@@ -1360,10 +1360,14 @@ def resolve_project_lane_recovery_authorization(
             raise ProjectLaneError(
                 "project lane is not bound to this recovery checkpoint"
             )
+        allowed_paths = RecoveryRegistry(
+            repo,
+            state_root=Path(project_lane["recovery_root"]),
+        ).checkpoint_allowed_paths(checkpoint)
         project_lane["lane_binding"] = coordinator.runner_writer_binding(
             project_lane["lane_id"],
             repo,
-            lane["scopes"],
+            allowed_paths,
             require_ready=False,
             lease_kind="recovery-target",
         )

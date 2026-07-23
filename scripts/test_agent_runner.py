@@ -4451,6 +4451,186 @@ class CodexInvocationTests(unittest.TestCase):
             self.assertNotIn(str(ROOT), rendered)
             self.assertNotIn("authorize-recovery", rendered)
 
+    def test_project_lane_recovery_uses_checkpoint_files_not_logical_scopes(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="openbuild-runner-project-recovery-"
+        ) as temp:
+            root = Path(temp)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            subprocess.run(["git", "init", "--quiet"], cwd=checkout, check=True)
+            subprocess.run(
+                ["git", "config", "core.autocrlf", "false"],
+                cwd=checkout,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.email", "tests@example.invalid"],
+                cwd=checkout,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "Tests"],
+                cwd=checkout,
+                check=True,
+            )
+            (checkout / "base.txt").write_text(
+                "base\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            subprocess.run(["git", "add", "base.txt"], cwd=checkout, check=True)
+            subprocess.run(
+                ["git", "commit", "--quiet", "-m", "baseline"],
+                cwd=checkout,
+                check=True,
+            )
+            integration_ref = "refs/openbuild/integration"
+            subprocess.run(
+                ["git", "update-ref", integration_ref, "HEAD"],
+                cwd=checkout,
+                check=True,
+            )
+            coordinator_root = root / "coordinator"
+            recovery_root = root / "recovery"
+            lane_root = root / "lanes"
+            lane_root.mkdir()
+            store = ProjectStateStore(
+                checkout,
+                coordinator_root=coordinator_root,
+            )
+            capability = store.issue_bootstrap_capability(
+                "plan",
+                "attempt",
+            )["bootstrap_capability"]
+            anchor_id = store.create_anchor(
+                capability,
+                "plan",
+                "attempt",
+            )["anchor_id"]
+            store.bootstrap(anchor_id, "clean")
+            coordinator = ProjectLaneCoordinator(
+                checkout,
+                store,
+                anchor_id,
+                recovery_root=recovery_root,
+                lane_root=lane_root,
+                integration_ref=integration_ref,
+            )
+            lane = coordinator.create(
+                "mixed-recovery",
+                "M3",
+                lane_root / "mixed-recovery",
+                [
+                    {"kind": "file", "path": "owned.py", "mode": "hard"},
+                    {
+                        "kind": "contract",
+                        "path": "api/owned",
+                        "mode": "hard",
+                    },
+                    {
+                        "kind": "resource",
+                        "path": "database/owned",
+                        "mode": "hard",
+                    },
+                ],
+            )
+            registry = RecoveryRegistry(
+                Path(lane["worktree"]),
+                state_root=recovery_root,
+            )
+            preflight = registry.prepare_source_checkpoint(
+                source_id="mixed-recovery-source",
+                source_lease_id="mixed-recovery-contained",
+                source_milestone="M3",
+                target_milestone="M3-recovery",
+                allowed_paths=["owned.py"],
+                specification_revision="R-032",
+            )
+            checkpoint = registry.finalize_prepared_checkpoint(
+                preflight,
+                source_receipt_digest="a" * 64,
+            )
+            source_writer = {
+                "lease_id": "mixed-recovery-contained",
+                "run_id": "mixed-recovery-run",
+                "allowed_set_digest": preflight["allowed_set_digest"],
+                "lease_kind": "normal-contained",
+            }
+            active_registry = mock.Mock()
+            active_registry.state.return_value = {
+                "lease": {
+                    **source_writer,
+                    "recovery_capable": True,
+                    "state": "running",
+                },
+                "outbox": None,
+                "quarantine": None,
+                "history": [],
+            }
+            with mock.patch.object(
+                coordinator,
+                "_assert_legacy_vacancy",
+            ), mock.patch(
+                "project_lanes.RecoveryRegistry",
+                return_value=active_registry,
+            ):
+                coordinator.attach_contained_writer(
+                    "mixed-recovery",
+                    lease_id=source_writer["lease_id"],
+                    run_id=source_writer["run_id"],
+                    allowed_set_digest=source_writer["allowed_set_digest"],
+                )
+                coordinator.cancel_or_crash("mixed-recovery", "crashed")
+
+            release = {
+                "event": "contained-terminal-released",
+                "lease_id": source_writer["lease_id"],
+                "lease_kind": "normal-contained",
+                "allowed_set_digest": source_writer["allowed_set_digest"],
+                "terminal_success": False,
+                "semantic_disposition": None,
+                "handoff_digest": None,
+                "outbox_digest": None,
+                "archive_digest": "b" * 64,
+            }
+            vacant_registry = mock.Mock()
+            vacant_registry.state.return_value = {
+                "lease": None,
+                "outbox": None,
+                "quarantine": None,
+                "history": [release],
+            }
+            with mock.patch(
+                "project_lanes.RecoveryRegistry",
+                return_value=vacant_registry,
+            ):
+                coordinator.record_recovery_ready(
+                    "mixed-recovery",
+                    checkpoint["checkpoint_digest"],
+                )
+
+            args = Namespace(
+                project_lane_id="mixed-recovery",
+                project_checkout=str(checkout),
+                project_coordinator_root=str(coordinator_root),
+                project_anchor_id=anchor_id,
+                project_recovery_root=str(recovery_root),
+                project_lane_root=str(lane_root),
+                project_integration_ref=integration_ref,
+            )
+            project_lane = agent_runner.resolve_project_lane_recovery_authorization(
+                args,
+                repo=Path(lane["worktree"]),
+                checkpoint=checkpoint,
+            )
+            self.assertIsNotNone(project_lane)
+            assert project_lane is not None
+            self.assertEqual(
+                project_lane["lane_binding"]["allowed_paths"],
+                ["owned.py"],
+            )
+
     def test_project_lane_bridge_concurrently_attaches_two_real_registries(self) -> None:
         with tempfile.TemporaryDirectory(prefix="openbuild-runner-project-lanes-") as temp:
             root = Path(temp)

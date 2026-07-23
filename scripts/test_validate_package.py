@@ -18,6 +18,7 @@ from validate_package import (
     PACKAGED_SEARCH_INSTRUCTIONS,
     PACKAGED_SEARCH_MODEL,
     PROJECT_LANES,
+    PROJECT_SCOPES,
     PROJECT_STATE,
     REQUIRED,
     REVIEW_MAX_TIER_BY_RISK,
@@ -59,13 +60,16 @@ class ProjectLaneRunnerPackageTests(unittest.TestCase):
             SKILL / "scripts" / "agent_runner.py"
         ).read_text(encoding="utf-8")
         self.project_lanes = PROJECT_LANES.read_text(encoding="utf-8")
+        self.project_scopes = PROJECT_SCOPES.read_text(encoding="utf-8")
 
     def test_project_lane_owner_and_runner_bridge_are_packaged(self) -> None:
         self.assertIn(PROJECT_LANES, REQUIRED)
+        self.assertIn(PROJECT_SCOPES, REQUIRED)
         self.assertEqual(
             validate_project_lane_runner_bridge(
                 self.runner,
                 self.project_lanes,
+                self.project_scopes,
             ),
             [],
         )
@@ -79,6 +83,21 @@ class ProjectLaneRunnerPackageTests(unittest.TestCase):
                 for error in validate_project_lane_runner_bridge(
                     self.runner,
                     broken_owner,
+                    self.project_scopes,
+                )
+            )
+        )
+        broken_scopes = self.project_scopes.replace(
+            "def assert_write_authority(",
+            "def ignore_write_authority(",
+        )
+        self.assertTrue(
+            any(
+                "scope-authority owner" in error
+                for error in validate_project_lane_runner_bridge(
+                    self.runner,
+                    self.project_lanes,
+                    broken_scopes,
                 )
             )
         )
@@ -89,6 +108,7 @@ class ProjectLaneRunnerPackageTests(unittest.TestCase):
         errors = validate_project_lane_runner_bridge(
             late_attach,
             self.project_lanes,
+            self.project_scopes,
         )
         self.assertTrue(any("precede prompt release" in error for error in errors))
         missing_attach = self.runner.replace(
@@ -101,6 +121,7 @@ class ProjectLaneRunnerPackageTests(unittest.TestCase):
                 for error in validate_project_lane_runner_bridge(
                     missing_attach,
                     self.project_lanes,
+                    self.project_scopes,
                 )
             )
         )
@@ -114,6 +135,7 @@ class ProjectLaneRunnerPackageTests(unittest.TestCase):
                 for error in validate_project_lane_runner_bridge(
                     missing_recovery,
                     self.project_lanes,
+                    self.project_scopes,
                 )
             )
         )
@@ -127,6 +149,7 @@ class ProjectLaneRunnerPackageTests(unittest.TestCase):
                 for error in validate_project_lane_runner_bridge(
                     missing_containment_projection,
                     self.project_lanes,
+                    self.project_scopes,
                 )
             )
         )

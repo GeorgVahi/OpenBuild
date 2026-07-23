@@ -2878,10 +2878,18 @@ class RecoveryRegistry:
         checkpoint: Mapping[str, Any],
         allowed_paths: Sequence[str],
     ) -> None:
+        stored_paths = self.checkpoint_allowed_paths(checkpoint)
+        normalized = sorted({_normalize_relative(value) for value in allowed_paths})
+        if normalized != stored_paths:
+            raise RecoveryStateError("recovery target allowed paths drifted")
+
+    def checkpoint_allowed_paths(
+        self,
+        checkpoint: Mapping[str, Any],
+    ) -> list[str]:
         source_state_id = checkpoint.get("source_state_id")
         if not isinstance(source_state_id, str):
             raise RecoveryStateError("checkpoint source state ID is missing")
-        normalized = sorted({_normalize_relative(value) for value in allowed_paths})
         with self._lock():
             self._read_registry_locked(rebarrier=True)
             source = self._read_source_locked(source_state_id)
@@ -2890,8 +2898,12 @@ class RecoveryRegistry:
                 "checkpoint_digest"
             ):
                 raise RecoveryStateError("checkpoint digest drifted")
-            if normalized != source.get("pre_snapshot", {}).get("allowed_paths"):
-                raise RecoveryStateError("recovery target allowed paths drifted")
+            allowed = source.get("pre_snapshot", {}).get("allowed_paths")
+            if not isinstance(allowed, list) or not all(
+                isinstance(path, str) for path in allowed
+            ):
+                raise RecoveryStateError("recovery target allowed paths are invalid")
+            return list(allowed)
 
     def _validate_source(self, value: Any, source_state_id: str) -> dict[str, Any]:
         state = dict(
