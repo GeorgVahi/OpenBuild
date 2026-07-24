@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import re
 import stat
+import subprocess
 import time
 import unicodedata
 from pathlib import Path
@@ -205,6 +206,33 @@ class ProjectScopeManager:
         except ProjectStateError as exc:
             raise ProjectScopeError(str(exc)) from exc
 
+    def _integration_tip(self, state: Mapping[str, Any]) -> str:
+        session = state.get("lane_session")
+        if not isinstance(session, Mapping):
+            raise ProjectScopeError("lane session binding is unavailable")
+        result = subprocess.run(
+            [
+                "git",
+                "rev-parse",
+                "--verify",
+                f"{session['integration_ref']}^{{commit}}",
+            ],
+            cwd=self.checkout,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        try:
+            value = result.stdout.decode("ascii").strip()
+        except UnicodeDecodeError as exc:
+            raise ProjectScopeError(
+                "integration ref identity is invalid"
+            ) from exc
+        if result.returncode or not re.fullmatch(r"[0-9a-f]{40,64}", value):
+            raise ProjectScopeError("integration ref identity is invalid")
+        return value
+
     @staticmethod
     def _claims(scopes: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         return [
@@ -263,6 +291,8 @@ class ProjectScopeManager:
         self,
         lanes: list[dict[str, Any]],
         scopes: list[dict[str, Any]],
+        *,
+        accepted_tip: str,
     ) -> bool:
         changed = False
         groups = self._groups(scopes)
@@ -277,10 +307,25 @@ class ProjectScopeManager:
         for _, _, group in waiting:
             if not self._group_is_eligible(group, scopes):
                 continue
+            owner = str(group[0]["owner"])
+            lane = next(
+                (item for item in lanes if item.get("lane_id") == owner),
+                None,
+            )
+            if (
+                isinstance(lane, dict)
+                and (
+                    lane.get("integration_stale") is not None
+                    or lane.get("base") != accepted_tip
+                    or lane.get("dependency_binding", {}).get(
+                        "accepted_base"
+                    )
+                    not in {None, accepted_tip}
+                )
+            ):
+                continue
             for item in group:
                 item["status"] = "active"
-            owner = str(group[0]["owner"])
-            lane = next((item for item in lanes if item.get("lane_id") == owner), None)
             if isinstance(lane, dict) and lane.get("state") == "waiting-for-scope":
                 if group[0]["phase"] == "planned":
                     lane["state"] = "creating"
@@ -539,6 +584,10 @@ class ProjectScopeManager:
         }
         for _ in range(8):
             state = self._state()
+            if state.get("integration_fence") is not None:
+                raise ProjectScopeError(
+                    "integration ref is fenced pending acceptance"
+                )
             lanes = [dict(item) for item in state["lanes"]]
             scopes = [dict(item) for item in state["scopes"]]
             claimed_owners = {
@@ -742,6 +791,11 @@ class ProjectScopeManager:
         self.migrate_legacy_claims()
         for _ in range(8):
             state = self._state()
+            if state.get("integration_fence") is not None:
+                raise ProjectScopeError(
+                    "integration ref is fenced pending acceptance"
+                )
+            accepted_tip = self._integration_tip(state)
             lanes = [dict(item) for item in state["lanes"]]
             lane = next((item for item in lanes if item.get("lane_id") == lane_id), None)
             if not isinstance(lane, dict):
@@ -761,7 +815,11 @@ class ProjectScopeManager:
             if phase == "planned" and existing:
                 if existing_shape != normalized:
                     raise ProjectScopeError("planned scope reservation binding changed")
-                changed = self._promote(lanes, scopes)
+                changed = self._promote(
+                    lanes,
+                    scopes,
+                    accepted_tip=accepted_tip,
+                )
                 try:
                     cancelled = self._cancel_cycles(lanes, scopes)
                 except _LiveCycleSafeStop as live_cycle:
@@ -804,7 +862,11 @@ class ProjectScopeManager:
                 ]
                 if len(matching) == 1:
                     group = matching[0]
-                    changed = self._promote(lanes, scopes)
+                    changed = self._promote(
+                        lanes,
+                        scopes,
+                        accepted_tip=accepted_tip,
+                    )
                     try:
                         cancelled = self._cancel_cycles(lanes, scopes)
                     except _LiveCycleSafeStop as live_cycle:
@@ -863,7 +925,11 @@ class ProjectScopeManager:
                 for item in normalized
             ]
             scopes.extend(claims)
-            self._promote(lanes, scopes)
+            self._promote(
+                lanes,
+                scopes,
+                accepted_tip=accepted_tip,
+            )
             try:
                 cancelled = self._cancel_cycles(lanes, scopes)
             except _LiveCycleSafeStop as live_cycle:
@@ -1075,6 +1141,7 @@ class ProjectScopeManager:
         lane_id: str,
         *,
         acceptance: str,
+        executor_lease_id: str | None = None,
     ) -> dict[str, Any]:
         if not _LANE.fullmatch(lane_id) or not isinstance(acceptance, str):
             raise ProjectScopeError(
@@ -1092,6 +1159,59 @@ class ProjectScopeManager:
                 )
             lanes = [dict(item) for item in state["lanes"]]
             scopes = [dict(item) for item in state["scopes"]]
+            accepted = next(
+                (
+                    item
+                    for item in state["integration_acceptances"]
+                    if item.get("acceptance_id") == acceptance
+                    and item.get("lane_id") == lane_id
+                ),
+                None,
+            )
+            if not isinstance(accepted, dict):
+                raise ProjectScopeError(
+                    "scope release requires registry-resident integration-owner acceptance"
+                )
+            intent = next(
+                (
+                    item
+                    for item in state.get("integration_queue", [])
+                    if item.get("acceptance_id") == acceptance
+                    or (
+                        item.get("result", {}).get("lane_id") == lane_id
+                        and item.get("candidate_commit")
+                        == accepted.get("accepted_commit")
+                    )
+                ),
+                None,
+            )
+            producer_result = (
+                intent.get("result")
+                if isinstance(intent, Mapping)
+                else None
+            )
+            producer_result_digest = (
+                str(producer_result.get("digest"))
+                if isinstance(producer_result, Mapping)
+                else acceptance
+            )
+            producer_dependencies = (
+                producer_result.get("dependency_binding", {})
+                if isinstance(producer_result, Mapping)
+                else {}
+            )
+            producer_scopes = [
+                {
+                    "kind": item["kind"],
+                    "path": item["path"],
+                    "mode": item["mode"],
+                }
+                for item in accepted.get("reservations", [])
+                if accepted.get("kind") != "abandoned-no-change"
+                if item.get("kind") in _KINDS
+                and item.get("mode") == "hard"
+                and item.get("status") in {"active", "released"}
+            ]
             for scope in scopes:
                 if (
                     scope.get("owner") == lane_id
@@ -1106,7 +1226,100 @@ class ProjectScopeManager:
                         }
                     elif scope.get("status") == "waiting":
                         scope["status"] = "cancelled"
-            self._promote(lanes, scopes)
+            # A released scope does not authorize a waiter on its old admitted
+            # base.  The lane owner must first consume this stale marker,
+            # refresh the common base and rebind its scheduler/spec/allowed-set
+            # contract, then call reserve_planned again.
+            producer_scheduler = next(
+                (
+                    item.get("scheduler_binding")
+                    for item in state["lanes"]
+                    if item.get("lane_id") == lane_id
+                ),
+                None,
+            )
+            for lane in lanes:
+                if (
+                    lane.get("lane_id") == lane_id
+                    and isinstance(producer_result, Mapping)
+                    and isinstance(
+                        producer_result.get("dependency_stale"),
+                        Mapping,
+                    )
+                    and lane.get("integration_stale")
+                    == producer_result["dependency_stale"]
+                ):
+                    lane.pop("integration_stale", None)
+                    break
+            for lane in lanes:
+                consumer_binding = lane.get("dependency_binding")
+                read_dependencies = (
+                    consumer_binding.get("read_dependencies", [])
+                    if isinstance(consumer_binding, Mapping)
+                    else [
+                        item
+                        for item in lane.get("scope_requests", [])
+                        if isinstance(item, Mapping)
+                        and (
+                            item.get("mode") == "soft"
+                            or item.get("kind") == "contract"
+                        )
+                    ]
+                )
+                hard_dependencies = [
+                    item
+                    for item in lane.get("scope_requests", [])
+                    if isinstance(item, Mapping)
+                    and item.get("mode") == "hard"
+                ]
+                dependency_overlap = any(
+                    self._overlaps(read, changed)
+                    for read in [*read_dependencies, *hard_dependencies]
+                    for changed in producer_scopes
+                )
+                scheduler_dependency = False
+                consumer_scheduler = lane.get("scheduler_binding")
+                if (
+                    isinstance(producer_scheduler, Mapping)
+                    and isinstance(consumer_scheduler, Mapping)
+                    and producer_scheduler.get("task_id")
+                    == consumer_scheduler.get("task_id")
+                ):
+                    consumer_record = next(
+                        (
+                            item
+                            for item in state.get("milestones", [])
+                            if item.get("task_id")
+                            == consumer_scheduler.get("task_id")
+                            and item.get("milestone_id")
+                            == consumer_scheduler.get("milestone_id")
+                        ),
+                        None,
+                    )
+                    scheduler_dependency = (
+                        isinstance(consumer_record, Mapping)
+                        and producer_scheduler.get("milestone_id")
+                        in consumer_record.get("depends_on", [])
+                    )
+                if (
+                    lane.get("lane_id") != lane_id
+                    and (
+                        dependency_overlap
+                        or scheduler_dependency
+                    )
+                ):
+                    lane["integration_stale"] = {
+                        "accepted_commit": accepted["accepted_commit"],
+                        "acceptance_id": acceptance,
+                        "generation": int(state["generation"]) + 1,
+                        "dependency_digest": str(
+                            producer_dependencies.get(
+                                "dependency_digest"
+                            )
+                            or producer_result_digest
+                        ),
+                        "producer_result_digest": producer_result_digest,
+                    }
             try:
                 result = self.store.release_scope_integration_acceptance(
                     self.anchor_id,
@@ -1115,6 +1328,7 @@ class ProjectScopeManager:
                     acceptance_id=acceptance,
                     lanes=lanes,
                     scopes=scopes,
+                    executor_lease_id=executor_lease_id,
                 )
             except ProjectStateError as exc:
                 if str(exc) == "project generation changed":
@@ -1125,12 +1339,28 @@ class ProjectScopeManager:
 
     def assert_lane_authority(self, lane_id: str) -> None:
         state = self._state()
+        if state.get("integration_fence") is not None:
+            raise ProjectScopeError(
+                "integration ref is fenced pending acceptance"
+            )
         lane = next(
             (item for item in state["lanes"] if item.get("lane_id") == lane_id),
             None,
         )
         if not isinstance(lane, dict):
             raise ProjectScopeError("scope owner lane does not exist")
+        dependency_binding = lane.get("dependency_binding")
+        if (
+            lane.get("integration_stale") is not None
+            or (
+                isinstance(dependency_binding, Mapping)
+                and dependency_binding.get("accepted_base")
+                != lane.get("base")
+            )
+        ):
+            raise ProjectScopeError(
+                "lane dependencies require a fresh accepted-base rebind"
+            )
         claims = [
             item
             for item in state["scopes"]

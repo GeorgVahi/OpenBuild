@@ -4,6 +4,23 @@ OpenBuild follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### 2.4.0-alpha.7
+
+#### Added
+
+- Added the durable M5 single-writer integration queue with immutable lane result tuples, generation-bound intents, an exclusive executor lease, dedicated detached integration and validation checkouts, and compare-and-swap updates limited to `refs/openbuild/integration`.
+- Added accepted-base dependency bindings and stale-consumer rebind proof, root-owned prerelease ticket/finalization payloads, and a positive no-change abandonment receipt.
+- Added real two-lane RecoveryRegistry coverage that keeps both contained writers active concurrently, commits both lanes, proves exclusive integrator ownership, and accepts them serially without scope or ticket reuse.
+
+#### Changed
+
+- Kept lane hard scopes owned until post-CAS validation, registry-resident integration acceptance, and acceptance-bound release; a prepared ref fence now blocks new admission across crash replay.
+- Restored the dedicated integration checkout to its exact admitted tip after caught failure or creation-bound executor death during candidate preparation, preserving the same `integrating` intent for a clean replay while refusing cleanup under a live or unknown owner.
+- Made each integrator instance non-reentrant so concurrent threads cannot reuse one durable executor lease or mutate the same checkout.
+- Rejected dirty or checked-out integration refs, worker edits to version surfaces, duplicate prerelease tickets, stale dependency reuse, ambiguous CAS results, and unsupported integration-ref namespaces.
+- Added real fault coverage for post-CAS replay, true validation failure, stale dependency rebind, dirty checked-out refs, positive no-op release, and root-only version finalization.
+- Synchronized the manifest, changelog and README install pins for `2.4.0-alpha.7`; M6 capacity and ten-lane stress remain the next milestone.
+
 ### 2.4.0-alpha.6
 
 #### Added

@@ -31,6 +31,73 @@ MAX_JSON_BYTES = 256 * 1024
 _HEX_64 = frozenset("0123456789abcdef")
 _MILESTONE_ID = re.compile(r"[a-z][a-z0-9-]{0,62}\Z")
 _MILESTONE_STATES = frozenset({"ready", "waiting", "completed"})
+_SPECIFICATION_REVISION = re.compile(r"[A-Za-z0-9_.:-]{1,256}\Z")
+_VERSION_TARGET = re.compile(
+    r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+    r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?\Z"
+)
+_VERSION_SURFACES = (
+    "CHANGELOG.md",
+    "README.md",
+    "README.ru.md",
+    "plugins/openbuild/.codex-plugin/plugin.json",
+)
+
+
+def _version_order(value: str) -> tuple[int, int, int, int, tuple[tuple[int, Any], ...]]:
+    """Return a SemVer precedence key for one already syntax-checked target."""
+
+    match = _VERSION_TARGET.fullmatch(value)
+    if match is None:
+        raise ProjectStateError("version finalization target is invalid")
+    core, separator, prerelease = value.partition("-")
+    major, minor, patch = (int(item) for item in core.split("."))
+    if not separator:
+        return major, minor, patch, 1, ()
+    identifiers: list[tuple[int, Any]] = []
+    for identifier in prerelease.split("."):
+        if identifier.isdigit():
+            identifiers.append((0, int(identifier)))
+        else:
+            identifiers.append((1, identifier))
+    return major, minor, patch, 0, tuple(identifiers)
+
+
+def _version_at_integration_ref(
+    project: Path,
+    integration_ref: str,
+) -> str:
+    result = subprocess.run(
+        [
+            "git",
+            "show",
+            f"{integration_ref}:plugins/openbuild/.codex-plugin/plugin.json",
+        ],
+        cwd=project,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode:
+        raise ProjectStateError(
+            "current integration version surface is unavailable"
+        )
+    try:
+        text = result.stdout.decode("utf-8").strip()
+        decoded = json.loads(text)
+        version = (
+            decoded.get("version")
+            if isinstance(decoded, Mapping)
+            else decoded
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        version = result.stdout.decode("utf-8", "strict").strip()
+    if not isinstance(version, str) or not _VERSION_TARGET.fullmatch(version):
+        raise ProjectStateError(
+            "current integration version surface is invalid"
+        )
+    return version
 
 # This is intentionally literal data: package validation parses it with
 # ast.literal_eval and therefore never imports this owner while checking it.
@@ -514,6 +581,8 @@ def _write_exclusive_json(path: Path, value: Mapping[str, Any]) -> None:
     payload = dict(value)
     payload["digest"] = _digest(payload)
     encoded = _canonical(payload) + b"\n"
+    if len(encoded) > MAX_JSON_BYTES:
+        raise ProjectStateError("project record exceeds bounded JSON size")
     published_path = path
     temporary: Path | None = None
     if os.name == "nt":
@@ -545,6 +614,30 @@ def _write_exclusive_json(path: Path, value: Mapping[str, Any]) -> None:
             except FileNotFoundError:
                 pass
     _validate_private_regular(path, protect=False)
+    _sync_parent_metadata(path.parent)
+
+
+def _write_exclusive_bytes(path: Path, value: bytes) -> None:
+    """Publish one immutable owner-private archive without replacement."""
+
+    if not isinstance(value, bytes):
+        raise ProjectStateError("immutable archive is invalid")
+    _assert_no_link_or_reparse_ancestors(path.parent)
+    try:
+        with path.open("xb") as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except FileExistsError:
+        try:
+            existing = path.read_bytes()
+        except OSError as exc:
+            raise ProjectStateError("immutable archive is unreadable") from exc
+        if existing != value:
+            raise ProjectStateError("immutable archive binding changed")
+        return
+    except OSError as exc:
+        raise ProjectStateError("immutable archive publication failed") from exc
     _sync_parent_metadata(path.parent)
 
 
@@ -1412,6 +1505,47 @@ def _validate_lane_projection(value: Any) -> dict[str, Any]:
         ):
             raise ProjectStateError("lane safe-stop completion state is invalid")
         expected_fields.add("safe_stop")
+    dependency_binding = value.get("dependency_binding")
+    if dependency_binding is not None:
+        parsed_dependency_binding = _validate_dependency_binding(
+            dependency_binding
+        )
+        if (
+            parsed_dependency_binding["accepted_base"] != value["base"]
+            or (
+                isinstance(writer, Mapping)
+                and parsed_dependency_binding["allowed_set_digest"]
+                != writer["allowed_set_digest"]
+            )
+        ):
+            raise ProjectStateError("lane dependency binding drifted")
+        expected_fields.add("dependency_binding")
+    integration_stale = value.get("integration_stale")
+    if integration_stale is not None:
+        if (
+            not isinstance(integration_stale, dict)
+            or set(integration_stale) != {
+                "accepted_commit",
+                "acceptance_id",
+                "generation",
+                "dependency_digest",
+                "producer_result_digest",
+            }
+            or not _GIT_OBJECT.fullmatch(
+                str(integration_stale.get("accepted_commit")),
+            )
+            or not _is_hex_identifier(integration_stale.get("acceptance_id"))
+            or not isinstance(integration_stale.get("generation"), int)
+            or integration_stale["generation"] < 1
+            or not _is_hex_identifier(
+                integration_stale.get("dependency_digest")
+            )
+            or not _is_hex_identifier(
+                integration_stale.get("producer_result_digest")
+            )
+        ):
+            raise ProjectStateError("lane integration stale marker is invalid")
+        expected_fields.add("integration_stale")
     scope_wait_from = value.get("scope_wait_from")
     if scope_wait_from is not None:
         if (
@@ -1911,6 +2045,14 @@ def _validate_scope_integration_acceptance(
     lanes: Sequence[Mapping[str, Any]],
     scopes: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
+    if isinstance(value, dict) and value.get("schema") == "project-scope-integration-acceptance-v2":
+        return _validate_abandoned_no_change_acceptance(
+            value,
+            anchor_id=anchor_id,
+            lane_session=lane_session,
+            lanes=lanes,
+            scopes=scopes,
+        )
     required = {
         "schema",
         "acceptance_id",
@@ -2083,6 +2225,880 @@ def _validate_scope_integration_acceptance(
     if value["acceptance_id"] != hashlib.sha256(_canonical(stable)).hexdigest():
         raise ProjectStateError("integration acceptance digest is invalid")
     return dict(value)
+
+
+def _validate_abandoned_no_change_acceptance(
+    value: Any,
+    *,
+    anchor_id: str,
+    lane_session: Mapping[str, Any],
+    lanes: Sequence[Mapping[str, Any]],
+    scopes: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    required = {
+        "schema", "kind", "acceptance_id", "anchor_id", "lane_id", "session",
+        "writer", "terminal_archive", "admitted_commit", "accepted_commit",
+        "validation", "reservations", "no_op_archive", "generation",
+    }
+    if (
+        not isinstance(value, dict)
+        or set(value) != required
+        or value.get("schema") != "project-scope-integration-acceptance-v2"
+        or value.get("kind") != "abandoned-no-change"
+        or not _is_hex_identifier(value.get("acceptance_id"))
+        or value.get("anchor_id") != anchor_id
+        or not isinstance(value.get("lane_id"), str)
+        or not _LANE_ID.fullmatch(value["lane_id"])
+        or value.get("session") != lane_session
+        or not _is_hex_identifier(value.get("terminal_archive"))
+        or not _is_hex_identifier(value.get("no_op_archive"))
+        or not _GIT_OBJECT.fullmatch(str(value.get("admitted_commit")))
+        or value.get("accepted_commit") != value.get("admitted_commit")
+        or not isinstance(value.get("generation"), int)
+        or value["generation"] < 1
+    ):
+        raise ProjectStateError("abandoned no-change acceptance is invalid")
+    writer = _validate_writer(value["writer"])
+    validation = value.get("validation")
+    if (
+        not isinstance(validation, dict)
+        or set(validation)
+        != {
+            "result", "command", "accepted_commit", "head_before", "tree_before",
+            "status_before_digest", "head_after", "tree_after", "status_after_digest",
+            "exit_code", "stdout_digest", "stderr_digest", "digest",
+        }
+        or validation.get("result") != "passed"
+        or validation.get("accepted_commit") != value["accepted_commit"]
+        or validation.get("head_before") != value["accepted_commit"]
+        or validation.get("head_after") != value["accepted_commit"]
+        or validation.get("tree_after") != validation.get("tree_before")
+        or validation.get("status_after_digest") != validation.get("status_before_digest")
+        or validation.get("exit_code") != 0
+        or not _GIT_OBJECT.fullmatch(str(validation.get("tree_before")))
+        or not _is_hex_identifier(validation.get("status_before_digest"))
+        or not _is_hex_identifier(validation.get("stdout_digest"))
+        or not _is_hex_identifier(validation.get("stderr_digest"))
+        or not _is_hex_identifier(validation.get("digest"))
+    ):
+        raise ProjectStateError("abandoned no-change validation is invalid")
+    command = _validate_integration_validation_argv(validation.get("command"))
+    hashed = {key: item for key, item in validation.items() if key != "digest"}
+    if validation["digest"] != hashlib.sha256(_canonical(hashed)).hexdigest():
+        raise ProjectStateError("abandoned no-change validation digest is invalid")
+    reservations: list[dict[str, Any]] = []
+    if not isinstance(value.get("reservations"), list) or not value["reservations"]:
+        raise ProjectStateError("abandoned no-change reservations are invalid")
+    for raw in value["reservations"]:
+        if not isinstance(raw, dict) or set(raw) != {
+            "kind", "path", "mode", "sequence", "reservation", "phase", "status"
+        }:
+            raise ProjectStateError("abandoned no-change reservation is invalid")
+        projected = _scope_reservation_projection(
+            {key: raw[key] for key in raw if key != "status"},
+        )
+        if raw.get("mode") != "hard" or raw.get("status") not in {
+            "active", "waiting", "cancelled"
+        }:
+            raise ProjectStateError("abandoned no-change reservation is invalid")
+        reservations.append({**projected, "status": raw["status"]})
+    if reservations != sorted(reservations, key=_scope_reservation_order):
+        raise ProjectStateError("abandoned no-change reservation ordering is invalid")
+    lane = next((item for item in lanes if item.get("lane_id") == value["lane_id"]), None)
+    safe_stop = lane.get("safe_stop") if isinstance(lane, Mapping) else None
+    if (
+        not isinstance(lane, Mapping)
+        or lane.get("state") != "ready"
+        or lane.get("writer") is not None
+        or lane.get("base") != value["admitted_commit"]
+        or not isinstance(safe_stop, Mapping)
+        or safe_stop.get("status") != "completed"
+        or safe_stop.get("writer") != writer
+        or safe_stop.get("terminal_archive") != value["terminal_archive"]
+        or safe_stop.get("completed_state") != "ready"
+        or safe_stop.get("preserved_changes") is not False
+        or safe_stop.get("recovery_checkpoint_digest") is not None
+    ):
+        raise ProjectStateError("abandoned no-change lane binding is invalid")
+    current = [
+        {
+            key: scope[key]
+            for key in (
+                "kind", "path", "mode", "sequence", "reservation", "phase", "status"
+            )
+        }
+        for scope in scopes
+        if scope.get("owner") == value["lane_id"]
+        and scope.get("kind") in _SCOPE_KIND_ORDER
+        and scope.get("mode") == "hard"
+        and scope.get("status") in {"active", "waiting", "cancelled", "released"}
+    ]
+    current.sort(key=_scope_reservation_order)
+    released = [
+        {
+            **item,
+            "status": "released" if item["status"] == "active" else (
+                "cancelled" if item["status"] == "waiting" else item["status"]
+            ),
+        }
+        for item in reservations
+    ]
+    if current != reservations and current != released:
+        raise ProjectStateError("abandoned no-change reservation binding is stale")
+    stable = {key: item for key, item in value.items() if key != "acceptance_id"}
+    if value["acceptance_id"] != hashlib.sha256(_canonical(stable)).hexdigest():
+        raise ProjectStateError("abandoned no-change acceptance digest is invalid")
+    return {
+        **value,
+        "writer": writer,
+        "validation": {**validation, "command": command},
+        "reservations": reservations,
+    }
+
+
+_INTEGRATION_INTENT_STATES = frozenset(
+    {
+        "queued",
+        "integrating",
+        "candidate",
+        "validated",
+        "cas-applied",
+        "accepted",
+        "released",
+        "blocked",
+        "stale",
+        "no-op",
+    }
+)
+_INTEGRATION_DIAGNOSTICS = frozenset(
+    {
+        "cas-race",
+        "merge-conflict",
+        "validation-failed",
+        "identity-drift",
+        "integration-blocked",
+        "acceptance-failed",
+        "ref-ambiguous",
+    }
+)
+
+
+def _process_creation_identity(pid: int) -> str | None:
+    """Return a kernel creation identity, not a reusable PID-only assertion."""
+
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid < 1:
+        return None
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        process = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = process.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return None
+        try:
+            creation = wintypes.FILETIME()
+            exit_time = wintypes.FILETIME()
+            kernel = wintypes.FILETIME()
+            user = wintypes.FILETIME()
+            if not process.GetProcessTimes(
+                handle,
+                ctypes.byref(creation),
+                ctypes.byref(exit_time),
+                ctypes.byref(kernel),
+                ctypes.byref(user),
+            ):
+                return None
+            value = (int(creation.dwHighDateTime) << 32) | int(
+                creation.dwLowDateTime
+            )
+            return f"windows-filetime:{value}"
+        finally:
+            process.CloseHandle(handle)
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeError):
+        return None
+    closing = raw.rfind(")")
+    fields = raw[closing + 2 :].split() if closing >= 0 else []
+    if len(fields) < 20 or not fields[19].isdigit():
+        return None
+    return f"linux-proc-start:{fields[19]}"
+
+
+def _current_process_identity() -> str:
+    identity = _process_creation_identity(os.getpid())
+    if identity is None:
+        raise ProjectStateError("integration executor process identity is unavailable")
+    return identity
+
+
+def _process_identity_state(pid: int, expected_identity: str) -> str:
+    """Return running/stopped/unknown for one creation-bound process."""
+
+    if (
+        not isinstance(pid, int)
+        or isinstance(pid, bool)
+        or pid < 1
+        or not isinstance(expected_identity, str)
+        or not expected_identity
+    ):
+        return "unknown"
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        process = ctypes.WinDLL("kernel32", use_last_error=True)
+        process.OpenProcess.argtypes = [
+            wintypes.DWORD,
+            wintypes.BOOL,
+            wintypes.DWORD,
+        ]
+        process.OpenProcess.restype = wintypes.HANDLE
+        process.GetProcessTimes.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+        ]
+        process.GetProcessTimes.restype = wintypes.BOOL
+        process.GetExitCodeProcess.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        process.GetExitCodeProcess.restype = wintypes.BOOL
+        process.CloseHandle.argtypes = [wintypes.HANDLE]
+        process.CloseHandle.restype = wintypes.BOOL
+        handle = process.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return (
+                "stopped"
+                if ctypes.get_last_error() in {87, 1168}
+                else "unknown"
+            )
+        try:
+            creation = wintypes.FILETIME()
+            exit_time = wintypes.FILETIME()
+            kernel = wintypes.FILETIME()
+            user = wintypes.FILETIME()
+            exit_code = wintypes.DWORD()
+            if not process.GetProcessTimes(
+                handle,
+                ctypes.byref(creation),
+                ctypes.byref(exit_time),
+                ctypes.byref(kernel),
+                ctypes.byref(user),
+            ) or not process.GetExitCodeProcess(
+                handle,
+                ctypes.byref(exit_code),
+            ):
+                return "unknown"
+            value = (int(creation.dwHighDateTime) << 32) | int(
+                creation.dwLowDateTime
+            )
+            if f"windows-filetime:{value}" != expected_identity:
+                return "stopped"
+            return "running" if int(exit_code.value) == 259 else "stopped"
+        finally:
+            process.CloseHandle(handle)
+    observed = _process_creation_identity(pid)
+    if observed is None:
+        return "stopped" if not Path(f"/proc/{pid}").exists() else "unknown"
+    if observed != expected_identity:
+        return "stopped"
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+    except FileNotFoundError:
+        return "stopped"
+    except (OSError, UnicodeError):
+        return "unknown"
+    closing = raw.rfind(")")
+    fields = raw[closing + 2 :].split() if closing >= 0 else []
+    if not fields:
+        return "unknown"
+    return "stopped" if fields[0] in {"X", "Z"} else "running"
+
+
+def _validate_integration_checkout(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    required = {"path", "identity", "git_dir", "git_dir_identity", "common"}
+    if (
+        not isinstance(value, dict)
+        or set(value) != required
+        or not isinstance(value.get("path"), str)
+        or not Path(value["path"]).is_absolute()
+        or "\0" in value["path"]
+        or len(value["path"]) > 4096
+        or not isinstance(value.get("git_dir"), str)
+        or not Path(value["git_dir"]).is_absolute()
+        or "\0" in value["git_dir"]
+        or len(value["git_dir"]) > 4096
+        or not isinstance(value.get("identity"), list)
+        or len(value["identity"]) != 2
+        or not all(isinstance(item, int) and item >= 0 for item in value["identity"])
+        or not isinstance(value.get("git_dir_identity"), list)
+        or len(value["git_dir_identity"]) != 2
+        or not all(
+            isinstance(item, int) and item >= 0
+            for item in value["git_dir_identity"]
+        )
+    ):
+        raise ProjectStateError("integration checkout binding is invalid")
+    return {
+        **value,
+        "common": _validate_common_identity(value.get("common")),
+    }
+
+
+def _validate_integration_executor(
+    value: Any,
+    *,
+    checkout: Mapping[str, Any] | None,
+    generation: int,
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    required = {
+        "schema",
+        "lease_id",
+        "owner",
+        "owner_token",
+        "pid",
+        "process_identity",
+        "intent_id",
+        "checkout",
+        "claimed_generation",
+        "renewed_generation",
+    }
+    if (
+        checkout is None
+        or not isinstance(value, dict)
+        or set(value) != required
+        or value.get("schema") != "project-integration-executor-v1"
+        or not _is_hex_identifier(value.get("lease_id"))
+        or not isinstance(value.get("owner"), str)
+        or not value["owner"]
+        or len(value["owner"]) > 128
+        or not _is_hex_identifier(value.get("owner_token"))
+        or not isinstance(value.get("pid"), int)
+        or isinstance(value.get("pid"), bool)
+        or value["pid"] < 1
+        or not isinstance(value.get("process_identity"), str)
+        or not value["process_identity"]
+        or len(value["process_identity"]) > 256
+        or not _is_hex_identifier(value.get("intent_id"))
+        or value.get("checkout") != checkout
+        or not isinstance(value.get("claimed_generation"), int)
+        or value["claimed_generation"] < 1
+        or not isinstance(value.get("renewed_generation"), int)
+        or value["renewed_generation"] < value["claimed_generation"]
+        or value["renewed_generation"] > generation
+    ):
+        raise ProjectStateError("integration executor lease is invalid")
+    stable = {
+        key: value[key]
+        for key in (
+            "owner",
+            "owner_token",
+            "pid",
+            "process_identity",
+            "intent_id",
+            "checkout",
+            "claimed_generation",
+        )
+    }
+    if value["lease_id"] != hashlib.sha256(_canonical(stable)).hexdigest():
+        raise ProjectStateError("integration executor lease digest is invalid")
+    return dict(value)
+
+
+def _validate_integration_fence(
+    value: Any,
+    *,
+    queue: Sequence[Mapping[str, Any]],
+    generation: int,
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    required = {
+        "schema",
+        "intent_id",
+        "executor_lease_id",
+        "admitted_commit",
+        "candidate_commit",
+        "state",
+        "diagnostic",
+        "generation",
+        "digest",
+    }
+    if (
+        not isinstance(value, dict)
+        or set(value) != required
+        or value.get("schema") != "project-integration-ref-fence-v1"
+        or not _is_hex_identifier(value.get("intent_id"))
+        or not _is_hex_identifier(value.get("executor_lease_id"))
+        or not _GIT_OBJECT.fullmatch(str(value.get("admitted_commit")))
+        or not _GIT_OBJECT.fullmatch(str(value.get("candidate_commit")))
+        or value.get("state") not in {"prepared", "cas-applied", "quarantined"}
+        or not isinstance(value.get("generation"), int)
+        or value["generation"] < 1
+        or value["generation"] > generation
+        or not _is_hex_identifier(value.get("digest"))
+    ):
+        raise ProjectStateError("integration ref fence is invalid")
+    diagnostic = value.get("diagnostic")
+    if (value["state"] == "quarantined") != isinstance(diagnostic, dict):
+        raise ProjectStateError("integration ref fence quarantine is invalid")
+    if diagnostic is not None and (
+        set(diagnostic) != {"code", "digest"}
+        or diagnostic.get("code") not in _INTEGRATION_DIAGNOSTICS
+        or not _is_hex_identifier(diagnostic.get("digest"))
+    ):
+        raise ProjectStateError("integration ref fence diagnostic is invalid")
+    intent = next(
+        (item for item in queue if item.get("intent_id") == value["intent_id"]),
+        None,
+    )
+    if (
+        not isinstance(intent, Mapping)
+        or intent.get("candidate_commit") != value["candidate_commit"]
+        or intent.get("admitted_tip") != value["admitted_commit"]
+        or intent.get("status")
+        not in {"validated", "cas-applied", "accepted", "released"}
+        or (
+            value["state"] in {"cas-applied", "quarantined"}
+            and intent.get("status") == "validated"
+        )
+    ):
+        raise ProjectStateError("integration ref fence intent binding is invalid")
+    stable = {key: item for key, item in value.items() if key != "digest"}
+    if value["digest"] != hashlib.sha256(_canonical(stable)).hexdigest():
+        raise ProjectStateError("integration ref fence digest is invalid")
+    return dict(value)
+
+
+def _validate_dependency_binding(value: Any) -> dict[str, Any]:
+    required = {
+        "schema",
+        "milestone_revision",
+        "specification_revision",
+        "allowed_set_digest",
+        "read_dependencies",
+        "dependency_digest",
+        "accepted_base",
+        "rebind_generation",
+    }
+    if (
+        not isinstance(value, dict)
+        or set(value) != required
+        or value.get("schema") != "project-lane-dependency-v1"
+        or not _is_hex_identifier(value.get("milestone_revision"))
+        or not isinstance(value.get("specification_revision"), str)
+        or not _SPECIFICATION_REVISION.fullmatch(value["specification_revision"])
+        or (
+            value.get("allowed_set_digest") is not None
+            and not _is_hex_identifier(value["allowed_set_digest"])
+        )
+        or not _GIT_OBJECT.fullmatch(str(value.get("accepted_base")))
+        or not isinstance(value.get("rebind_generation"), int)
+        or value["rebind_generation"] < 1
+    ):
+        raise ProjectStateError("lane dependency binding is invalid")
+    dependencies = value.get("read_dependencies")
+    if not isinstance(dependencies, list):
+        raise ProjectStateError("lane dependency binding is invalid")
+    parsed = [validate_scope_state(item) for item in dependencies]
+    if any(
+        item["mode"] != "soft" and item["kind"] != "contract"
+        for item in parsed
+    ):
+        raise ProjectStateError("lane read dependency binding is invalid")
+    ordered = sorted(
+        parsed,
+        key=lambda item: (
+            _SCOPE_KIND_ORDER[item["kind"]],
+            item["path"].casefold(),
+            item["path"],
+            item["mode"],
+        ),
+    )
+    if parsed != ordered or len(
+        {(item["kind"], item["path"].casefold(), item["mode"]) for item in parsed}
+    ) != len(parsed):
+        raise ProjectStateError("lane read dependency binding is invalid")
+    stable = {
+        key: value[key]
+        for key in (
+            "milestone_revision",
+            "specification_revision",
+            "read_dependencies",
+        )
+    }
+    if value["dependency_digest"] != hashlib.sha256(
+        _canonical(stable)
+    ).hexdigest():
+        raise ProjectStateError("lane dependency digest is invalid")
+    return {**value, "read_dependencies": parsed}
+
+
+def _validate_version_finalization(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    required = {
+        "schema",
+        "owner",
+        "requested_target",
+        "surfaces",
+        "surface_digest",
+        "payload_digest",
+    }
+    if (
+        not isinstance(value, dict)
+        or set(value) != required
+        or value.get("schema") != "project-version-finalization-v1"
+        or value.get("owner") != "root"
+        or not isinstance(value.get("requested_target"), str)
+        or not _VERSION_TARGET.fullmatch(value["requested_target"])
+        or not isinstance(value.get("surfaces"), list)
+        or value["surfaces"] != list(_VERSION_SURFACES)
+        or not _is_hex_identifier(value.get("surface_digest"))
+        or not _is_hex_identifier(value.get("payload_digest"))
+    ):
+        raise ProjectStateError("version finalization binding is invalid")
+    stable = {
+        "requested_target": value["requested_target"],
+        "surfaces": value["surfaces"],
+        "payload_digest": value["payload_digest"],
+    }
+    if value["surface_digest"] != hashlib.sha256(_canonical(stable)).hexdigest():
+        raise ProjectStateError("version finalization digest is invalid")
+    return dict(value)
+
+
+def _validate_integration_validation_argv(value: Any) -> list[str]:
+    if (
+        not isinstance(value, list)
+        or not value
+        or len(value) > 64
+        or any(
+            not isinstance(argument, str)
+            or not argument
+            or "\0" in argument
+            or len(argument) > 4096
+            for argument in value
+        )
+    ):
+        raise ProjectStateError("integration validation command is invalid")
+    return list(value)
+
+
+def _validate_integration_result(
+    value: Any,
+    *,
+    lane_session: Mapping[str, Any],
+    lanes: Sequence[Mapping[str, Any]],
+    scopes: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    required = {
+        "schema",
+        "lane_id",
+        "session",
+        "writer",
+        "terminal_archive",
+        "admitted_commit",
+        "result_commit",
+        "reservations",
+        "validation_argv",
+        "dependency_binding",
+        "dependency_stale",
+        "digest",
+    }
+    if (
+        not isinstance(value, dict)
+        or set(value) != required
+        or value.get("schema") != "project-integration-result-v1"
+        or not isinstance(value.get("lane_id"), str)
+        or not _LANE_ID.fullmatch(value["lane_id"])
+        or value.get("session") != lane_session
+        or not _is_hex_identifier(value.get("terminal_archive"))
+        or not _GIT_OBJECT.fullmatch(str(value.get("admitted_commit")))
+        or not _GIT_OBJECT.fullmatch(str(value.get("result_commit")))
+        or not isinstance(value.get("reservations"), list)
+        or not value["reservations"]
+        or not _is_hex_identifier(value.get("digest"))
+    ):
+        raise ProjectStateError("integration result tuple is invalid")
+    writer = _validate_writer(value["writer"])
+    dependency_binding = _validate_dependency_binding(
+        value["dependency_binding"]
+    )
+    dependency_stale = value["dependency_stale"]
+    if dependency_stale is not None and (
+        not isinstance(dependency_stale, dict)
+        or set(dependency_stale) != {
+            "accepted_commit",
+            "acceptance_id",
+            "generation",
+            "dependency_digest",
+            "producer_result_digest",
+        }
+        or not _GIT_OBJECT.fullmatch(
+            str(dependency_stale.get("accepted_commit")),
+        )
+        or not _is_hex_identifier(dependency_stale.get("acceptance_id"))
+        or not isinstance(dependency_stale.get("generation"), int)
+        or dependency_stale["generation"] < 1
+        or not _is_hex_identifier(
+            dependency_stale.get("dependency_digest"),
+        )
+        or not _is_hex_identifier(
+            dependency_stale.get("producer_result_digest"),
+        )
+    ):
+        raise ProjectStateError(
+            "integration result stale dependency binding is invalid"
+        )
+    if (
+        dependency_binding["allowed_set_digest"]
+        != writer["allowed_set_digest"]
+        or dependency_binding["accepted_base"] != value["admitted_commit"]
+    ):
+        raise ProjectStateError("integration result dependency binding is invalid")
+    validation_argv = _validate_integration_validation_argv(
+        value["validation_argv"],
+    )
+    reservations: list[dict[str, Any]] = []
+    for raw in value["reservations"]:
+        if not isinstance(raw, dict) or set(raw) != {
+            "kind", "path", "mode", "sequence", "reservation", "phase", "status"
+        }:
+            raise ProjectStateError("integration result reservation is invalid")
+        projected = _scope_reservation_projection(
+            {key: raw[key] for key in raw if key != "status"},
+        )
+        if raw.get("mode") != "hard" or raw.get("status") not in {
+            "active", "waiting", "cancelled"
+        }:
+            raise ProjectStateError("integration result reservation is invalid")
+        reservations.append({**projected, "status": raw["status"]})
+    if reservations != sorted(reservations, key=_scope_reservation_order):
+        raise ProjectStateError("integration result reservation ordering is invalid")
+    if len(
+        {
+            (
+                item["kind"], item["path"].casefold(), item["mode"],
+                item["sequence"], item["reservation"], item["phase"],
+            )
+            for item in reservations
+        }
+    ) != len(reservations):
+        raise ProjectStateError("integration result reservations are ambiguous")
+    lane = next((item for item in lanes if item.get("lane_id") == value["lane_id"]), None)
+    if (
+        not isinstance(lane, Mapping)
+        or lane.get("state") != "waiting-for-integration"
+        or lane.get("writer") != writer
+        or lane.get("terminal_evidence") != value["terminal_archive"]
+        or lane.get("base") != value["admitted_commit"]
+    ):
+        raise ProjectStateError("integration result lane binding is invalid")
+    current = [
+        {
+            key: scope[key]
+            for key in (
+                "kind", "path", "mode", "sequence", "reservation", "phase", "status"
+            )
+        }
+        for scope in scopes
+        if scope.get("owner") == value["lane_id"]
+        and scope.get("kind") in _SCOPE_KIND_ORDER
+        and scope.get("mode") == "hard"
+        and scope.get("status") in {"active", "waiting", "cancelled", "released"}
+    ]
+    current.sort(key=_scope_reservation_order)
+    released = [
+        {
+            **item,
+            "status": "released" if item["status"] == "active" else (
+                "cancelled" if item["status"] == "waiting" else item["status"]
+            ),
+        }
+        for item in reservations
+    ]
+    if current != reservations and current != released:
+        raise ProjectStateError("integration result reservation binding is stale")
+    stale_resolved = (
+        isinstance(dependency_stale, Mapping)
+        and lane.get("integration_stale") is None
+        and current == released
+    )
+    if lane.get("integration_stale") != dependency_stale and not stale_resolved:
+        raise ProjectStateError(
+            "integration result stale dependency binding changed"
+        )
+    stable = {key: item for key, item in value.items() if key != "digest"}
+    if value["digest"] != hashlib.sha256(_canonical(stable)).hexdigest():
+        raise ProjectStateError("integration result digest is invalid")
+    return {
+        **value,
+        "writer": writer,
+        "reservations": reservations,
+        "validation_argv": validation_argv,
+        "dependency_binding": dependency_binding,
+        "dependency_stale": (
+            dict(dependency_stale)
+            if isinstance(dependency_stale, Mapping)
+            else None
+        ),
+    }
+
+
+def _validate_integration_queue(
+    value: Any,
+    *,
+    lane_session: Mapping[str, Any] | None,
+    lanes: Sequence[Mapping[str, Any]],
+    scopes: Sequence[Mapping[str, Any]],
+    acceptances: Sequence[Mapping[str, Any]],
+    generation: int,
+) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        raise ProjectStateError("integration queue is invalid")
+    if lane_session is None and value:
+        raise ProjectStateError("integration queue requires a lane session binding")
+    parsed: list[dict[str, Any]] = []
+    required = {
+        "schema", "intent_id", "enqueue_generation", "status", "result",
+        "admitted_tip", "ticket", "candidate_commit", "acceptance_id",
+        "release_generation", "diagnostic", "version_finalization",
+    }
+    for raw in value:
+        if (
+            not isinstance(raw, dict)
+            or set(raw) != required
+            or raw.get("schema") != "project-integration-intent-v1"
+            or not _is_hex_identifier(raw.get("intent_id"))
+            or not isinstance(raw.get("enqueue_generation"), int)
+            or raw["enqueue_generation"] < 1
+            or raw["enqueue_generation"] > generation
+            or raw.get("status") not in _INTEGRATION_INTENT_STATES
+            or not _GIT_OBJECT.fullmatch(str(raw.get("admitted_tip")))
+        ):
+            raise ProjectStateError("integration intent is invalid")
+        assert lane_session is not None
+        result = _validate_integration_result(
+            raw["result"],
+            lane_session=lane_session,
+            lanes=lanes,
+            scopes=scopes,
+        )
+        if raw["ticket"] is not None and (
+            not isinstance(raw["ticket"], int) or raw["ticket"] < 1
+        ):
+            raise ProjectStateError("integration prerelease ticket is invalid")
+        if raw["candidate_commit"] is not None and not _GIT_OBJECT.fullmatch(
+            str(raw["candidate_commit"]),
+        ):
+            raise ProjectStateError("integration candidate binding is invalid")
+        if raw["acceptance_id"] is not None and not _is_hex_identifier(
+            raw["acceptance_id"],
+        ):
+            raise ProjectStateError("integration acceptance binding is invalid")
+        if raw["release_generation"] is not None and (
+            not isinstance(raw["release_generation"], int)
+            or raw["release_generation"] < 1
+            or raw["release_generation"] > generation
+        ):
+            raise ProjectStateError("integration release generation is invalid")
+        diagnostic = raw["diagnostic"]
+        version_finalization = _validate_version_finalization(
+            raw["version_finalization"]
+        )
+        if diagnostic is not None and (
+            not isinstance(diagnostic, dict)
+            or set(diagnostic) != {"code", "digest"}
+            or diagnostic.get("code") not in _INTEGRATION_DIAGNOSTICS
+            or not _is_hex_identifier(diagnostic.get("digest"))
+        ):
+            raise ProjectStateError("integration diagnostic is invalid")
+        status = raw["status"]
+        if status == "queued" and any(
+            raw[key] is not None
+            for key in (
+                "ticket", "candidate_commit", "acceptance_id",
+                "release_generation", "diagnostic", "version_finalization",
+            )
+        ):
+            raise ProjectStateError("queued integration intent is not immutable")
+        if status in {"integrating", "candidate", "validated", "cas-applied", "accepted", "released"} and raw["ticket"] is None:
+            raise ProjectStateError("integration intent lacks a prerelease ticket")
+        if status in {"candidate", "validated", "cas-applied", "accepted", "released"} and raw["candidate_commit"] is None:
+            raise ProjectStateError("integration intent lacks a candidate commit")
+        if status in {"accepted", "released"} and raw["acceptance_id"] is None:
+            raise ProjectStateError("integration intent lacks acceptance")
+        if status == "released" and raw["release_generation"] is None:
+            raise ProjectStateError("integration intent lacks release evidence")
+        if status in {"blocked", "stale"} and diagnostic is None:
+            raise ProjectStateError("failed integration intent lacks a diagnostic")
+        if status not in {"blocked", "stale"} and diagnostic is not None:
+            raise ProjectStateError("successful integration intent has a diagnostic")
+        if version_finalization is not None and raw["ticket"] is None:
+            raise ProjectStateError(
+                "version finalization lacks an integration-order ticket"
+            )
+        if raw["acceptance_id"] is not None and not any(
+            item.get("acceptance_id") == raw["acceptance_id"]
+            and item.get("lane_id") == result["lane_id"]
+            and item.get("accepted_commit") == raw["candidate_commit"]
+            for item in acceptances
+        ):
+            raise ProjectStateError("integration intent acceptance is not resident")
+        stable = {
+            key: raw[key]
+            for key in ("schema", "enqueue_generation", "result", "admitted_tip")
+        }
+        if raw["intent_id"] != hashlib.sha256(_canonical(stable)).hexdigest():
+            raise ProjectStateError("integration intent digest is invalid")
+        parsed.append(
+            {
+                **raw,
+                "result": result,
+                "version_finalization": version_finalization,
+            }
+        )
+    if parsed != sorted(
+        parsed,
+        key=lambda item: (item["enqueue_generation"], item["intent_id"]),
+    ):
+        raise ProjectStateError("integration queue ordering is invalid")
+    if len({item["intent_id"] for item in parsed}) != len(parsed):
+        raise ProjectStateError("integration intent identities are not unique")
+    tickets = [item["ticket"] for item in parsed if item["ticket"] is not None]
+    if len(tickets) != len(set(tickets)):
+        raise ProjectStateError("integration prerelease tickets are not unique")
+    version_targets = [
+        item["version_finalization"]["requested_target"]
+        for item in parsed
+        if isinstance(item.get("version_finalization"), Mapping)
+    ]
+    if len(version_targets) != len(set(version_targets)):
+        raise ProjectStateError("version finalization targets are not unique")
+    active = {
+        item["result"]["lane_id"]
+        for item in parsed
+        if item["status"] not in {"released", "blocked", "stale", "no-op"}
+    }
+    if len(active) != sum(
+        1
+        for item in parsed
+        if item["status"] not in {"released", "blocked", "stale", "no-op"}
+    ):
+        raise ProjectStateError("lane has more than one live integration intent")
+    return parsed
 
 
 def _validate_safe_stop_projection(
@@ -2477,6 +3493,10 @@ def _verify_protected_adoption_transition(
 def _validate_lane_projection_transition(
     current: Sequence[Mapping[str, Any]],
     proposed: Sequence[Mapping[str, Any]],
+    *,
+    stale_acceptance_id: str | None = None,
+    dependency_rebind_lane_id: str | None = None,
+    stale_resolved_lane_id: str | None = None,
 ) -> None:
     current_by_id = {str(lane["lane_id"]): lane for lane in current}
     proposed_ids = {str(lane["lane_id"]) for lane in proposed}
@@ -2525,13 +3545,112 @@ def _validate_lane_projection_transition(
         if (
             lane.get("base") != existing.get("base")
             and (
-                existing.get("state") != "waiting-for-scope"
-                or lane.get("state") != "waiting-for-scope"
-                or existing.get("writer") is not None
-                or lane.get("writer") is not None
+                dependency_rebind_lane_id != lane.get("lane_id")
+                and (
+                    existing.get("state") != "waiting-for-scope"
+                    or lane.get("state") != "waiting-for-scope"
+                    or existing.get("writer") is not None
+                    or lane.get("writer") is not None
+                )
             )
         ):
             raise ProjectStateError("lane admitted base changed")
+        old_dependency = existing.get("dependency_binding")
+        new_dependency = lane.get("dependency_binding")
+        if old_dependency != new_dependency:
+            initial_writer_bind = (
+                isinstance(old_dependency, Mapping)
+                and isinstance(new_dependency, Mapping)
+                and old_dependency.get("allowed_set_digest") is None
+                and new_dependency
+                == {
+                    **old_dependency,
+                    "allowed_set_digest": (lane.get("writer") or {}).get(
+                        "allowed_set_digest"
+                    ),
+                }
+                and existing.get("writer") is None
+                and isinstance(lane.get("writer"), Mapping)
+            )
+            waiting_base_refresh = (
+                isinstance(old_dependency, Mapping)
+                and isinstance(new_dependency, Mapping)
+                and existing.get("state") == "waiting-for-scope"
+                and lane.get("state") == "waiting-for-scope"
+                and existing.get("writer") is None
+                and lane.get("writer") is None
+                and existing.get("base") != lane.get("base")
+                and new_dependency
+                == {
+                    **old_dependency,
+                    "accepted_base": lane.get("base"),
+                    "rebind_generation": new_dependency.get(
+                        "rebind_generation"
+                    ),
+                }
+                and new_dependency.get("rebind_generation", 0)
+                > old_dependency.get("rebind_generation", 0)
+            )
+            completed_writer_detach = (
+                isinstance(old_dependency, Mapping)
+                and isinstance(new_dependency, Mapping)
+                and isinstance(existing.get("writer"), Mapping)
+                and lane.get("writer") is None
+                and old_dependency.get("allowed_set_digest")
+                == existing["writer"].get("allowed_set_digest")
+                and new_dependency
+                == {
+                    **old_dependency,
+                    "allowed_set_digest": None,
+                }
+                and isinstance(existing.get("safe_stop"), Mapping)
+                and existing["safe_stop"].get("status") == "stopping"
+                and isinstance(lane.get("safe_stop"), Mapping)
+                and lane["safe_stop"].get("status") == "completed"
+            )
+            if (
+                dependency_rebind_lane_id != lane.get("lane_id")
+                and not initial_writer_bind
+                and not waiting_base_refresh
+                and not completed_writer_detach
+            ):
+                raise ProjectStateError(
+                    "lane dependency binding requires its owning lifecycle"
+                )
+        old_stale = existing.get("integration_stale")
+        new_stale = lane.get("integration_stale")
+        if old_stale != new_stale:
+            if (
+                old_stale is None
+                and isinstance(new_stale, Mapping)
+                and stale_acceptance_id is not None
+                and new_stale.get("acceptance_id")
+                == stale_acceptance_id
+            ):
+                pass
+            elif (
+                isinstance(old_stale, Mapping)
+                and isinstance(new_stale, Mapping)
+                and stale_acceptance_id is not None
+                and new_stale.get("acceptance_id")
+                == stale_acceptance_id
+            ):
+                pass
+            elif (
+                isinstance(old_stale, Mapping)
+                and new_stale is None
+                and dependency_rebind_lane_id == lane.get("lane_id")
+                and lane.get("base") != existing.get("base")
+            ):
+                pass
+            elif (
+                isinstance(old_stale, Mapping)
+                and new_stale is None
+                and stale_resolved_lane_id == lane.get("lane_id")
+            ):
+                pass
+            else:
+                raise ProjectStateError("lane integration stale marker changed")
         if (
             isinstance(existing.get("writer"), Mapping)
             and isinstance(lane.get("writer"), Mapping)
@@ -3034,6 +4153,17 @@ class ProjectStateStore:
         self._manifest(anchor_id)
         state = _read_json(self._state_path(anchor_id))
         required = {"schema", "generation", "epoch", "state", "registry", "incident_id", "lane_session", "lanes", "milestones", "scopes", "integration_acceptances", "digest"}
+        integration_required = required | {
+            "integration_queue",
+            "integration_next_ticket",
+            "integration_checkout",
+            "integration_executor",
+            "integration_fence",
+        }
+        pre_executor_required = required | {
+            "integration_queue",
+            "integration_next_ticket",
+        }
         legacy_required = required - {"lane_session", "integration_acceptances"}
         pre_acceptance_required = required - {"integration_acceptances"}
         legacy = set(state) == legacy_required
@@ -3049,11 +4179,23 @@ class ProjectStateStore:
         elif set(state) == pre_acceptance_required:
             state = dict(state)
             state["integration_acceptances"] = []
-        if set(state) != required or state.get("schema") != SCHEMA_VERSION or not isinstance(state.get("generation"), int) or state["generation"] < 0 or state.get("epoch") != 0 or state.get("state") not in {"clean", "breach"}:
+        if set(state) == required:
+            state = dict(state)
+            state["integration_queue"] = []
+            state["integration_next_ticket"] = 1
+            state["integration_checkout"] = None
+            state["integration_executor"] = None
+            state["integration_fence"] = None
+        elif set(state) == pre_executor_required:
+            state = dict(state)
+            state["integration_checkout"] = None
+            state["integration_executor"] = None
+            state["integration_fence"] = None
+        if set(state) != integration_required or state.get("schema") != SCHEMA_VERSION or not isinstance(state.get("generation"), int) or state["generation"] < 0 or state.get("epoch") != 0 or state.get("state") not in {"clean", "breach"}:
             raise ProjectStateError("project state schema is invalid")
         if (state["state"] == "clean") != (state["registry"] == "B0") or (state["state"] == "breach") != (isinstance(state["incident_id"], str) and state["registry"] is None):
             raise ProjectStateError("clean/breach state split is invalid")
-        if not all(isinstance(state[key], list) for key in ("lanes", "milestones", "scopes", "integration_acceptances")):
+        if not all(isinstance(state[key], list) for key in ("lanes", "milestones", "scopes", "integration_acceptances")) or not isinstance(state.get("integration_next_ticket"), int) or state["integration_next_ticket"] < 1:
             raise ProjectStateError("project state collections are invalid")
         validated_milestones = [_validate_milestone_projection(value) for value in state["milestones"]]
         _validate_milestone_dag(validated_milestones)
@@ -3097,6 +4239,57 @@ class ProjectStateStore:
             raise ProjectStateError("integration acceptance requires a lane session binding")
         if len({item["acceptance_id"] for item in validated_acceptances}) != len(validated_acceptances):
             raise ProjectStateError("integration acceptance identities are not unique")
+        state["integration_queue"] = _validate_integration_queue(
+            state["integration_queue"],
+            lane_session=lane_session,
+            lanes=validated_lanes,
+            scopes=validated_scopes,
+            acceptances=validated_acceptances,
+            generation=state["generation"],
+        )
+        integration_checkout = _validate_integration_checkout(
+            state["integration_checkout"]
+        )
+        if (
+            integration_checkout is not None
+            and lane_session is not None
+            and integration_checkout["common"] != lane_session["common"]
+        ):
+            raise ProjectStateError(
+                "integration checkout common-directory binding drifted"
+            )
+        state["integration_checkout"] = integration_checkout
+        state["integration_executor"] = _validate_integration_executor(
+            state["integration_executor"],
+            checkout=integration_checkout,
+            generation=state["generation"],
+        )
+        state["integration_fence"] = _validate_integration_fence(
+            state["integration_fence"],
+            queue=state["integration_queue"],
+            generation=state["generation"],
+        )
+        if state["integration_fence"] is not None:
+            fence_intent = state["integration_fence"]["intent_id"]
+            executor = state["integration_executor"]
+            if (
+                executor is not None
+                and executor["intent_id"] != fence_intent
+            ):
+                raise ProjectStateError(
+                    "integration executor and ref fence disagree"
+                )
+        issued = [
+            item["ticket"]
+            for item in state["integration_queue"]
+            if isinstance(item.get("ticket"), int)
+        ]
+        if len(issued) != len(set(issued)):
+            raise ProjectStateError(
+                "integration prerelease tickets are not unique"
+            )
+        if issued and state["integration_next_ticket"] <= max(issued):
+            raise ProjectStateError("integration prerelease ticket regressed")
         state["milestones"] = validated_milestones
         return {key: value for key, value in state.items() if key != "digest"}
 
@@ -3162,6 +4355,173 @@ class ProjectStateStore:
                 _replace_json(self._state_path(anchor_id), state)
                 return self._read_state_strict(anchor_id)
 
+    def bind_integration_checkout(
+        self,
+        anchor_id: str,
+        *,
+        expected_generation: int,
+        checkout: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Bind the sole detached managed checkout before executor admission."""
+
+        parsed = _validate_integration_checkout(dict(checkout))
+        assert parsed is not None
+        with _locked(self.lock_path):
+            self._manifest(anchor_id)
+            with _locked(self._anchor_state_lock_path(anchor_id)):
+                state = self._read_state_strict(anchor_id)
+                if state["generation"] != expected_generation:
+                    raise ProjectStateError("project generation changed")
+                session = _validate_lane_session(state["lane_session"])
+                if (
+                    state["state"] != "clean"
+                    or session is None
+                    or parsed["common"] != session["common"]
+                ):
+                    raise ProjectStateError(
+                        "integration checkout session binding is invalid"
+                    )
+                existing = state["integration_checkout"]
+                if existing is not None:
+                    if existing != parsed:
+                        raise ProjectStateError(
+                            "integration checkout identity changed"
+                        )
+                    return state
+                if (
+                    state["integration_executor"] is not None
+                    or state["integration_fence"] is not None
+                    or state["integration_queue"]
+                ):
+                    raise ProjectStateError(
+                        "integration checkout cannot be rebound after admission"
+                    )
+                state["integration_checkout"] = parsed
+                state["generation"] += 1
+                _replace_json(self._state_path(anchor_id), state)
+                return self._read_state_strict(anchor_id)
+
+    def rebind_lane_dependencies(
+        self,
+        anchor_id: str,
+        *,
+        expected_generation: int,
+        lane_id: str,
+        accepted_commit: str,
+        dependency_binding: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Clear staleness only after Git, scheduler, spec and allowed-set rebind."""
+
+        parsed = _validate_dependency_binding(dict(dependency_binding))
+        if (
+            not _LANE_ID.fullmatch(lane_id)
+            or not _GIT_OBJECT.fullmatch(accepted_commit)
+            or parsed["accepted_base"] != accepted_commit
+            or parsed["allowed_set_digest"] is None
+        ):
+            raise ProjectStateError("lane dependency rebind input is invalid")
+        with _locked(self.lock_path):
+            self._manifest(anchor_id)
+            with _locked(self._anchor_state_lock_path(anchor_id)):
+                state = self._read_state_strict(anchor_id)
+                if state["generation"] != expected_generation:
+                    raise ProjectStateError("project generation changed")
+                if state["integration_fence"] is not None:
+                    raise ProjectStateError(
+                        "integration ref is fenced pending acceptance"
+                    )
+                lane = next(
+                    (
+                        item
+                        for item in state["lanes"]
+                        if item.get("lane_id") == lane_id
+                    ),
+                    None,
+                )
+                stale = (
+                    lane.get("integration_stale")
+                    if isinstance(lane, Mapping)
+                    else None
+                )
+                if (
+                    not isinstance(lane, dict)
+                    or not isinstance(stale, Mapping)
+                    or stale.get("accepted_commit") != accepted_commit
+                    or lane.get("writer") is not None
+                    or lane.get("state")
+                    not in {"waiting-for-scope", "creating", "ready"}
+                ):
+                    raise ProjectStateError(
+                        "lane dependency rebind is not eligible"
+                    )
+                session = _validate_lane_session(state["lane_session"])
+                assert session is not None
+                tip = subprocess.run(
+                    [
+                        "git",
+                        "rev-parse",
+                        "--verify",
+                        f"{session['integration_ref']}^{{commit}}",
+                    ],
+                    cwd=self.project,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+                head = subprocess.run(
+                    ["git", "rev-parse", "--verify", "HEAD^{commit}"],
+                    cwd=Path(str(lane["worktree"])),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+                dirty = subprocess.run(
+                    ["git", "status", "--porcelain=v1", "-z"],
+                    cwd=Path(str(lane["worktree"])),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+                if (
+                    tip.returncode
+                    or head.returncode
+                    or dirty.returncode
+                    or tip.stdout.decode("ascii", "ignore").strip()
+                    != accepted_commit
+                    or head.stdout.decode("ascii", "ignore").strip()
+                    != accepted_commit
+                    or dirty.stdout
+                ):
+                    raise ProjectStateError(
+                        "lane dependency rebind Git proof is stale"
+                    )
+                lanes = [dict(item) for item in state["lanes"]]
+                updated = next(
+                    item for item in lanes if item["lane_id"] == lane_id
+                )
+                updated["base"] = accepted_commit
+                updated["dependency_binding"] = parsed
+                updated.pop("integration_stale", None)
+                validated = [
+                    _validate_lane_projection(item) for item in lanes
+                ]
+                _validate_lane_projection_transition(
+                    state["lanes"],
+                    validated,
+                    dependency_rebind_lane_id=lane_id,
+                )
+                state["generation"] += 1
+                state["lanes"] = validated
+                _replace_json(self._state_path(anchor_id), state)
+                return next(
+                    item
+                    for item in self._read_state_strict(anchor_id)["lanes"]
+                    if item["lane_id"] == lane_id
+                )
+
     def replace_lane_state(
         self,
         anchor_id: str,
@@ -3206,6 +4566,10 @@ class ProjectStateStore:
                     raise ProjectStateError("project generation changed")
                 if state["state"] != "clean":
                     raise ProjectStateError("breached project state cannot publish milestones")
+                if state["integration_fence"] is not None:
+                    raise ProjectStateError(
+                        "integration ref is fenced pending acceptance"
+                    )
                 validated = [_validate_milestone_projection(value) for value in milestones]
                 _validate_milestone_dag(validated)
                 _validate_milestone_transition(state["milestones"], validated)
@@ -3627,6 +4991,7 @@ class ProjectStateStore:
         admitted_commit: str,
         accepted_commit: str,
         validation_argv: Sequence[str],
+        executor_lease_id: str | None = None,
         recovery_root: Path,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         terminal_release = self._scope_terminal_release(lane, recovery_root)
@@ -3689,8 +5054,7 @@ class ProjectStateStore:
                 "integration acceptance Git identity is invalid"
             ) from exc
         if (
-            lane_head != accepted_commit
-            or integration_tip != accepted_commit
+            integration_tip != accepted_commit
             or lane_tree == admitted_tree
             or git(
                 "symbolic-ref",
@@ -3704,6 +5068,18 @@ class ProjectStateStore:
         ):
             raise ProjectStateError(
                 "integration acceptance lane result is not a non-empty accepted commit"
+            )
+        ancestry = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", lane_head, accepted_commit],
+            cwd=lane_worktree,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if ancestry.returncode != 0:
+            raise ProjectStateError(
+                "integration acceptance does not contain the terminal lane result"
             )
         _verify_scope_integration_ref(
             self.project,
@@ -3760,7 +5136,6 @@ class ProjectStateStore:
             if (
                 status_before
                 or head_before != accepted_commit
-                or tree_before != lane_tree
                 or validation_worktree == lane_worktree
             ):
                 raise ProjectStateError(
@@ -3869,6 +5244,7 @@ class ProjectStateStore:
         admitted_commit: str,
         accepted_commit: str,
         validation_argv: Sequence[str],
+        executor_lease_id: str | None = None,
     ) -> dict[str, Any]:
         """Persist the minimum M3 integration-owner acceptance record.
 
@@ -3948,6 +5324,20 @@ class ProjectStateStore:
                 state = self._read_state_strict(anchor_id)
                 if state["generation"] != expected_generation:
                     raise ProjectStateError("project generation changed")
+                fence = state["integration_fence"]
+                if fence is not None:
+                    if (
+                        not isinstance(executor_lease_id, str)
+                        or fence.get("candidate_commit") != accepted_commit
+                    ):
+                        raise ProjectStateError(
+                            "integration acceptance lacks the executor lease"
+                        )
+                    self._require_integration_executor(
+                        state,
+                        lease_id=executor_lease_id,
+                        intent_id=str(fence["intent_id"]),
+                    )
                 lane_session = _validate_lane_session(state["lane_session"])
                 if state["state"] != "clean" or lane_session is None:
                     raise ProjectStateError("integration acceptance lane session is unavailable")
@@ -4054,6 +5444,7 @@ class ProjectStateStore:
         acceptance_id: str,
         lanes: Sequence[Mapping[str, Any]],
         scopes: Sequence[Mapping[str, Any]],
+        executor_lease_id: str | None = None,
     ) -> dict[str, Any]:
         if not _LANE_ID.fullmatch(lane_id) or not _is_hex_identifier(acceptance_id):
             raise ProjectStateError("integration acceptance input is invalid")
@@ -4064,6 +5455,17 @@ class ProjectStateStore:
                 state = self._read_state_strict(anchor_id)
                 if state["generation"] != expected_generation:
                     raise ProjectStateError("project generation changed")
+                fence = state["integration_fence"]
+                if fence is not None:
+                    if not isinstance(executor_lease_id, str):
+                        raise ProjectStateError(
+                            "integration scope release lacks the executor lease"
+                        )
+                    self._require_integration_executor(
+                        state,
+                        lease_id=executor_lease_id,
+                        intent_id=str(fence["intent_id"]),
+                    )
                 lane_session = _validate_lane_session(state["lane_session"])
                 if state["state"] != "clean" or lane_session is None:
                     raise ProjectStateError("integration acceptance lane session is unavailable")
@@ -4077,23 +5479,43 @@ class ProjectStateStore:
                 )
                 if not isinstance(acceptance, dict) or acceptance.get("lane_id") != lane_id:
                     raise ProjectStateError("registry-resident integration-owner acceptance is absent")
-                _verify_scope_integration_ref(
-                    self.project,
-                    lane_session,
-                    admitted_commit=acceptance["admitted_commit"],
-                    accepted_commit=acceptance["accepted_commit"],
+                no_op = (
+                    acceptance.get("schema")
+                    == "project-scope-integration-acceptance-v2"
                 )
+                if not no_op:
+                    _verify_scope_integration_ref(
+                        self.project,
+                        lane_session,
+                        admitted_commit=acceptance["admitted_commit"],
+                        accepted_commit=acceptance["accepted_commit"],
+                    )
                 current_lane = next(
                     (item for item in state["lanes"] if item.get("lane_id") == lane_id),
                     None,
                 )
-                if (
-                    not isinstance(current_lane, dict)
-                    or current_lane.get("state") != "waiting-for-integration"
-                    or current_lane.get("writer") != acceptance.get("writer")
-                    or current_lane.get("terminal_evidence") != acceptance.get("terminal_archive")
-                    or current_lane.get("base") != acceptance.get("admitted_commit")
-                ):
+                if no_op:
+                    safe_stop = current_lane.get("safe_stop") if isinstance(current_lane, dict) else None
+                    valid_lane = (
+                        isinstance(current_lane, dict)
+                        and current_lane.get("state") == "ready"
+                        and current_lane.get("writer") is None
+                        and current_lane.get("base") == acceptance.get("admitted_commit")
+                        and isinstance(safe_stop, Mapping)
+                        and safe_stop.get("status") == "completed"
+                        and safe_stop.get("writer") == acceptance.get("writer")
+                        and safe_stop.get("terminal_archive") == acceptance.get("terminal_archive")
+                        and safe_stop.get("preserved_changes") is False
+                    )
+                else:
+                    valid_lane = (
+                        isinstance(current_lane, dict)
+                        and current_lane.get("state") == "waiting-for-integration"
+                        and current_lane.get("writer") == acceptance.get("writer")
+                        and current_lane.get("terminal_evidence") == acceptance.get("terminal_archive")
+                        and current_lane.get("base") == acceptance.get("admitted_commit")
+                    )
+                if not valid_lane:
                     raise ProjectStateError("integration acceptance is stale")
                 validated_scopes = [
                     _validate_project_scope(value, lane_session) for value in scopes
@@ -4145,7 +5567,44 @@ class ProjectStateStore:
                     validated_scopes,
                     scope_release_acceptance_id=acceptance_id,
                 )
-                _validate_lane_projection_transition(state["lanes"], validated_lanes)
+                accepted_intent = next(
+                    (
+                        item
+                        for item in state["integration_queue"]
+                        if item.get("acceptance_id") == acceptance_id
+                    ),
+                    None,
+                )
+                accepted_stale = (
+                    accepted_intent.get("result", {}).get(
+                        "dependency_stale",
+                    )
+                    if isinstance(accepted_intent, Mapping)
+                    else None
+                )
+                proposed_lane = next(
+                    (
+                        item
+                        for item in validated_lanes
+                        if item.get("lane_id") == lane_id
+                    ),
+                    None,
+                )
+                stale_resolved_lane_id = None
+                if (
+                    isinstance(current_lane, Mapping)
+                    and isinstance(current_lane.get("integration_stale"), Mapping)
+                    and accepted_stale == current_lane.get("integration_stale")
+                    and isinstance(proposed_lane, Mapping)
+                    and proposed_lane.get("integration_stale") is None
+                ):
+                    stale_resolved_lane_id = lane_id
+                _validate_lane_projection_transition(
+                    state["lanes"],
+                    validated_lanes,
+                    stale_acceptance_id=acceptance_id,
+                    stale_resolved_lane_id=stale_resolved_lane_id,
+                )
                 _validate_safe_stop_transition(
                     state["lanes"],
                     validated_lanes,
@@ -4235,6 +5694,1591 @@ class ProjectStateStore:
                 state["scopes"] = validated_scopes
                 _replace_json(self._state_path(anchor_id), state)
                 return {"state": self._read_state_strict(anchor_id), "replayed": False}
+
+    def enqueue_integration_intent(
+        self,
+        anchor_id: str,
+        *,
+        expected_generation: int,
+        lane_id: str,
+        result_commit: str,
+        admitted_tip: str,
+        validation_argv: Sequence[str],
+    ) -> dict[str, Any]:
+        """Durably admit one exact terminal lane result to the M5 queue."""
+
+        if (
+            not isinstance(expected_generation, int)
+            or expected_generation < 0
+            or not _LANE_ID.fullmatch(lane_id)
+            or not _GIT_OBJECT.fullmatch(result_commit)
+            or not _GIT_OBJECT.fullmatch(admitted_tip)
+        ):
+            raise ProjectStateError("integration intent input is invalid")
+        argv = _validate_integration_validation_argv(list(validation_argv))
+        with _locked(self.lock_path):
+            self._manifest(anchor_id)
+            with _locked(self._anchor_state_lock_path(anchor_id)):
+                state = self._read_state_strict(anchor_id)
+                if state["generation"] != expected_generation:
+                    raise ProjectStateError("project generation changed")
+                session = _validate_lane_session(state["lane_session"])
+                lane = next(
+                    (item for item in state["lanes"] if item.get("lane_id") == lane_id),
+                    None,
+                )
+                if (
+                    state["state"] != "clean"
+                    or session is None
+                    or state["integration_checkout"] is None
+                    or state["integration_fence"] is not None
+                    or not isinstance(lane, dict)
+                    or lane.get("state") != "waiting-for-integration"
+                    or not isinstance(lane.get("writer"), dict)
+                    or not _is_hex_identifier(lane.get("terminal_evidence"))
+                    or not _GIT_OBJECT.fullmatch(str(lane.get("base")))
+                ):
+                    raise ProjectStateError("integration intent lane is not terminally admitted")
+                result = subprocess.run(
+                    ["git", "rev-parse", "--verify", f"{result_commit}^{{commit}}"],
+                    cwd=Path(str(lane["worktree"])),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+                if result.returncode != 0 or result.stdout.decode("ascii", "ignore").strip() != result_commit:
+                    raise ProjectStateError("integration result commit is unavailable")
+                lane_head = subprocess.run(
+                    ["git", "rev-parse", "--verify", "HEAD^{commit}"],
+                    cwd=Path(str(lane["worktree"])),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+                if lane_head.returncode != 0 or lane_head.stdout.decode("ascii", "ignore").strip() != result_commit:
+                    raise ProjectStateError("integration result is not the terminal lane commit")
+                common_tip = subprocess.run(
+                    ["git", "rev-parse", "--verify", f"{session['integration_ref']}^{{commit}}"],
+                    cwd=self.project,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+                if common_tip.returncode != 0 or common_tip.stdout.decode("ascii", "ignore").strip() != admitted_tip:
+                    raise ProjectStateError("integration ref changed before intent admission")
+                changed = subprocess.run(
+                    [
+                        "git",
+                        "diff",
+                        "--name-only",
+                        "-z",
+                        str(lane["base"]),
+                        result_commit,
+                    ],
+                    cwd=self.project,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+                if changed.returncode:
+                    raise ProjectStateError(
+                        "integration result changed-path proof failed"
+                    )
+                try:
+                    changed_paths = {
+                        item.decode("utf-8")
+                        for item in changed.stdout.split(b"\0")
+                        if item
+                    }
+                except UnicodeDecodeError as exc:
+                    raise ProjectStateError(
+                        "integration result changed path is not UTF-8"
+                    ) from exc
+                if changed_paths & set(_VERSION_SURFACES):
+                    raise ProjectStateError(
+                        "worker result changed root-only version surfaces"
+                    )
+                recovery_root_value = session.get("recovery_root")
+                if not isinstance(recovery_root_value, str):
+                    raise ProjectStateError("integration intent recovery binding is absent")
+                self._scope_terminal_release(lane, Path(recovery_root_value))
+                reservations = [
+                    {
+                        key: scope[key]
+                        for key in (
+                            "kind", "path", "mode", "sequence", "reservation", "phase", "status"
+                        )
+                    }
+                    for scope in state["scopes"]
+                    if scope.get("owner") == lane_id
+                    and scope.get("kind") in _SCOPE_KIND_ORDER
+                    and scope.get("mode") == "hard"
+                    and scope.get("status") in {"active", "waiting", "cancelled"}
+                ]
+                reservations.sort(key=_scope_reservation_order)
+                if not reservations:
+                    raise ProjectStateError("integration intent has no exact hard reservations")
+                raw_dependency = lane.get("dependency_binding")
+                if raw_dependency is None:
+                    read_dependencies = [
+                        dict(item)
+                        for item in lane.get("scope_requests", [])
+                        if isinstance(item, Mapping)
+                        and (
+                            item.get("mode") == "soft"
+                            or item.get("kind") == "contract"
+                        )
+                    ]
+                    read_dependencies.sort(
+                        key=lambda item: (
+                            _SCOPE_KIND_ORDER[str(item["kind"])],
+                            str(item["path"]).casefold(),
+                            str(item["path"]),
+                            str(item["mode"]),
+                        )
+                    )
+                    dependency_stable = {
+                        "milestone_revision": hashlib.sha256(
+                            _canonical(
+                                {
+                                    "milestone": lane["milestone"],
+                                    "scheduler_binding": lane.get(
+                                        "scheduler_binding"
+                                    ),
+                                }
+                            )
+                        ).hexdigest(),
+                        "specification_revision": "R-032",
+                        "read_dependencies": read_dependencies,
+                    }
+                    dependency_binding = {
+                        "schema": "project-lane-dependency-v1",
+                        **dependency_stable,
+                        "allowed_set_digest": lane["writer"][
+                            "allowed_set_digest"
+                        ],
+                        "dependency_digest": hashlib.sha256(
+                            _canonical(dependency_stable)
+                        ).hexdigest(),
+                        "accepted_base": lane["base"],
+                        "rebind_generation": int(
+                            lane.get("scope_enqueue_sequence")
+                            or state["generation"]
+                            or 1
+                        ),
+                    }
+                else:
+                    dependency_binding = _validate_dependency_binding(
+                        raw_dependency
+                    )
+                    if dependency_binding["allowed_set_digest"] is None:
+                        dependency_binding = {
+                            **dependency_binding,
+                            "allowed_set_digest": lane["writer"][
+                                "allowed_set_digest"
+                            ],
+                        }
+                    if (
+                        dependency_binding["allowed_set_digest"]
+                        != lane["writer"]["allowed_set_digest"]
+                        or dependency_binding["accepted_base"] != lane["base"]
+                    ):
+                        raise ProjectStateError(
+                            "integration result dependency binding is stale"
+                        )
+                live = [
+                    item for item in state["integration_queue"]
+                    if item["result"]["lane_id"] == lane_id
+                    and item["status"] not in {"released", "blocked", "stale", "no-op"}
+                ]
+                if live:
+                    if len(live) == 1 and live[0]["result"]["result_commit"] == result_commit and live[0]["result"]["validation_argv"] == argv:
+                        return dict(live[0])
+                    raise ProjectStateError("lane already has a live integration intent")
+                tuple_without_digest = {
+                    "schema": "project-integration-result-v1",
+                    "lane_id": lane_id,
+                    "session": session,
+                    "writer": dict(lane["writer"]),
+                    "terminal_archive": lane["terminal_evidence"],
+                    "admitted_commit": lane["base"],
+                    "result_commit": result_commit,
+                    "reservations": reservations,
+                    "validation_argv": argv,
+                    "dependency_binding": dependency_binding,
+                    "dependency_stale": (
+                        dict(lane["integration_stale"])
+                        if isinstance(
+                            lane.get("integration_stale"),
+                            Mapping,
+                        )
+                        else None
+                    ),
+                }
+                result_tuple = {
+                    **tuple_without_digest,
+                    "digest": hashlib.sha256(_canonical(tuple_without_digest)).hexdigest(),
+                }
+                enqueue_generation = state["generation"] + 1
+                binding = {
+                    "schema": "project-integration-intent-v1",
+                    "enqueue_generation": enqueue_generation,
+                    "result": result_tuple,
+                    "admitted_tip": admitted_tip,
+                }
+                intent = {
+                    "schema": "project-integration-intent-v1",
+                    "intent_id": hashlib.sha256(_canonical(binding)).hexdigest(),
+                    "enqueue_generation": enqueue_generation,
+                    "status": "queued",
+                    "result": result_tuple,
+                    "admitted_tip": admitted_tip,
+                    "ticket": None,
+                    "candidate_commit": None,
+                    "acceptance_id": None,
+                    "release_generation": None,
+                    "diagnostic": None,
+                    "version_finalization": None,
+                }
+                state["integration_queue"].append(intent)
+                state["integration_queue"].sort(
+                    key=lambda item: (item["enqueue_generation"], item["intent_id"]),
+                )
+                state["generation"] += 1
+                _replace_json(self._state_path(anchor_id), state)
+                return dict(intent)
+
+    def record_abandoned_no_change_acceptance(
+        self,
+        anchor_id: str,
+        *,
+        expected_generation: int,
+        lane_id: str,
+        diff_archive: bytes,
+        validation_argv: Sequence[str],
+    ) -> dict[str, Any]:
+        """Accept the sole T-015 no-change exit without creating a commit."""
+
+        if (
+            not isinstance(expected_generation, int)
+            or expected_generation < 0
+            or not _LANE_ID.fullmatch(lane_id)
+            or not isinstance(diff_archive, bytes)
+            or diff_archive != b""
+        ):
+            raise ProjectStateError("abandoned no-change input is invalid")
+        argv = _validate_integration_validation_argv(list(validation_argv))
+        archive_digest = hashlib.sha256(diff_archive).hexdigest()
+
+        def release_no_op_scopes(
+            current: dict[str, Any],
+            acceptance: Mapping[str, Any],
+        ) -> bool:
+            def identity(value: Mapping[str, Any]) -> tuple[Any, ...]:
+                return (
+                    value.get("kind"),
+                    str(value.get("path", "")).casefold(),
+                    value.get("mode"),
+                    value.get("sequence"),
+                    value.get("reservation"),
+                    value.get("phase"),
+                )
+
+            expected = {
+                identity(item): item
+                for item in acceptance["reservations"]
+            }
+            observed: set[tuple[Any, ...]] = set()
+            changed = False
+            for scope in current["scopes"]:
+                if (
+                    scope.get("owner") != lane_id
+                    or scope.get("kind") not in _SCOPE_KIND_ORDER
+                    or scope.get("mode") != "hard"
+                ):
+                    continue
+                key = identity(scope)
+                recorded = expected.get(key)
+                if not isinstance(recorded, Mapping):
+                    raise ProjectStateError(
+                        "abandoned no-change reservation binding changed"
+                    )
+                observed.add(key)
+                recorded_status = recorded.get("status")
+                if recorded_status == "active":
+                    if scope.get("status") == "active":
+                        scope["status"] = "released"
+                        scope["release"] = {
+                            "acceptance_id": acceptance["acceptance_id"],
+                            "released_generation": current["generation"] + 1,
+                        }
+                        changed = True
+                    elif (
+                        scope.get("status") != "released"
+                        or scope.get("release", {}).get("acceptance_id")
+                        != acceptance["acceptance_id"]
+                    ):
+                        raise ProjectStateError(
+                            "abandoned no-change active reservation changed"
+                        )
+                elif recorded_status == "waiting":
+                    if scope.get("status") == "waiting":
+                        scope["status"] = "cancelled"
+                        changed = True
+                    elif scope.get("status") != "cancelled":
+                        raise ProjectStateError(
+                            "abandoned no-change waiting reservation changed"
+                        )
+                elif (
+                    recorded_status != "cancelled"
+                    or scope.get("status") != "cancelled"
+                ):
+                    raise ProjectStateError(
+                        "abandoned no-change cancelled reservation changed"
+                    )
+            if observed != set(expected):
+                raise ProjectStateError(
+                    "abandoned no-change reservation binding changed"
+                )
+            return changed
+
+        with _locked(self.lock_path):
+            self._manifest(anchor_id)
+            with _locked(self._anchor_state_lock_path(anchor_id)):
+                current = self._read_state_strict(anchor_id)
+                if current["generation"] != expected_generation:
+                    raise ProjectStateError("project generation changed")
+                existing = [
+                    item
+                    for item in current["integration_acceptances"]
+                    if item.get("lane_id") == lane_id
+                ]
+                if existing:
+                    stored = existing[0] if len(existing) == 1 else None
+                    if (
+                        not isinstance(stored, Mapping)
+                        or stored.get("schema")
+                        != "project-scope-integration-acceptance-v2"
+                        or stored.get("kind") != "abandoned-no-change"
+                        or stored.get("no_op_archive") != archive_digest
+                        or stored.get("validation", {}).get("command") != argv
+                    ):
+                        raise ProjectStateError(
+                            "abandoned no-change acceptance replay changed"
+                        )
+                    if release_no_op_scopes(current, stored):
+                        current["generation"] += 1
+                        _replace_json(self._state_path(anchor_id), current)
+                    return dict(stored)
+
+        observed = self.read_state(anchor_id)
+        if observed.get("status") != "present":
+            raise ProjectStateError("project state is unavailable")
+        state = observed["state"]
+        if state.get("generation") != expected_generation:
+            raise ProjectStateError("project generation changed")
+        session = _validate_lane_session(state.get("lane_session"))
+        lane = next(
+            (item for item in state.get("lanes", []) if item.get("lane_id") == lane_id),
+            None,
+        )
+        safe_stop = lane.get("safe_stop") if isinstance(lane, Mapping) else None
+        if (
+            state.get("state") != "clean"
+            or session is None
+            or state.get("integration_fence") is not None
+            or state.get("integration_executor") is not None
+            or not isinstance(lane, Mapping)
+            or lane.get("state") != "ready"
+            or lane.get("writer") is not None
+            or not isinstance(safe_stop, Mapping)
+            or safe_stop.get("status") != "completed"
+            or safe_stop.get("completed_state") != "ready"
+            or safe_stop.get("preserved_changes") is not False
+            or safe_stop.get("recovery_checkpoint_digest") is not None
+            or not _is_hex_identifier(safe_stop.get("terminal_archive"))
+            or not _GIT_OBJECT.fullmatch(str(lane.get("base")))
+        ):
+            raise ProjectStateError("abandoned no-change lane is not eligible")
+        writer = _validate_writer(safe_stop.get("writer"))
+        worktree = _absolute_no_follow(Path(str(lane["worktree"])))
+        _assert_no_link_or_reparse_ancestors(worktree)
+
+        def git(*arguments: str, cwd: Path) -> bytes:
+            result = subprocess.run(
+                ["git", *arguments],
+                cwd=cwd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            if result.returncode:
+                raise ProjectStateError("abandoned no-change Git proof failed")
+            return result.stdout
+
+        base = str(lane["base"])
+        if (
+            git("status", "--porcelain=v1", "-z", cwd=worktree)
+            or git("diff", "--binary", base, cwd=worktree) != diff_archive
+            or git("rev-parse", "--verify", "HEAD^{commit}", cwd=worktree).decode("ascii").strip() != base
+            or git(
+                "symbolic-ref", "--quiet", "HEAD", cwd=worktree,
+            ).decode("utf-8").strip() != str(lane["branch"])
+            or git(
+                "rev-parse", "--verify", f"{session['integration_ref']}^{{commit}}", cwd=self.project,
+            ).decode("ascii").strip() != base
+        ):
+            raise ProjectStateError("abandoned no-change restore binding is invalid")
+        try:
+            registry = RecoveryRegistry(worktree, state_root=Path(str(session["recovery_root"]))).state()
+        except (OSError, RecoveryStateError) as exc:
+            raise ProjectStateError("abandoned no-change recovery registry is invalid") from exc
+        releases = [
+            event
+            for event in registry.get("history", [])
+            if event.get("event") == "contained-terminal-released"
+            and event.get("lease_id") == writer.get("lease_id")
+            and event.get("run_id") == writer.get("run_id")
+            and event.get("lease_kind") == writer.get("lease_kind")
+            and event.get("allowed_set_digest") == writer.get("allowed_set_digest")
+            and event.get("terminal_success") is False
+            and event.get("handoff_digest") is None
+            and event.get("outbox_digest") is None
+            and event.get("archive_digest") == safe_stop.get("terminal_archive")
+        ]
+        if (
+            registry.get("lease") is not None
+            or registry.get("outbox") is not None
+            or registry.get("quarantine") is not None
+            or len(releases) != 1
+        ):
+            raise ProjectStateError("abandoned no-change full-tree-zero archive is missing")
+        validation_parent = self.anchor_path(anchor_id) / "no-op-validation"
+        _ensure_private_directory(validation_parent)
+        validation_worktree = validation_parent / secrets.token_hex(16)
+        add = subprocess.run(
+            ["git", "worktree", "add", "--detach", str(validation_worktree), base],
+            cwd=self.project,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if add.returncode:
+            raise ProjectStateError("abandoned no-change validation checkout creation failed")
+        try:
+            status_before = git("status", "--porcelain=v1", "-z", cwd=validation_worktree)
+            head_before = git("rev-parse", "--verify", "HEAD^{commit}", cwd=validation_worktree).decode("ascii").strip()
+            tree_before = git("rev-parse", "--verify", "HEAD^{tree}", cwd=validation_worktree).decode("ascii").strip()
+            if status_before or head_before != base:
+                raise ProjectStateError("abandoned no-change validation binding is invalid")
+            try:
+                executed = subprocess.run(
+                    argv,
+                    cwd=validation_worktree,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=300,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise ProjectStateError("abandoned no-change validation did not complete") from exc
+            status_after = git("status", "--porcelain=v1", "-z", cwd=validation_worktree)
+            head_after = git("rev-parse", "--verify", "HEAD^{commit}", cwd=validation_worktree).decode("ascii").strip()
+            tree_after = git("rev-parse", "--verify", "HEAD^{tree}", cwd=validation_worktree).decode("ascii").strip()
+            if (
+                executed.returncode != 0
+                or len(executed.stdout) > 1024 * 1024
+                or len(executed.stderr) > 1024 * 1024
+                or status_after != status_before
+                or head_after != head_before
+                or tree_after != tree_before
+            ):
+                raise ProjectStateError("abandoned no-change validation did not pass")
+        finally:
+            removed = subprocess.run(
+                ["git", "worktree", "remove", "--force", str(validation_worktree)],
+                cwd=self.project,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            if removed.returncode:
+                raise ProjectStateError("abandoned no-change validation cleanup failed")
+        validation = {
+            "result": "passed",
+            "command": argv,
+            "accepted_commit": base,
+            "head_before": head_before,
+            "tree_before": tree_before,
+            "status_before_digest": hashlib.sha256(status_before).hexdigest(),
+            "head_after": head_after,
+            "tree_after": tree_after,
+            "status_after_digest": hashlib.sha256(status_after).hexdigest(),
+            "exit_code": executed.returncode,
+            "stdout_digest": hashlib.sha256(executed.stdout).hexdigest(),
+            "stderr_digest": hashlib.sha256(executed.stderr).hexdigest(),
+        }
+        validation["digest"] = hashlib.sha256(_canonical(validation)).hexdigest()
+        with _locked(self.lock_path):
+            self._manifest(anchor_id)
+            with _locked(self._anchor_state_lock_path(anchor_id)):
+                current = self._read_state_strict(anchor_id)
+                if current["generation"] != expected_generation:
+                    raise ProjectStateError("project generation changed")
+                current_lane = next(
+                    (item for item in current["lanes"] if item.get("lane_id") == lane_id),
+                    None,
+                )
+                if current_lane != lane:
+                    raise ProjectStateError("abandoned no-change lane binding changed")
+                reservations = [
+                    {
+                        key: scope[key]
+                        for key in (
+                            "kind", "path", "mode", "sequence", "reservation", "phase", "status"
+                        )
+                    }
+                    for scope in current["scopes"]
+                    if scope.get("owner") == lane_id
+                    and scope.get("kind") in _SCOPE_KIND_ORDER
+                    and scope.get("mode") == "hard"
+                    and scope.get("status") in {"active", "waiting", "cancelled"}
+                ]
+                reservations.sort(key=_scope_reservation_order)
+                if not reservations:
+                    raise ProjectStateError("abandoned no-change has no exact hard reservations")
+                archive_parent = self.anchor_path(anchor_id) / "no-op-archives"
+                _ensure_private_directory(archive_parent)
+                _write_exclusive_bytes(archive_parent / f"{archive_digest}.diff", diff_archive)
+                candidate = {
+                    "schema": "project-scope-integration-acceptance-v2",
+                    "kind": "abandoned-no-change",
+                    "anchor_id": anchor_id,
+                    "lane_id": lane_id,
+                    "session": session,
+                    "writer": writer,
+                    "terminal_archive": safe_stop["terminal_archive"],
+                    "admitted_commit": base,
+                    "accepted_commit": base,
+                    "validation": validation,
+                    "reservations": reservations,
+                    "no_op_archive": archive_digest,
+                    "generation": current["generation"] + 1,
+                }
+                candidate["acceptance_id"] = hashlib.sha256(_canonical(candidate)).hexdigest()
+                current["integration_acceptances"].append(candidate)
+                release_no_op_scopes(current, candidate)
+                current["generation"] += 1
+                _replace_json(self._state_path(anchor_id), current)
+                return dict(candidate)
+
+    def claim_next_integration_intent(
+        self,
+        anchor_id: str,
+        *,
+        expected_generation: int,
+        executor_owner: str,
+        owner_token: str,
+        pid: int,
+        process_identity: str,
+        checkout: Mapping[str, Any],
+        requested_version_target: str | None = None,
+        version_surfaces: Mapping[str, bytes] | None = None,
+    ) -> dict[str, Any] | None:
+        """Claim the sole executor and allocate a never-reused queue ticket."""
+
+        parsed_checkout = _validate_integration_checkout(dict(checkout))
+        if (
+            not isinstance(expected_generation, int)
+            or expected_generation < 0
+            or not isinstance(executor_owner, str)
+            or not executor_owner
+            or len(executor_owner) > 128
+            or not _is_hex_identifier(owner_token)
+            or not isinstance(pid, int)
+            or isinstance(pid, bool)
+            or pid < 1
+            or not isinstance(process_identity, str)
+            or not process_identity
+            or len(process_identity) > 256
+            or parsed_checkout is None
+            or (requested_version_target is None)
+            != (version_surfaces is None)
+        ):
+            raise ProjectStateError("expected project generation is invalid")
+        version_request: dict[str, Any] | None = None
+        version_payload: dict[str, str] | None = None
+        if requested_version_target is not None:
+            if (
+                executor_owner != "root"
+                or not _VERSION_TARGET.fullmatch(requested_version_target)
+                or not isinstance(version_surfaces, Mapping)
+                or set(version_surfaces) != set(_VERSION_SURFACES)
+                or any(
+                    not isinstance(version_surfaces[path], bytes)
+                    or len(version_surfaces[path]) > 1024 * 1024
+                    for path in _VERSION_SURFACES
+                )
+            ):
+                raise ProjectStateError(
+                    "root version finalization input is invalid"
+                )
+            version_payload = {
+                path: version_surfaces[path].hex()
+                for path in _VERSION_SURFACES
+            }
+            bounded_payload = dict(version_payload)
+            bounded_payload["digest"] = _digest(bounded_payload)
+            if len(_canonical(bounded_payload) + b"\n") > MAX_JSON_BYTES:
+                raise ProjectStateError(
+                    "root version finalization payload exceeds bounded JSON size"
+                )
+            payload_digest = hashlib.sha256(
+                _canonical(version_payload)
+            ).hexdigest()
+            stable = {
+                "requested_target": requested_version_target,
+                "surfaces": list(_VERSION_SURFACES),
+                "payload_digest": payload_digest,
+            }
+            version_request = {
+                "schema": "project-version-finalization-v1",
+                "owner": "root",
+                **stable,
+                "surface_digest": hashlib.sha256(
+                    _canonical(stable)
+                ).hexdigest(),
+            }
+        with _locked(self.lock_path):
+            self._manifest(anchor_id)
+            with _locked(self._anchor_state_lock_path(anchor_id)):
+                state = self._read_state_strict(anchor_id)
+                if state["generation"] != expected_generation:
+                    raise ProjectStateError("project generation changed")
+                if (
+                    state["state"] != "clean"
+                    or state["integration_checkout"] != parsed_checkout
+                ):
+                    raise ProjectStateError(
+                        "integration executor checkout binding changed"
+                    )
+                in_progress = [
+                    item for item in state["integration_queue"]
+                    if item["status"] in {
+                        "integrating", "candidate", "validated", "cas-applied", "accepted"
+                    }
+                ]
+                if len(in_progress) > 1:
+                    raise ProjectStateError("integration queue lost single-writer serialization")
+                intent = in_progress[0] if in_progress else None
+                if intent is None:
+                    queued = [
+                        item for item in state["integration_queue"]
+                        if item["status"] == "queued"
+                    ]
+                    if not queued:
+                        return None
+                    intent = queued[0]
+                if (
+                    version_request is not None
+                    and intent["version_finalization"] is None
+                ):
+                    lane_session = _validate_lane_session(
+                        state["lane_session"],
+                    )
+                    if lane_session is None:
+                        raise ProjectStateError(
+                            "version finalization lane session is unavailable"
+                        )
+                    current_target = _version_at_integration_ref(
+                        self.project,
+                        str(lane_session["integration_ref"]),
+                    )
+                    requested_order = _version_order(
+                        str(requested_version_target),
+                    )
+                    issued_targets = [
+                        str(item["version_finalization"]["requested_target"])
+                        for item in state["integration_queue"]
+                        if item is not intent
+                        and isinstance(
+                            item.get("version_finalization"),
+                            Mapping,
+                        )
+                    ]
+                    if (
+                        requested_order <= _version_order(current_target)
+                        or any(
+                            requested_order <= _version_order(target)
+                            for target in issued_targets
+                        )
+                    ):
+                        raise ProjectStateError(
+                            "version finalization target would not advance integration order"
+                        )
+                executor = state["integration_executor"]
+                if executor is not None:
+                    same_owner = (
+                        executor["owner"] == executor_owner
+                        and executor["owner_token"] == owner_token
+                        and executor["pid"] == pid
+                        and executor["process_identity"]
+                        == process_identity
+                        and executor["intent_id"] == intent["intent_id"]
+                        and executor["checkout"] == parsed_checkout
+                    )
+                    if same_owner:
+                        if (
+                            version_request is not None
+                            and intent["version_finalization"]
+                            != version_request
+                        ):
+                            raise ProjectStateError(
+                                "version finalization replay binding changed"
+                            )
+                        result = dict(intent)
+                        result["executor_lease_id"] = executor["lease_id"]
+                        return result
+                    owner_state = _process_identity_state(
+                        int(executor["pid"]),
+                        str(executor["process_identity"]),
+                    )
+                    if owner_state == "running":
+                        raise ProjectStateError(
+                            "integration executor lease is held by a live owner"
+                        )
+                    if owner_state != "stopped":
+                        raise ProjectStateError(
+                            "integration executor process state is unknown"
+                        )
+                if state["integration_fence"] is not None and (
+                    state["integration_fence"]["intent_id"]
+                    != intent["intent_id"]
+                ):
+                    raise ProjectStateError(
+                        "integration ref is fenced for another intent"
+                    )
+                if intent["status"] == "queued":
+                    intent["status"] = "integrating"
+                    intent["ticket"] = state["integration_next_ticket"]
+                    state["integration_next_ticket"] += 1
+                if version_request is not None:
+                    if intent["version_finalization"] is None:
+                        if not any(
+                            item.get("kind") == "contract"
+                            and item.get("path") == "version-metadata"
+                            and item.get("mode") == "hard"
+                            and item.get("status") == "active"
+                            for item in intent["result"]["reservations"]
+                        ):
+                            raise ProjectStateError(
+                                "root finalizer lacks contract:version-metadata ownership"
+                            )
+                        if any(
+                            item.get("version_finalization", {}).get(
+                                "requested_target"
+                            )
+                            == requested_version_target
+                            for item in state["integration_queue"]
+                            if item is not intent
+                        ):
+                            raise ProjectStateError(
+                                "version finalization target was already issued"
+                            )
+                        assert version_payload is not None
+                        payload_parent = (
+                            self.anchor_path(anchor_id)
+                            / "version-finalizations"
+                        )
+                        _ensure_private_directory(payload_parent)
+                        payload_path = (
+                            payload_parent
+                            / f"{version_request['payload_digest']}.json"
+                        )
+                        if payload_path.exists():
+                            stored_payload = {
+                                key: value
+                                for key, value in _read_json(
+                                    payload_path
+                                ).items()
+                                if key != "digest"
+                            }
+                            if stored_payload != version_payload:
+                                raise ProjectStateError(
+                                    "version finalization payload changed"
+                                )
+                        else:
+                            _write_exclusive_json(
+                                payload_path,
+                                version_payload,
+                            )
+                        intent["version_finalization"] = version_request
+                    elif intent["version_finalization"] != version_request:
+                        raise ProjectStateError(
+                            "version finalization replay binding changed"
+                        )
+                claimed_generation = state["generation"] + 1
+                lease_stable = {
+                    "owner": executor_owner,
+                    "owner_token": owner_token,
+                    "pid": pid,
+                    "process_identity": process_identity,
+                    "intent_id": intent["intent_id"],
+                    "checkout": parsed_checkout,
+                    "claimed_generation": claimed_generation,
+                }
+                state["integration_executor"] = {
+                    "schema": "project-integration-executor-v1",
+                    "lease_id": hashlib.sha256(
+                        _canonical(lease_stable)
+                    ).hexdigest(),
+                    **lease_stable,
+                    "renewed_generation": claimed_generation,
+                }
+                if state["integration_fence"] is not None:
+                    rebound_fence = {
+                        **state["integration_fence"],
+                        "executor_lease_id": state[
+                            "integration_executor"
+                        ]["lease_id"],
+                        "generation": claimed_generation,
+                    }
+                    rebound_fence["digest"] = hashlib.sha256(
+                        _canonical(
+                            {
+                                key: value
+                                for key, value in rebound_fence.items()
+                                if key != "digest"
+                            }
+                        )
+                    ).hexdigest()
+                    state["integration_fence"] = rebound_fence
+                state["generation"] += 1
+                _replace_json(self._state_path(anchor_id), state)
+                result = dict(intent)
+                result["executor_lease_id"] = state[
+                    "integration_executor"
+                ]["lease_id"]
+                return result
+
+    @staticmethod
+    def _require_integration_executor(
+        state: Mapping[str, Any],
+        *,
+        lease_id: str,
+        intent_id: str,
+    ) -> dict[str, Any]:
+        executor = state.get("integration_executor")
+        if (
+            not isinstance(executor, dict)
+            or executor.get("lease_id") != lease_id
+            or executor.get("intent_id") != intent_id
+        ):
+            raise ProjectStateError(
+                "integration transition lacks the executor lease"
+            )
+        return executor
+
+    def renew_integration_executor(
+        self,
+        anchor_id: str,
+        *,
+        expected_generation: int,
+        lease_id: str,
+        intent_id: str,
+    ) -> dict[str, Any]:
+        with _locked(self.lock_path):
+            self._manifest(anchor_id)
+            with _locked(self._anchor_state_lock_path(anchor_id)):
+                state = self._read_state_strict(anchor_id)
+                if state["generation"] != expected_generation:
+                    raise ProjectStateError("project generation changed")
+                executor = self._require_integration_executor(
+                    state,
+                    lease_id=lease_id,
+                    intent_id=intent_id,
+                )
+                if _process_identity_state(
+                    int(executor["pid"]),
+                    str(executor["process_identity"]),
+                ) != "running":
+                    raise ProjectStateError(
+                        "integration executor process identity is vacant"
+                    )
+                state["generation"] += 1
+                executor["renewed_generation"] = state["generation"]
+                _replace_json(self._state_path(anchor_id), state)
+                return dict(executor)
+
+    def release_integration_executor(
+        self,
+        anchor_id: str,
+        *,
+        expected_generation: int,
+        lease_id: str,
+        intent_id: str,
+    ) -> dict[str, Any]:
+        with _locked(self.lock_path):
+            self._manifest(anchor_id)
+            with _locked(self._anchor_state_lock_path(anchor_id)):
+                state = self._read_state_strict(anchor_id)
+                if state["generation"] != expected_generation:
+                    raise ProjectStateError("project generation changed")
+                self._require_integration_executor(
+                    state,
+                    lease_id=lease_id,
+                    intent_id=intent_id,
+                )
+                state["integration_executor"] = None
+                state["generation"] += 1
+                _replace_json(self._state_path(anchor_id), state)
+                return self._read_state_strict(anchor_id)
+
+    def prepare_integration_ref_cas(
+        self,
+        anchor_id: str,
+        *,
+        expected_generation: int,
+        intent_id: str,
+        executor_lease_id: str,
+    ) -> dict[str, Any]:
+        with _locked(self.lock_path):
+            self._manifest(anchor_id)
+            with _locked(self._anchor_state_lock_path(anchor_id)):
+                state = self._read_state_strict(anchor_id)
+                if state["generation"] != expected_generation:
+                    raise ProjectStateError("project generation changed")
+                self._require_integration_executor(
+                    state,
+                    lease_id=executor_lease_id,
+                    intent_id=intent_id,
+                )
+                intent = next(
+                    (
+                        item
+                        for item in state["integration_queue"]
+                        if item["intent_id"] == intent_id
+                    ),
+                    None,
+                )
+                if (
+                    not isinstance(intent, dict)
+                    or intent["status"] != "validated"
+                    or not isinstance(intent["candidate_commit"], str)
+                ):
+                    raise ProjectStateError(
+                        "integration ref fence transition is invalid"
+                    )
+                existing = state["integration_fence"]
+                if existing is not None:
+                    if (
+                        existing["intent_id"] == intent_id
+                        and existing["executor_lease_id"]
+                        == executor_lease_id
+                    ):
+                        return dict(existing)
+                    raise ProjectStateError(
+                        "integration ref is already fenced"
+                    )
+                fence = {
+                    "schema": "project-integration-ref-fence-v1",
+                    "intent_id": intent_id,
+                    "executor_lease_id": executor_lease_id,
+                    "admitted_commit": intent["admitted_tip"],
+                    "candidate_commit": intent["candidate_commit"],
+                    "state": "prepared",
+                    "diagnostic": None,
+                    "generation": state["generation"] + 1,
+                }
+                fence["digest"] = hashlib.sha256(
+                    _canonical(fence)
+                ).hexdigest()
+                state["integration_fence"] = fence
+                state["generation"] += 1
+                state["integration_executor"]["renewed_generation"] = state[
+                    "generation"
+                ]
+                _replace_json(self._state_path(anchor_id), state)
+                return dict(fence)
+
+    def quarantine_integration_ref(
+        self,
+        anchor_id: str,
+        *,
+        expected_generation: int,
+        intent_id: str,
+        executor_lease_id: str,
+        diagnostic_code: str,
+    ) -> dict[str, Any]:
+        if diagnostic_code not in _INTEGRATION_DIAGNOSTICS:
+            raise ProjectStateError("integration ref quarantine is invalid")
+        with _locked(self.lock_path):
+            self._manifest(anchor_id)
+            with _locked(self._anchor_state_lock_path(anchor_id)):
+                state = self._read_state_strict(anchor_id)
+                if state["generation"] != expected_generation:
+                    raise ProjectStateError("project generation changed")
+                self._require_integration_executor(
+                    state,
+                    lease_id=executor_lease_id,
+                    intent_id=intent_id,
+                )
+                fence = state["integration_fence"]
+                if (
+                    not isinstance(fence, dict)
+                    or fence["intent_id"] != intent_id
+                ):
+                    raise ProjectStateError(
+                        "integration ref quarantine lacks a fence"
+                    )
+                diagnostic = {
+                    "code": diagnostic_code,
+                    "digest": hashlib.sha256(
+                        _canonical(
+                            {
+                                "intent_id": intent_id,
+                                "code": diagnostic_code,
+                                "candidate_commit": fence[
+                                    "candidate_commit"
+                                ],
+                            }
+                        )
+                    ).hexdigest(),
+                }
+                updated = {
+                    **fence,
+                    "state": "quarantined",
+                    "diagnostic": diagnostic,
+                    "generation": state["generation"] + 1,
+                }
+                updated["digest"] = hashlib.sha256(
+                    _canonical(
+                        {
+                            key: value
+                            for key, value in updated.items()
+                            if key != "digest"
+                        }
+                    )
+                ).hexdigest()
+                state["integration_fence"] = updated
+                state["generation"] += 1
+                state["integration_executor"]["renewed_generation"] = state[
+                    "generation"
+                ]
+                _replace_json(self._state_path(anchor_id), state)
+                return dict(updated)
+
+    def mark_integration_pre_cas_stale(
+        self,
+        anchor_id: str,
+        *,
+        expected_generation: int,
+        intent_id: str,
+        executor_lease_id: str,
+        observed_tip: str,
+    ) -> dict[str, Any]:
+        """Consume a prepared-fence CAS race without accepting its candidate."""
+
+        if (
+            not isinstance(expected_generation, int)
+            or expected_generation < 0
+            or not _is_hex_identifier(intent_id)
+            or not _GIT_OBJECT.fullmatch(observed_tip)
+        ):
+            raise ProjectStateError("integration pre-CAS stale input is invalid")
+        with _locked(self.lock_path):
+            self._manifest(anchor_id)
+            with _locked(self._anchor_state_lock_path(anchor_id)):
+                state = self._read_state_strict(anchor_id)
+                if state["generation"] != expected_generation:
+                    raise ProjectStateError("project generation changed")
+                self._require_integration_executor(
+                    state,
+                    lease_id=executor_lease_id,
+                    intent_id=intent_id,
+                )
+                fence = state["integration_fence"]
+                intent = next(
+                    (
+                        item
+                        for item in state["integration_queue"]
+                        if item["intent_id"] == intent_id
+                    ),
+                    None,
+                )
+                session = _validate_lane_session(state["lane_session"])
+                if (
+                    not isinstance(fence, dict)
+                    or fence.get("intent_id") != intent_id
+                    or fence.get("executor_lease_id")
+                    != executor_lease_id
+                    or fence.get("state") != "prepared"
+                    or not isinstance(intent, dict)
+                    or intent.get("status") != "validated"
+                    or session is None
+                    or observed_tip
+                    in {
+                        fence.get("admitted_commit"),
+                        fence.get("candidate_commit"),
+                    }
+                ):
+                    raise ProjectStateError(
+                        "integration pre-CAS stale transition is invalid"
+                    )
+                actual = subprocess.run(
+                    [
+                        "git",
+                        "rev-parse",
+                        "--verify",
+                        f"{session['integration_ref']}^{{commit}}",
+                    ],
+                    cwd=self.project,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+                if (
+                    actual.returncode
+                    or actual.stdout.decode("ascii", "ignore").strip()
+                    != observed_tip
+                ):
+                    raise ProjectStateError(
+                        "integration pre-CAS stale Git proof changed"
+                    )
+                diagnostic = {
+                    "code": "cas-race",
+                    "digest": hashlib.sha256(
+                        _canonical(
+                            {
+                                "intent_id": intent_id,
+                                "code": "cas-race",
+                            }
+                        )
+                    ).hexdigest(),
+                }
+                intent["status"] = "stale"
+                intent["diagnostic"] = diagnostic
+                state["integration_fence"] = None
+                state["generation"] += 1
+                state["integration_executor"]["renewed_generation"] = state[
+                    "generation"
+                ]
+                _replace_json(self._state_path(anchor_id), state)
+                return dict(intent)
+
+    def read_version_finalization_payload(
+        self,
+        anchor_id: str,
+        *,
+        intent_id: str,
+        executor_lease_id: str,
+    ) -> dict[str, bytes] | None:
+        observed = self.read_state(anchor_id)
+        if observed.get("status") != "present":
+            raise ProjectStateError("project state is unavailable")
+        state = observed["state"]
+        self._require_integration_executor(
+            state,
+            lease_id=executor_lease_id,
+            intent_id=intent_id,
+        )
+        intent = next(
+            (
+                item
+                for item in state["integration_queue"]
+                if item["intent_id"] == intent_id
+            ),
+            None,
+        )
+        request = (
+            intent.get("version_finalization")
+            if isinstance(intent, Mapping)
+            else None
+        )
+        if request is None:
+            return None
+        parsed = _validate_version_finalization(request)
+        assert parsed is not None
+        payload_path = (
+            self.anchor_path(anchor_id)
+            / "version-finalizations"
+            / f"{parsed['payload_digest']}.json"
+        )
+        payload = {
+            key: value
+            for key, value in _read_json(payload_path).items()
+            if key != "digest"
+        }
+        if (
+            set(payload) != set(_VERSION_SURFACES)
+            or hashlib.sha256(_canonical(payload)).hexdigest()
+            != parsed["payload_digest"]
+        ):
+            raise ProjectStateError(
+                "version finalization payload is invalid"
+            )
+        try:
+            return {
+                path: bytes.fromhex(payload[path])
+                for path in _VERSION_SURFACES
+            }
+        except (TypeError, ValueError) as exc:
+            raise ProjectStateError(
+                "version finalization payload is invalid"
+            ) from exc
+
+    def record_integration_candidate(
+        self,
+        anchor_id: str,
+        *,
+        expected_generation: int,
+        intent_id: str,
+        candidate_commit: str,
+        executor_lease_id: str,
+    ) -> dict[str, Any]:
+        if (
+            not isinstance(expected_generation, int)
+            or expected_generation < 0
+            or not _is_hex_identifier(intent_id)
+            or not _GIT_OBJECT.fullmatch(candidate_commit)
+        ):
+            raise ProjectStateError("integration candidate input is invalid")
+        with _locked(self.lock_path):
+            self._manifest(anchor_id)
+            with _locked(self._anchor_state_lock_path(anchor_id)):
+                state = self._read_state_strict(anchor_id)
+                if state["generation"] != expected_generation:
+                    raise ProjectStateError("project generation changed")
+                self._require_integration_executor(
+                    state,
+                    lease_id=executor_lease_id,
+                    intent_id=intent_id,
+                )
+                intent = next(
+                    (item for item in state["integration_queue"] if item["intent_id"] == intent_id),
+                    None,
+                )
+                if not isinstance(intent, dict):
+                    raise ProjectStateError("integration intent is absent")
+                if intent["status"] == "candidate" and intent["candidate_commit"] == candidate_commit:
+                    return dict(intent)
+                if intent["status"] != "integrating" or intent["candidate_commit"] is not None:
+                    raise ProjectStateError("integration candidate transition is invalid")
+                intent["candidate_commit"] = candidate_commit
+                intent["status"] = "candidate"
+                state["generation"] += 1
+                _replace_json(self._state_path(anchor_id), state)
+                return dict(intent)
+
+    def mark_integration_validated(
+        self,
+        anchor_id: str,
+        *,
+        expected_generation: int,
+        intent_id: str,
+        executor_lease_id: str,
+    ) -> dict[str, Any]:
+        return self._advance_integration_intent(
+            anchor_id,
+            expected_generation=expected_generation,
+            intent_id=intent_id,
+            executor_lease_id=executor_lease_id,
+            current="candidate",
+            target="validated",
+        )
+
+    def mark_integration_cas_applied(
+        self,
+        anchor_id: str,
+        *,
+        expected_generation: int,
+        intent_id: str,
+        executor_lease_id: str,
+    ) -> dict[str, Any]:
+        return self._advance_integration_intent(
+            anchor_id,
+            expected_generation=expected_generation,
+            intent_id=intent_id,
+            executor_lease_id=executor_lease_id,
+            current="validated",
+            target="cas-applied",
+        )
+
+    def _advance_integration_intent(
+        self,
+        anchor_id: str,
+        *,
+        expected_generation: int,
+        intent_id: str,
+        executor_lease_id: str,
+        current: str,
+        target: str,
+    ) -> dict[str, Any]:
+        if (
+            not isinstance(expected_generation, int)
+            or expected_generation < 0
+            or not _is_hex_identifier(intent_id)
+        ):
+            raise ProjectStateError("integration intent input is invalid")
+        with _locked(self.lock_path):
+            self._manifest(anchor_id)
+            with _locked(self._anchor_state_lock_path(anchor_id)):
+                state = self._read_state_strict(anchor_id)
+                if state["generation"] != expected_generation:
+                    raise ProjectStateError("project generation changed")
+                self._require_integration_executor(
+                    state,
+                    lease_id=executor_lease_id,
+                    intent_id=intent_id,
+                )
+                intent = next(
+                    (item for item in state["integration_queue"] if item["intent_id"] == intent_id),
+                    None,
+                )
+                if not isinstance(intent, dict):
+                    raise ProjectStateError("integration intent is absent")
+                if intent["status"] == target:
+                    return dict(intent)
+                if intent["status"] != current:
+                    raise ProjectStateError("integration intent transition is invalid")
+                if target == "cas-applied":
+                    fence = state["integration_fence"]
+                    if (
+                        not isinstance(fence, dict)
+                        or fence.get("intent_id") != intent_id
+                        or fence.get("executor_lease_id")
+                        != executor_lease_id
+                        or fence.get("candidate_commit")
+                        != intent.get("candidate_commit")
+                    ):
+                        raise ProjectStateError(
+                            "integration CAS lacks a durable ref fence"
+                        )
+                intent["status"] = target
+                if target == "cas-applied":
+                    fence = {
+                        **state["integration_fence"],
+                        "state": "cas-applied",
+                        "diagnostic": None,
+                        "generation": state["generation"] + 1,
+                    }
+                    fence["digest"] = hashlib.sha256(
+                        _canonical(
+                            {
+                                key: value
+                                for key, value in fence.items()
+                                if key != "digest"
+                            }
+                        )
+                    ).hexdigest()
+                    state["integration_fence"] = fence
+                state["generation"] += 1
+                state["integration_executor"]["renewed_generation"] = state[
+                    "generation"
+                ]
+                _replace_json(self._state_path(anchor_id), state)
+                return dict(intent)
+
+    def mark_integration_blocked(
+        self,
+        anchor_id: str,
+        *,
+        expected_generation: int,
+        intent_id: str,
+        status: str,
+        diagnostic_code: str,
+        executor_lease_id: str,
+    ) -> dict[str, Any]:
+        if (
+            not isinstance(expected_generation, int)
+            or expected_generation < 0
+            or not _is_hex_identifier(intent_id)
+            or status not in {"blocked", "stale"}
+            or diagnostic_code not in _INTEGRATION_DIAGNOSTICS
+        ):
+            raise ProjectStateError("integration blocked input is invalid")
+        diagnostic = {
+            "code": diagnostic_code,
+            "digest": hashlib.sha256(
+                _canonical({"intent_id": intent_id, "code": diagnostic_code}),
+            ).hexdigest(),
+        }
+        with _locked(self.lock_path):
+            self._manifest(anchor_id)
+            with _locked(self._anchor_state_lock_path(anchor_id)):
+                state = self._read_state_strict(anchor_id)
+                if state["generation"] != expected_generation:
+                    raise ProjectStateError("project generation changed")
+                self._require_integration_executor(
+                    state,
+                    lease_id=executor_lease_id,
+                    intent_id=intent_id,
+                )
+                if state["integration_fence"] is not None:
+                    raise ProjectStateError(
+                        "fenced integration intent cannot become ordinarily blocked"
+                    )
+                intent = next(
+                    (item for item in state["integration_queue"] if item["intent_id"] == intent_id),
+                    None,
+                )
+                if not isinstance(intent, dict):
+                    raise ProjectStateError("integration intent is absent")
+                if intent["status"] == status and intent["diagnostic"] == diagnostic:
+                    return dict(intent)
+                if intent["status"] in {"released", "accepted", "no-op"}:
+                    raise ProjectStateError("accepted integration intent cannot be blocked")
+                intent["status"] = status
+                intent["diagnostic"] = diagnostic
+                state["generation"] += 1
+                _replace_json(self._state_path(anchor_id), state)
+                return dict(intent)
+
+    def mark_integration_accepted(
+        self,
+        anchor_id: str,
+        *,
+        expected_generation: int,
+        intent_id: str,
+        acceptance_id: str,
+        executor_lease_id: str,
+    ) -> dict[str, Any]:
+        if (
+            not isinstance(expected_generation, int)
+            or expected_generation < 0
+            or not _is_hex_identifier(intent_id)
+            or not _is_hex_identifier(acceptance_id)
+        ):
+            raise ProjectStateError("integration acceptance input is invalid")
+        with _locked(self.lock_path):
+            self._manifest(anchor_id)
+            with _locked(self._anchor_state_lock_path(anchor_id)):
+                state = self._read_state_strict(anchor_id)
+                if state["generation"] != expected_generation:
+                    raise ProjectStateError("project generation changed")
+                self._require_integration_executor(
+                    state,
+                    lease_id=executor_lease_id,
+                    intent_id=intent_id,
+                )
+                intent = next(
+                    (item for item in state["integration_queue"] if item["intent_id"] == intent_id),
+                    None,
+                )
+                if not isinstance(intent, dict):
+                    raise ProjectStateError("integration intent is absent")
+                if intent["status"] == "accepted" and intent["acceptance_id"] == acceptance_id:
+                    return dict(intent)
+                if intent["status"] != "cas-applied":
+                    raise ProjectStateError("integration acceptance transition is invalid")
+                fence = state["integration_fence"]
+                if (
+                    not isinstance(fence, Mapping)
+                    or fence.get("intent_id") != intent_id
+                    or fence.get("candidate_commit")
+                    != intent.get("candidate_commit")
+                ):
+                    raise ProjectStateError(
+                        "integration acceptance lacks a ref fence"
+                    )
+                acceptance = next(
+                    (
+                        item for item in state["integration_acceptances"]
+                        if item.get("acceptance_id") == acceptance_id
+                    ),
+                    None,
+                )
+                if (
+                    not isinstance(acceptance, dict)
+                    or acceptance.get("lane_id") != intent["result"]["lane_id"]
+                    or acceptance.get("accepted_commit") != intent["candidate_commit"]
+                    or acceptance.get("admitted_commit") != intent["result"]["admitted_commit"]
+                    or acceptance.get("terminal_archive") != intent["result"]["terminal_archive"]
+                    or acceptance.get("writer") != intent["result"]["writer"]
+                ):
+                    raise ProjectStateError("registry-resident integration acceptance is absent")
+                intent["acceptance_id"] = acceptance_id
+                intent["status"] = "accepted"
+                state["generation"] += 1
+                _replace_json(self._state_path(anchor_id), state)
+                return dict(intent)
+
+    def mark_integration_released(
+        self,
+        anchor_id: str,
+        *,
+        expected_generation: int,
+        intent_id: str,
+        executor_lease_id: str,
+    ) -> dict[str, Any]:
+        if (
+            not isinstance(expected_generation, int)
+            or expected_generation < 0
+            or not _is_hex_identifier(intent_id)
+        ):
+            raise ProjectStateError("integration release input is invalid")
+        with _locked(self.lock_path):
+            self._manifest(anchor_id)
+            with _locked(self._anchor_state_lock_path(anchor_id)):
+                state = self._read_state_strict(anchor_id)
+                if state["generation"] != expected_generation:
+                    raise ProjectStateError("project generation changed")
+                self._require_integration_executor(
+                    state,
+                    lease_id=executor_lease_id,
+                    intent_id=intent_id,
+                )
+                intent = next(
+                    (item for item in state["integration_queue"] if item["intent_id"] == intent_id),
+                    None,
+                )
+                if not isinstance(intent, dict):
+                    raise ProjectStateError("integration intent is absent")
+                if intent["status"] == "released":
+                    return dict(intent)
+                if intent["status"] != "accepted" or not isinstance(intent.get("acceptance_id"), str):
+                    raise ProjectStateError("integration release transition is invalid")
+                expected = intent["acceptance_id"]
+                owned = [
+                    scope for scope in state["scopes"]
+                    if scope.get("owner") == intent["result"]["lane_id"]
+                    and scope.get("kind") in _SCOPE_KIND_ORDER
+                    and scope.get("mode") == "hard"
+                ]
+                if not owned or any(
+                    scope.get("status") not in {"released", "cancelled"}
+                    or (
+                        scope.get("status") == "released"
+                        and scope.get("release", {}).get("acceptance_id") != expected
+                    )
+                    for scope in owned
+                ):
+                    raise ProjectStateError("integration scopes were not released")
+                intent["status"] = "released"
+                intent["release_generation"] = state["generation"] + 1
+                fence = state["integration_fence"]
+                if (
+                    not isinstance(fence, Mapping)
+                    or fence.get("intent_id") != intent_id
+                    or fence.get("candidate_commit")
+                    != intent.get("candidate_commit")
+                ):
+                    raise ProjectStateError(
+                        "integration release lacks its ref fence"
+                    )
+                state["integration_fence"] = None
+                state["generation"] += 1
+                _replace_json(self._state_path(anchor_id), state)
+                return dict(intent)
 
     def begin_protected_adoption(
         self,
@@ -4341,6 +7385,13 @@ class ProjectStateStore:
                     raise ProjectStateError("project generation changed")
                 if state["state"] != "clean":
                     raise ProjectStateError("breached project state cannot admit lanes")
+                if (
+                    state["integration_fence"] is not None
+                    and scope_release_acceptance_id is None
+                ):
+                    raise ProjectStateError(
+                        "integration ref is fenced pending acceptance"
+                    )
                 lane_session = _validate_lane_session(state["lane_session"])
                 if lane_session is None:
                     raise ProjectStateError("lane session binding is absent")
@@ -4371,6 +7422,7 @@ class ProjectStateStore:
                 _validate_lane_projection_transition(
                     state["lanes"],
                     validated_lanes,
+                    stale_acceptance_id=scope_release_acceptance_id,
                 )
                 _validate_safe_stop_transition(
                     state["lanes"],

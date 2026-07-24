@@ -690,6 +690,7 @@ class ProjectSchedulerFilesystemM4Tests(unittest.TestCase):
                 "allowed_set_digest": "a" * 64,
                 "lease_kind": "normal-contained",
             }
+            lane["dependency_binding"]["allowed_set_digest"] = "a" * 64
             lane["terminal_evidence"] = "d" * 64
         elif state_name == "recovery-ready":
             lane["state"] = state_name

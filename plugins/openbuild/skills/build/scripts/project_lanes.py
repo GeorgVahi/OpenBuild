@@ -60,6 +60,7 @@ class ProjectLaneCoordinator:
         recovery_root: Path,
         lane_root: Path,
         integration_ref: str,
+        specification_revision: str = "R-032",
         fault: str | None = None,
     ) -> None:
         self.checkout = _safe_dir(checkout)
@@ -77,6 +78,9 @@ class ProjectLaneCoordinator:
         ):
             raise ProjectLaneError("integration ref is invalid")
         self.integration_ref = integration_ref
+        if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,256}", specification_revision):
+            raise ProjectLaneError("specification revision is invalid")
+        self.specification_revision = specification_revision
         self.fault = fault
         self.common = self._common_identity()
         self.base = self._git("rev-parse", "--verify", "HEAD").decode("ascii").strip()
@@ -143,6 +147,86 @@ class ProjectLaneCoordinator:
         ):
             raise ProjectLaneError("lane session integration binding changed")
         return state
+
+    @staticmethod
+    def _assert_admission_open(state: Mapping[str, Any]) -> None:
+        if state.get("integration_fence") is not None:
+            raise ProjectLaneError(
+                "integration ref is fenced pending acceptance"
+            )
+
+    def _dependency_binding(
+        self,
+        state: Mapping[str, Any],
+        *,
+        milestone: str,
+        scheduler_binding: Mapping[str, Any] | None,
+        scope_requests: Sequence[Mapping[str, Any]],
+        accepted_base: str,
+        allowed_set_digest: str | None,
+        generation: int,
+    ) -> dict[str, Any]:
+        milestone_record = (
+            next(
+                (
+                    item
+                    for item in state.get("milestones", [])
+                    if isinstance(scheduler_binding, Mapping)
+                    and item.get("task_id")
+                    == scheduler_binding.get("task_id")
+                    and item.get("milestone_id")
+                    == scheduler_binding.get("milestone_id")
+                ),
+                None,
+            )
+            if scheduler_binding is not None
+            else None
+        )
+        milestone_contract = (
+            {
+                key: value
+                for key, value in milestone_record.items()
+                if key not in {"state", "validation"}
+            }
+            if isinstance(milestone_record, Mapping)
+            else {
+                "milestone": milestone,
+                "scheduler_binding": scheduler_binding,
+            }
+        )
+        read_dependencies = [
+            dict(item)
+            for item in scope_requests
+            if item.get("mode") == "soft"
+            or item.get("kind") == "contract"
+        ]
+        read_dependencies.sort(
+            key=lambda item: (
+                {"file": 0, "directory": 1, "contract": 2, "resource": 3}[
+                    str(item["kind"])
+                ],
+                str(item["path"]).casefold(),
+                str(item["path"]),
+                str(item["mode"]),
+            )
+        )
+        stable = {
+            "milestone_revision": hashlib.sha256(
+                _canonical(milestone_contract)
+            ).hexdigest(),
+            "specification_revision": self.specification_revision,
+            "read_dependencies": read_dependencies,
+        }
+        return {
+            "schema": "project-lane-dependency-v1",
+            **stable,
+            "allowed_set_digest": allowed_set_digest,
+            "dependency_digest": hashlib.sha256(
+                _canonical(stable)
+            ).hexdigest(),
+            "accepted_base": accepted_base,
+            "rebind_generation": generation,
+        }
 
     def _bind_session(self, integration_ref: str) -> str:
         expected = {
@@ -557,6 +641,7 @@ class ProjectLaneCoordinator:
             raise ProjectLaneError("target worktree must be beneath an existing managed directory")
         _assert_no_link_or_reparse_ancestors(worktree.parent)
         state = self._state()
+        self._assert_admission_open(state)
         self._assert_binding(state)
         parsed_scheduler_binding = self._assert_scheduler_lane_request(
             state,
@@ -592,6 +677,15 @@ class ProjectLaneCoordinator:
         branch = f"refs/heads/openbuild/lanes/{lane_id}"
         existing_lane = next((lane for lane in lanes if lane.get("lane_id") == lane_id), None)
         if isinstance(existing_lane, dict):
+            if (
+                existing_lane.get("state") == "waiting-for-scope"
+                and existing_lane.get("base") != self.base
+                and existing_lane.get("writer") is None
+                and existing_lane.get("integration_stale") is not None
+            ):
+                raise ProjectLaneError(
+                    "waiting lane requires a full dependency rebind"
+                )
             if (
                 existing_lane.get("state") == "waiting-for-scope"
                 and existing_lane.get("base") != self.base
@@ -644,6 +738,18 @@ class ProjectLaneCoordinator:
                 ):
                     refreshed = dict(existing_lane)
                     refreshed["base"] = self.base
+                    dependency_binding = refreshed.get(
+                        "dependency_binding"
+                    )
+                    if isinstance(dependency_binding, Mapping):
+                        refreshed["dependency_binding"] = {
+                            **dependency_binding,
+                            "accepted_base": self.base,
+                            "rebind_generation": int(
+                                state["generation"]
+                            )
+                            + 1,
+                        }
                     refreshed_lanes = [
                         refreshed
                         if lane.get("lane_id") == lane_id
@@ -747,6 +853,15 @@ class ProjectLaneCoordinator:
         lane = {"lane_id": lane_id, "milestone": milestone_text, "reader_floor": PROJECT_LANE_READER_FLOOR, "common": self.common, "base": self.base, "branch": branch, "worktree": str(worktree), "scopes": canonical_scopes, "scope_schema": "project-scopes-v1", "scope_requests": requested_scopes, "scope_enqueue_sequence": int(state["generation"]) + 1, "state": "waiting-for-scope" if waiting else "creating", "writer": None}
         if parsed_scheduler_binding is not None:
             lane["scheduler_binding"] = parsed_scheduler_binding
+        lane["dependency_binding"] = self._dependency_binding(
+            state,
+            milestone=milestone_text,
+            scheduler_binding=parsed_scheduler_binding,
+            scope_requests=requested_scopes,
+            accepted_base=self.base,
+            allowed_set_digest=None,
+            generation=int(state["generation"]) + 1,
+        )
         self._trip("before-lane-state")
         try:
             self._publish(state, [*lanes, lane], merged_scopes)
@@ -769,6 +884,179 @@ class ProjectLaneCoordinator:
         if reservation["status"] == "waiting-for-scope":
             return lane
         return self._materialize(lane)
+
+    def refresh_integration_stale(
+        self,
+        lane_id: str,
+        *,
+        allowed_set_digest: str,
+        specification_revision: str,
+    ) -> dict[str, Any]:
+        """Consume a stale marker with exact Git and dependency rebind proof."""
+
+        if (
+            not _LANE.fullmatch(lane_id)
+            or not re.fullmatch(r"[0-9a-f]{64}", allowed_set_digest)
+            or specification_revision != self.specification_revision
+        ):
+            raise ProjectLaneError("lane dependency rebind input is invalid")
+        for _ in range(8):
+            state = self._state()
+            self._assert_admission_open(state)
+            self._assert_binding(state)
+            lane = next(
+                (
+                    dict(item)
+                    for item in state["lanes"]
+                    if item.get("lane_id") == lane_id
+                ),
+                None,
+            )
+            if not isinstance(lane, dict):
+                raise ProjectLaneError("lane does not exist")
+            stale = lane.get("integration_stale")
+            if stale is None:
+                binding = lane.get("dependency_binding")
+                if (
+                    isinstance(binding, Mapping)
+                    and binding.get("allowed_set_digest")
+                    == allowed_set_digest
+                    and binding.get("specification_revision")
+                    == specification_revision
+                ):
+                    return lane
+                raise ProjectLaneError("lane is not integration-stale")
+            if (
+                not isinstance(stale, Mapping)
+                or lane.get("writer") is not None
+                or lane.get("state")
+                not in {"waiting-for-scope", "creating", "ready"}
+            ):
+                raise ProjectLaneError(
+                    "lane dependency rebind is not eligible"
+                )
+            accepted = self._git(
+                "rev-parse",
+                "--verify",
+                self.integration_ref,
+            ).decode("ascii").strip()
+            if stale.get("accepted_commit") != accepted:
+                raise ProjectLaneError(
+                    "lane stale marker is not the accepted common base"
+                )
+            worktree = Path(str(lane["worktree"]))
+            branch = str(lane["branch"])
+            branch_short = branch.removeprefix("refs/heads/")
+            if worktree.exists():
+                worktree = _safe_dir(worktree)
+                if (
+                    self._common_identity(worktree) != self.common
+                    or self._git(
+                        "status",
+                        "--porcelain=v1",
+                        "-z",
+                        cwd=worktree,
+                    )
+                    or self._git(
+                        "symbolic-ref",
+                        "--quiet",
+                        "--short",
+                        "HEAD",
+                        cwd=worktree,
+                        allow_failure=True,
+                    ).decode("utf-8").strip()
+                    != branch_short
+                ):
+                    raise ProjectLaneError(
+                        "lane dependency rebind worktree is not clean"
+                    )
+                head = self._git(
+                    "rev-parse",
+                    "--verify",
+                    "HEAD^{commit}",
+                    cwd=worktree,
+                ).decode("ascii").strip()
+                if head not in {lane["base"], accepted}:
+                    raise ProjectLaneError(
+                        "lane dependency rebind contains unintegrated commits"
+                    )
+                if head != accepted:
+                    self._git("checkout", "--detach", accepted, cwd=worktree)
+                    update = self._git_checked_result(
+                        "update-ref",
+                        branch,
+                        accepted,
+                        str(lane["base"]),
+                    )
+                    if update.returncode:
+                        raise ProjectLaneError(
+                            "lane dependency branch CAS failed"
+                        )
+                    self._git("checkout", branch_short, cwd=worktree)
+            else:
+                branch_tip = self._git(
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    branch,
+                    allow_failure=True,
+                ).decode("ascii").strip()
+                if branch_tip:
+                    if branch_tip not in {lane["base"], accepted}:
+                        raise ProjectLaneError(
+                            "lane dependency rebind branch contains commits"
+                        )
+                    if branch_tip != accepted:
+                        update = self._git_checked_result(
+                            "update-ref",
+                            branch,
+                            accepted,
+                            str(lane["base"]),
+                        )
+                        if update.returncode:
+                            raise ProjectLaneError(
+                                "lane dependency branch CAS failed"
+                            )
+                    self._git("worktree", "add", str(worktree), branch)
+                else:
+                    self._git(
+                        "worktree",
+                        "add",
+                        "-b",
+                        branch_short,
+                        str(worktree),
+                        accepted,
+                    )
+            binding = self._dependency_binding(
+                state,
+                milestone=str(lane["milestone"]),
+                scheduler_binding=(
+                    lane.get("scheduler_binding")
+                    if isinstance(lane.get("scheduler_binding"), Mapping)
+                    else None
+                ),
+                scope_requests=[
+                    dict(item) for item in lane.get("scope_requests", [])
+                ],
+                accepted_base=accepted,
+                allowed_set_digest=allowed_set_digest,
+                generation=int(state["generation"]) + 1,
+            )
+            try:
+                return self.store.rebind_lane_dependencies(
+                    self.anchor_id,
+                    expected_generation=int(state["generation"]),
+                    lane_id=lane_id,
+                    accepted_commit=accepted,
+                    dependency_binding=binding,
+                )
+            except ProjectStateError as exc:
+                if str(exc) == "project generation changed":
+                    continue
+                raise ProjectLaneError(str(exc)) from exc
+        raise ProjectLaneError(
+            "lane dependency rebind could not win the project generation CAS"
+        )
 
     def _materialize(self, lane: Mapping[str, Any]) -> dict[str, Any]:
         worktree = Path(str(lane["worktree"]))
@@ -807,11 +1095,16 @@ class ProjectLaneCoordinator:
         for _ in range(8):
             self._assert_legacy_vacancy()
             state = self._state()
+            self._assert_admission_open(state)
             self._assert_binding(state)
             lanes = list(state["lanes"])
             lane = next((item for item in lanes if item.get("lane_id") == lane_id), None)
             if not isinstance(lane, dict) or lane.get("state") not in {"creating", "ready", "running"}:
                 raise ProjectLaneError("lane cannot be resumed")
+            if lane.get("integration_stale") is not None:
+                raise ProjectLaneError(
+                    "lane dependencies require a fresh accepted-base rebind"
+                )
             worktree = _safe_dir(Path(lane["worktree"]))
             if self._common_identity(worktree) != self.common:
                 raise ProjectLaneError("lane Git common-directory identity drifted")
@@ -868,6 +1161,7 @@ class ProjectLaneCoordinator:
         except ProjectScopeError as exc:
             raise ProjectLaneError(str(exc)) from exc
         state = self._state()
+        self._assert_admission_open(state)
         self._assert_binding(state)
         lane = next(
             (item for item in state["lanes"] if item.get("lane_id") == lane_id),
@@ -875,6 +1169,21 @@ class ProjectLaneCoordinator:
         )
         if not isinstance(lane, dict):
             raise ProjectLaneError("runner lane does not exist")
+        dependency_binding = lane.get("dependency_binding")
+        if (
+            (
+                require_ready
+                and lane.get("integration_stale") is not None
+            )
+            or (
+                isinstance(dependency_binding, Mapping)
+                and dependency_binding.get("accepted_base")
+                != lane.get("base")
+            )
+        ):
+            raise ProjectLaneError(
+                "lane dependencies require a fresh accepted-base rebind"
+            )
         self._assert_scheduler_activation(
             state,
             lane,
@@ -1004,6 +1313,7 @@ class ProjectLaneCoordinator:
             raise ProjectLaneError("safe-stop rebind binding is invalid")
         for _ in range(8):
             state = self._state()
+            self._assert_admission_open(state)
             self._assert_binding(state)
             lanes = [dict(item) for item in state["lanes"]]
             lane = next((item for item in lanes if item.get("lane_id") == lane_id), None)
@@ -1117,7 +1427,11 @@ class ProjectLaneCoordinator:
             ]
             if requested_shape != intent.get("requested_scopes"):
                 raise ProjectLaneError("safe-stop requested scope binding changed")
-            self.scope_manager._promote(lanes, scopes)
+            self.scope_manager._promote(
+                lanes,
+                scopes,
+                accepted_tip=self.scope_manager._integration_tip(state),
+            )
             hard_requested = [
                 item for item in requested if item.get("mode") == "hard"
             ]
@@ -1150,6 +1464,12 @@ class ProjectLaneCoordinator:
                 lane.pop("terminal_evidence", None)
                 lane.pop("recovery_checkpoint_digest", None)
             lane["writer"] = None
+            dependency_binding = lane.get("dependency_binding")
+            if isinstance(dependency_binding, Mapping):
+                lane["dependency_binding"] = {
+                    **dependency_binding,
+                    "allowed_set_digest": None,
+                }
             completed_intent = dict(intent)
             completed_intent.update(
                 {
@@ -1281,6 +1601,7 @@ class ProjectLaneCoordinator:
             except ProjectScopeError as exc:
                 raise ProjectLaneError(str(exc)) from exc
             state = self._state()
+            self._assert_admission_open(state)
             self._assert_binding(state)
             lanes = list(state["lanes"])
             lane = next((item for item in lanes if item.get("lane_id") == lane_id), None)
@@ -1308,6 +1629,40 @@ class ProjectLaneCoordinator:
                 "allowed_set_digest": allowed_set_digest,
                 "lease_kind": lease_kind,
             }
+            dependency_binding = lane.get("dependency_binding")
+            if dependency_binding is None:
+                dependency_binding = self._dependency_binding(
+                    state,
+                    milestone=str(lane["milestone"]),
+                    scheduler_binding=(
+                        lane.get("scheduler_binding")
+                        if isinstance(
+                            lane.get("scheduler_binding"),
+                            Mapping,
+                        )
+                        else None
+                    ),
+                    scope_requests=[
+                        dict(item)
+                        for item in lane.get("scope_requests", [])
+                    ],
+                    accepted_base=str(lane["base"]),
+                    allowed_set_digest=allowed_set_digest,
+                    generation=int(state["generation"]) + 1,
+                )
+                lane["dependency_binding"] = dependency_binding
+            elif dependency_binding.get("allowed_set_digest") is None:
+                lane["dependency_binding"] = {
+                    **dependency_binding,
+                    "allowed_set_digest": allowed_set_digest,
+                }
+            elif (
+                dependency_binding.get("allowed_set_digest")
+                != allowed_set_digest
+            ):
+                raise ProjectLaneError(
+                    "contained writer allowed-set rebind changed"
+                )
             if lane.get("state") in {"running", "quarantined"}:
                 if lane.get("writer") != writer:
                     raise ProjectLaneError("contained writer replay binding changed")
@@ -1520,6 +1875,24 @@ class ProjectLaneCoordinator:
                     if writer is not None and writer != active_writer:
                         raise ProjectLaneError("contained writer terminal binding changed")
                     writer = active_writer
+                    dependency_binding = lane.get("dependency_binding")
+                    if isinstance(dependency_binding, Mapping):
+                        bound_digest = dependency_binding.get(
+                            "allowed_set_digest"
+                        )
+                        if bound_digest not in {
+                            None,
+                            writer["allowed_set_digest"],
+                        }:
+                            raise ProjectLaneError(
+                                "contained writer dependency binding changed"
+                            )
+                        lane["dependency_binding"] = {
+                            **dependency_binding,
+                            "allowed_set_digest": writer[
+                                "allowed_set_digest"
+                            ],
+                        }
             if lane_state in {"cancelled", "quarantined"}:
                 if lane_state == "quarantined" or writer is None:
                     return lane

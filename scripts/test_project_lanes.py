@@ -34,6 +34,16 @@ from project_scopes import ProjectScopeError, ProjectScopeManager  # type: ignor
 from recovery_state import RecoveryRegistry, RecoveryStateError  # type: ignore[import-not-found]
 
 
+def bind_lane_writer_dependency(lane: dict[str, object]) -> None:
+    writer = lane.get("writer")
+    dependency = lane.get("dependency_binding")
+    if isinstance(writer, dict) and isinstance(dependency, dict):
+        lane["dependency_binding"] = {
+            **dependency,
+            "allowed_set_digest": writer["allowed_set_digest"],
+        }
+
+
 class ProjectStateM1Tests(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(__file__).resolve().parents[1]
@@ -666,6 +676,7 @@ class ProjectLaneM2Tests(unittest.TestCase):
         state = self.store.read_state(self.anchor)["state"]
         lane["state"] = "running"
         lane["writer"] = writer
+        bind_lane_writer_dependency(lane)
         active_registry = mock.Mock()
         active_registry.state.return_value = {
             "lease": {
@@ -771,6 +782,7 @@ class ProjectLaneM2Tests(unittest.TestCase):
             "allowed_set_digest": "f" * 64,
             "lease_kind": "normal-contained",
         }
+        bind_lane_writer_dependency(running)
         active_registry = mock.Mock()
         active_registry.state.return_value = {
             "lease": {
@@ -1687,6 +1699,7 @@ class ProjectScopeM3Tests(unittest.TestCase):
         lane = next(item for item in lanes if item["lane_id"] == lane_id)
         writer = lane["writer"]
         self.assertIsInstance(writer, dict)
+        bind_lane_writer_dependency(lane)
         registry = mock.Mock()
         registry.state.return_value = {
             "lease": {
@@ -2650,6 +2663,7 @@ class ProjectScopeM3Tests(unittest.TestCase):
         }
         running["state"] = "running"
         running["writer"] = writer
+        bind_lane_writer_dependency(running)
         active_registry = mock.Mock()
         active_registry.state.return_value = {
             "lease": {
@@ -2734,6 +2748,9 @@ class ProjectScopeM3Tests(unittest.TestCase):
             )
         self.assertEqual(rebound["state"], "ready")
         self.assertIsNone(rebound["writer"])
+        self.assertIsNone(
+            rebound["dependency_binding"]["allowed_set_digest"],
+        )
         self.assertEqual(rebound["safe_stop"]["status"], "completed")
         self.assertEqual(
             rebound["safe_stop"]["terminal_archive"],
@@ -2753,6 +2770,35 @@ class ProjectScopeM3Tests(unittest.TestCase):
             require_ready=True,
         )
         self.assertEqual(binding["allowed_paths"], ["two.py"])
+        new_writer = {
+            "lease_id": "live-rebind-lease-two",
+            "run_id": "live-rebind-run-two",
+            "allowed_set_digest": "c" * 64,
+            "lease_kind": "normal-contained",
+        }
+        active_registry.state.return_value = {
+            "lease": {**new_writer, "state": "running"},
+            "outbox": None,
+            "quarantine": None,
+            "history": [],
+        }
+        with mock.patch.object(
+            coordinator,
+            "_require_active_writer",
+        ), mock.patch(
+            "project_state.RecoveryRegistry",
+            return_value=active_registry,
+        ):
+            attached = coordinator.attach_contained_writer(
+                "live-rebind",
+                lease_id=new_writer["lease_id"],
+                run_id=new_writer["run_id"],
+                allowed_set_digest=new_writer["allowed_set_digest"],
+            )
+        self.assertEqual(
+            attached["dependency_binding"]["allowed_set_digest"],
+            "c" * 64,
+        )
 
     def test_generic_store_rejects_two_cas_writer_substitution(self) -> None:
         self.create("two-cas-writer", ["owned.py"])
@@ -2769,6 +2815,7 @@ class ProjectScopeM3Tests(unittest.TestCase):
         )
         lane["state"] = "running"
         lane["writer"] = writer_a
+        bind_lane_writer_dependency(lane)
         active_registry = mock.Mock()
         active_registry.state.return_value = {
             "lease": {**writer_a, "state": "running"},
@@ -2834,6 +2881,7 @@ class ProjectScopeM3Tests(unittest.TestCase):
             "allowed_set_digest": "b" * 64,
             "lease_kind": "normal-contained",
         }
+        bind_lane_writer_dependency(forged)
         with mock.patch(
             "project_state.RecoveryRegistry",
             return_value=vacant_registry,
@@ -2947,6 +2995,7 @@ class ProjectScopeM3Tests(unittest.TestCase):
         )
         lane["state"] = "running"
         lane["writer"] = writer_a
+        bind_lane_writer_dependency(lane)
         self.store.replace_lane_state(
             self.anchor,
             expected_generation=state["generation"],
@@ -3074,6 +3123,7 @@ class ProjectScopeM3Tests(unittest.TestCase):
         )
         lane["state"] = "running"
         lane["writer"] = writer
+        bind_lane_writer_dependency(lane)
         active_registry = mock.Mock()
         active_registry.state.return_value = {
             "lease": {
@@ -3519,7 +3569,7 @@ class ProjectScopeM3Tests(unittest.TestCase):
         )
         self.assertEqual(
             [claim["status"] for claim in self.scope_records("release-waiter")],
-            ["active"],
+            ["waiting"],
         )
         replayed = self.scopes().release(
             "release-owner",
