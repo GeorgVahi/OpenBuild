@@ -4,6 +4,21 @@ OpenBuild follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### 2.4.0-alpha.5
+
+#### Added
+
+- Added a durable task-local milestone DAG scheduler with dependency-derived readiness, hotspot-first actionable ordering, canonical plan replay, multi-task isolation, and generation-CAS convergence.
+- Added explicit `project-scheduler-lane-v1` bindings so scheduled lanes are authoritative without reinterpreting arbitrary legacy milestone strings.
+- Added real two-lifecycle runner/guardian/RecoveryRegistry coverage that pauses after producer terminalization, proves the dependent remains denied before integration release, then integrates and completes both milestones.
+
+#### Changed
+
+- Prevented dependency-waiting milestones from acquiring a scheduler lane, worktree, hard scope, contained writer, or recovery authorization through either the coordinator wrapper or generic durable state sink.
+- Required milestone completion to match the exact terminal lane archive, registry-resident integration acceptance, and acceptance-bound release or cancellation of every owned hard scope.
+- Rejected control, normalization, Windows device/trailing, duplicate/case, cross-kind, and file/directory ancestor aliases in durable milestone scope plans.
+- Synchronized the manifest, changelog and README install pins for `2.4.0-alpha.5`; the full integration queue, capacity/stress, migration/docs gate, and stable release remain later milestones.
+
 ### 2.4.0-alpha.4
 
 #### Added

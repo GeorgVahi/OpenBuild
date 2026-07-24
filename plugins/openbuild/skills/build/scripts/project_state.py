@@ -29,6 +29,8 @@ from recovery_state import RecoveryRegistry, RecoveryStateError
 SCHEMA_VERSION = 1
 MAX_JSON_BYTES = 256 * 1024
 _HEX_64 = frozenset("0123456789abcdef")
+_MILESTONE_ID = re.compile(r"[a-z][a-z0-9-]{0,62}\Z")
+_MILESTONE_STATES = frozenset({"ready", "waiting", "completed"})
 
 # This is intentionally literal data: package validation parses it with
 # ast.literal_eval and therefore never imports this owner while checking it.
@@ -649,9 +651,72 @@ def validate_scope_state(value: Any) -> dict[str, Any]:
     if value["kind"] not in {"file", "directory", "contract", "resource"} or value["mode"] not in {"hard", "soft"}:
         raise ProjectStateError("scope kind or mode is invalid")
     path = value["path"]
-    if not isinstance(path, str) or not path or "\\" in path or path.startswith("/") or ".." in path.split("/"):
+    if (
+        not isinstance(path, str)
+        or not path
+        or len(path) > 4096
+        or path != unicodedata.normalize("NFC", path)
+        or any(
+            unicodedata.category(character) == "Cc"
+            for character in path
+        )
+        or "\\" in path
+        or path.startswith("/")
+        or path.endswith("/")
+        or "//" in path
+        or any(part in {"", ".", ".."} for part in path.split("/"))
+    ):
         raise ProjectStateError("scope path is not normalized")
+    try:
+        from project_scopes import (
+            ProjectScopeError,
+            ProjectScopeManager,
+            _WINDOWS_RESERVED,
+        )
+
+        canonical = ProjectScopeManager._path(path)
+    except (ImportError, ProjectScopeError) as exc:
+        raise ProjectStateError("scope path is not normalized") from exc
+    if canonical != path:
+        raise ProjectStateError("scope path is not normalized")
+    for part in path.split("/"):
+        stem = part.split(".", 1)[0].upper()
+        if part.endswith((" ", ".")) or stem in _WINDOWS_RESERVED:
+            raise ProjectStateError("scope path has a Windows alias")
     return dict(value)
+
+
+def scope_requests_overlap(
+    left: Mapping[str, Any],
+    right: Mapping[str, Any],
+) -> bool:
+    left_kind = left["kind"]
+    right_kind = right["kind"]
+    left_path = str(left["path"]).casefold()
+    right_path = str(right["path"]).casefold()
+    if (
+        left_kind in {"file", "directory"}
+        and right_kind in {"file", "directory"}
+    ):
+        return (
+            left_path == right_path
+            or left_path.startswith(right_path + "/")
+            or right_path.startswith(left_path + "/")
+        )
+    return left_kind == right_kind and left_path == right_path
+
+
+def _validate_hard_scope_overlaps(
+    scopes: Sequence[Mapping[str, Any]],
+) -> None:
+    for index, left in enumerate(scopes):
+        if any(
+            scope_requests_overlap(left, right)
+            for right in scopes[index + 1 :]
+        ):
+            raise ProjectStateError(
+                "scope set contains an ancestor collision",
+            )
 
 
 _LANE_ID = re.compile(r"[a-z][a-z0-9-]{0,62}\Z")
@@ -934,6 +999,309 @@ def _validate_lane_session(value: Any) -> dict[str, Any] | None:
     return result
 
 
+def _validate_milestone_projection(value: Any) -> dict[str, Any]:
+    """Validate the intentionally writer-free R-032 M4 scheduler record."""
+    required = {
+        "task_id", "milestone_id", "depends_on", "hard_scopes", "soft_intents",
+        "primary_signal", "red_signal", "integration_output", "hotspot", "state",
+    }
+    if not isinstance(value, dict) or not required <= set(value):
+        raise ProjectStateError("milestone fields are incomplete")
+    completed = value.get("state") == "completed"
+    expected = required | ({"validation"} if completed else set())
+    if set(value) != expected:
+        raise ProjectStateError("milestone fields are incomplete or unknown")
+    text_fields = (
+        "task_id",
+        "milestone_id",
+        "primary_signal",
+        "red_signal",
+        "integration_output",
+    )
+    if (
+        not _MILESTONE_ID.fullmatch(value.get("task_id", ""))
+        or not _MILESTONE_ID.fullmatch(value.get("milestone_id", ""))
+        or value.get("state") not in _MILESTONE_STATES
+        or not isinstance(value.get("hotspot"), bool)
+        or any(
+            not isinstance(value.get(key), str)
+            or not value[key]
+            or len(value[key]) > 4096
+            or any(
+                ord(character) < 32 or ord(character) == 127
+                for character in value[key]
+            )
+            for key in text_fields
+        )
+    ):
+        raise ProjectStateError("milestone identity or state is invalid")
+    dependencies = value.get("depends_on")
+    if (
+        not isinstance(dependencies, list)
+        or any(
+            not isinstance(item, str)
+            or not _MILESTONE_ID.fullmatch(item)
+            for item in dependencies
+        )
+        or dependencies != sorted(dependencies)
+        or len(dependencies) != len(set(dependencies))
+        or value["milestone_id"] in dependencies
+    ):
+        raise ProjectStateError("milestone dependency contract is invalid")
+    normalized_scopes: dict[str, list[dict[str, Any]]] = {}
+    for key, mode in (("hard_scopes", "hard"), ("soft_intents", "soft")):
+        items = value.get(key)
+        if not isinstance(items, list):
+            raise ProjectStateError("milestone decomposition contract is invalid")
+        parsed = [validate_scope_state(item) for item in items]
+        if any(item["mode"] != mode for item in parsed):
+            raise ProjectStateError("milestone scope mode is invalid")
+        ordered = sorted(
+            parsed,
+            key=lambda item: (
+                _SCOPE_KIND_ORDER[item["kind"]],
+                item["path"].casefold(),
+                item["path"],
+                item["mode"],
+            ),
+        )
+        identities = [
+            (item["kind"], item["path"].casefold(), item["mode"])
+            for item in ordered
+        ]
+        if parsed != ordered or len(identities) != len(set(identities)):
+            raise ProjectStateError("milestone scope ordering is invalid")
+        normalized_scopes[key] = ordered
+    if not normalized_scopes["hard_scopes"]:
+        raise ProjectStateError("milestone scope contract is invalid")
+    _validate_hard_scope_overlaps(
+        normalized_scopes["hard_scopes"],
+    )
+    hard_keys = {
+        (item["kind"], item["path"].casefold())
+        for item in normalized_scopes["hard_scopes"]
+    }
+    soft_keys = {
+        (item["kind"], item["path"].casefold())
+        for item in normalized_scopes["soft_intents"]
+    }
+    if hard_keys & soft_keys:
+        raise ProjectStateError("milestone hard scope and soft intent overlap")
+    if completed and value.get("validation") != {"focused_green": True, "intermediate_valid": True}:
+        raise ProjectStateError("milestone completion validation is invalid")
+    result = dict(value)
+    result["depends_on"] = list(dependencies)
+    result.update(normalized_scopes)
+    return result
+
+
+def _validate_milestone_dag(milestones: Sequence[Mapping[str, Any]]) -> None:
+    ordered = sorted(
+        milestones,
+        key=lambda item: (str(item["task_id"]), str(item["milestone_id"])),
+    )
+    if list(milestones) != ordered:
+        raise ProjectStateError("milestone project ordering is invalid")
+    by_identity = {
+        (item["task_id"], item["milestone_id"]): item
+        for item in milestones
+    }
+    if len(by_identity) != len(milestones):
+        raise ProjectStateError("milestone identities are not unique")
+    task_ids = sorted({str(item["task_id"]) for item in milestones})
+    for task_id in task_ids:
+        by_id = {
+            str(item["milestone_id"]): item
+            for item in milestones
+            if item["task_id"] == task_id
+        }
+        if any(
+            dependency not in by_id
+            for item in by_id.values()
+            for dependency in item["depends_on"]
+        ):
+            raise ProjectStateError("milestone dependency is unknown")
+        visiting: set[str] = set()
+        visited: set[str] = set()
+
+        def visit(milestone_id: str) -> None:
+            if milestone_id in visiting:
+                raise ProjectStateError("milestone dependency cycle is invalid")
+            if milestone_id not in visited:
+                visiting.add(milestone_id)
+                for dependency in by_id[milestone_id]["depends_on"]:
+                    visit(dependency)
+                visiting.remove(milestone_id)
+                visited.add(milestone_id)
+
+        for milestone_id in sorted(by_id):
+            visit(milestone_id)
+        for item in by_id.values():
+            if item["state"] == "completed":
+                if any(
+                    by_id[dependency]["state"] != "completed"
+                    for dependency in item["depends_on"]
+                ):
+                    raise ProjectStateError(
+                        "milestone completed before dependencies"
+                    )
+                continue
+            expected = (
+                "ready"
+                if all(
+                    by_id[dependency]["state"] == "completed"
+                    for dependency in item["depends_on"]
+                )
+                else "waiting"
+            )
+            if item["state"] != expected:
+                raise ProjectStateError("milestone readiness is not dependency-derived")
+
+
+def _validate_milestone_transition(current: Sequence[Mapping[str, Any]], proposed: Sequence[Mapping[str, Any]]) -> None:
+    before = {
+        (item["task_id"], item["milestone_id"]): item
+        for item in current
+    }
+    after = {
+        (item["task_id"], item["milestone_id"]): item
+        for item in proposed
+    }
+    if not set(before) <= set(after):
+        raise ProjectStateError("milestone plan identity changed")
+    for task_id in {identity[0] for identity in before}:
+        old_ids = {
+            identity for identity in before if identity[0] == task_id
+        }
+        new_ids = {
+            identity for identity in after if identity[0] == task_id
+        }
+        if old_ids != new_ids:
+            raise ProjectStateError("milestone plan identity changed")
+    completed_now: list[tuple[str, str]] = []
+    for identity, old in before.items():
+        new = after[identity]
+        for key in old:
+            if key not in {"state", "validation"} and new.get(key) != old.get(key):
+                raise ProjectStateError("milestone decomposition contract changed")
+        if old["state"] == "completed" and new["state"] != "completed":
+            raise ProjectStateError("milestone state cannot regress")
+        if old["state"] == "ready" and new["state"] not in {"ready", "completed"}:
+            raise ProjectStateError("milestone state cannot regress")
+        if old["state"] == "waiting" and new["state"] not in {"waiting", "ready"}:
+            raise ProjectStateError("milestone state cannot regress")
+        if old["state"] != "completed" and new["state"] == "completed":
+            if old["state"] != "ready":
+                raise ProjectStateError("milestone completed before dependencies")
+            old_task = {
+                item["milestone_id"]: item
+                for item in current
+                if item["task_id"] == identity[0]
+            }
+            if any(
+                old_task[dependency]["state"] != "completed"
+                for dependency in new["depends_on"]
+            ):
+                raise ProjectStateError("milestone completed before dependencies")
+            completed_now.append(identity)
+    if len(completed_now) > 1:
+        raise ProjectStateError("only one milestone may complete per project CAS")
+    if any(
+        item["state"] == "completed"
+        for identity, item in after.items()
+        if identity not in before
+    ):
+        raise ProjectStateError("new milestone plan cannot begin completed")
+
+
+def _milestone_lane_binding(task_id: str, milestone_id: str) -> str:
+    return f"{task_id}:{milestone_id}"
+
+
+def _validate_scheduler_lane_binding(value: Any) -> dict[str, str]:
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"schema", "task_id", "milestone_id"}
+        or value.get("schema") != "project-scheduler-lane-v1"
+        or not _MILESTONE_ID.fullmatch(str(value.get("task_id", "")))
+        or not _MILESTONE_ID.fullmatch(
+            str(value.get("milestone_id", "")),
+        )
+    ):
+        raise ProjectStateError(
+            "scheduler lane binding is invalid",
+        )
+    return {
+        "schema": "project-scheduler-lane-v1",
+        "task_id": str(value["task_id"]),
+        "milestone_id": str(value["milestone_id"]),
+    }
+
+
+def _validate_milestone_lane_projection(
+    milestones: Sequence[Mapping[str, Any]],
+    lanes: Sequence[Mapping[str, Any]],
+    scopes: Sequence[Mapping[str, Any]] = (),
+) -> None:
+    by_lane_binding = {
+        _milestone_lane_binding(
+            str(item["task_id"]),
+            str(item["milestone_id"]),
+        ): item
+        for item in milestones
+    }
+    binding_counts: dict[str, int] = {}
+    for lane in lanes:
+        scheduler_binding = lane.get("scheduler_binding")
+        if scheduler_binding is None:
+            continue
+        parsed_binding = _validate_scheduler_lane_binding(
+            scheduler_binding,
+        )
+        lane_binding = _milestone_lane_binding(
+            parsed_binding["task_id"],
+            parsed_binding["milestone_id"],
+        )
+        if lane.get("milestone") != lane_binding:
+            raise ProjectStateError(
+                "scheduler lane milestone identity drifted",
+            )
+        milestone = by_lane_binding.get(lane_binding)
+        if milestone is None:
+            raise ProjectStateError(
+                "lane milestone is not bound to a project DAG record"
+            )
+        binding_counts[lane_binding] = binding_counts.get(lane_binding, 0) + 1
+        if binding_counts[lane_binding] > 1:
+            raise ProjectStateError(
+                "milestone is bound to more than one lane"
+            )
+        expected_hard = {
+            (item["kind"], item["path"].casefold(), item["mode"])
+            for item in milestone["hard_scopes"]
+        }
+        lane_hard = {
+            (item["kind"], item["path"].casefold(), item["mode"])
+            for item in lane.get("scope_requests", [])
+            if isinstance(item, Mapping) and item.get("mode") == "hard"
+        }
+        if lane_hard != expected_hard:
+            raise ProjectStateError(
+                "lane hard scopes differ from the milestone plan"
+            )
+        if milestone["state"] == "waiting":
+            raise ProjectStateError(
+                "waiting milestone cannot admit a scheduler lane"
+            )
+        if (
+            milestone["state"] == "completed"
+            and lane.get("state") == "running"
+        ):
+            raise ProjectStateError(
+                "completed milestone retains a running lane writer"
+            )
+
+
 def _validate_lane_projection(value: Any) -> dict[str, Any]:
     base_fields = {
         "lane_id",
@@ -984,6 +1352,19 @@ def _validate_lane_projection(value: Any) -> dict[str, Any]:
     elif state == "closed" and writer is not None:
         _validate_writer(writer)
     expected_fields = set(base_fields)
+    scheduler_binding = value.get("scheduler_binding")
+    if scheduler_binding is not None:
+        parsed_scheduler_binding = _validate_scheduler_lane_binding(
+            scheduler_binding,
+        )
+        if value["milestone"] != _milestone_lane_binding(
+            parsed_scheduler_binding["task_id"],
+            parsed_scheduler_binding["milestone_id"],
+        ):
+            raise ProjectStateError(
+                "scheduler lane milestone identity drifted",
+            )
+        expected_fields.add("scheduler_binding")
     if state in {"recovery-ready", "cancelled", "quarantined", "closed"}:
         expected_fields.update({"reason", "terminal_from"})
         terminal_from = value.get("terminal_from")
@@ -1096,6 +1477,13 @@ def _validate_lane_projection(value: Any) -> dict[str, Any]:
             or scopes != flattened
         ):
             raise ProjectStateError("lane scope request binding is invalid")
+        _validate_hard_scope_overlaps(
+            [
+                request
+                for request in ordered_requests
+                if request["mode"] == "hard"
+            ],
+        )
         expected_fields.update(
             {"scope_schema", "scope_requests", "scope_enqueue_sequence"}
         )
@@ -2126,6 +2514,7 @@ def _validate_lane_projection_transition(
             continue
         for field in (
             "milestone",
+            "scheduler_binding",
             "reader_floor",
             "common",
             "branch",
@@ -2666,12 +3055,19 @@ class ProjectStateStore:
             raise ProjectStateError("clean/breach state split is invalid")
         if not all(isinstance(state[key], list) for key in ("lanes", "milestones", "scopes", "integration_acceptances")):
             raise ProjectStateError("project state collections are invalid")
+        validated_milestones = [_validate_milestone_projection(value) for value in state["milestones"]]
+        _validate_milestone_dag(validated_milestones)
         lane_session = _validate_lane_session(state["lane_session"])
         validated_lanes = [_validate_lane_projection(value) for value in state["lanes"]]
         validated_scopes = [
             _validate_project_scope(value, lane_session)
             for value in state["scopes"]
         ]
+        _validate_milestone_lane_projection(
+            validated_milestones,
+            validated_lanes,
+            validated_scopes,
+        )
         if lane_session is None and validated_lanes:
             raise ProjectStateError("project lanes require a lane session binding")
         if lane_session is not None and any(
@@ -2701,6 +3097,7 @@ class ProjectStateStore:
             raise ProjectStateError("integration acceptance requires a lane session binding")
         if len({item["acceptance_id"] for item in validated_acceptances}) != len(validated_acceptances):
             raise ProjectStateError("integration acceptance identities are not unique")
+        state["milestones"] = validated_milestones
         return {key: value for key, value in state.items() if key != "digest"}
 
     def bind_lane_session(
@@ -2790,6 +3187,45 @@ class ProjectStateStore:
             safe_stop_intent_id=None,
             scope_release_acceptance_id=None,
         )
+
+    def replace_milestone_state(
+        self,
+        anchor_id: str,
+        *,
+        expected_generation: int,
+        milestones: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        """Atomically publish the M4 scheduler's durable DAG projection."""
+        if not isinstance(expected_generation, int) or expected_generation < 0:
+            raise ProjectStateError("expected project generation is invalid")
+        with _locked(self.lock_path):
+            self._manifest(anchor_id)
+            with _locked(self._anchor_state_lock_path(anchor_id)):
+                state = self._read_state_strict(anchor_id)
+                if state["generation"] != expected_generation:
+                    raise ProjectStateError("project generation changed")
+                if state["state"] != "clean":
+                    raise ProjectStateError("breached project state cannot publish milestones")
+                validated = [_validate_milestone_projection(value) for value in milestones]
+                _validate_milestone_dag(validated)
+                _validate_milestone_transition(state["milestones"], validated)
+                _validate_milestone_lane_projection(
+                    validated,
+                    state["lanes"],
+                    state["scopes"],
+                )
+                self._validate_milestone_completion_lane(
+                    state["milestones"],
+                    validated,
+                    state["lanes"],
+                    state["lane_session"],
+                    state["integration_acceptances"],
+                    state["scopes"],
+                )
+                state["generation"] += 1
+                state["milestones"] = validated
+                _replace_json(self._state_path(anchor_id), state)
+                return self._read_state_strict(anchor_id)
 
     def request_safe_stop_rebind(
         self,
@@ -2915,6 +3351,109 @@ class ProjectStateStore:
                 "final_state",
             )
         }
+
+    def _validate_milestone_completion_lane(
+        self,
+        current: Sequence[Mapping[str, Any]],
+        proposed: Sequence[Mapping[str, Any]],
+        lanes: Sequence[Mapping[str, Any]],
+        lane_session: Mapping[str, Any] | None,
+        integration_acceptances: Sequence[Mapping[str, Any]],
+        scopes: Sequence[Mapping[str, Any]],
+    ) -> None:
+        before = {
+            (item["task_id"], item["milestone_id"]): item
+            for item in current
+        }
+        completed = [
+            identity
+            for identity, item in {
+                (value["task_id"], value["milestone_id"]): value
+                for value in proposed
+            }.items()
+            if item["state"] == "completed"
+            and identity in before
+            and before[identity]["state"] != "completed"
+        ]
+        if not completed:
+            return
+        if len(completed) != 1 or not isinstance(lane_session, Mapping):
+            raise ProjectStateError(
+                "milestone completion lane binding is unavailable"
+            )
+        task_id, milestone_id = completed[0]
+        matching = [
+            lane
+            for lane in lanes
+            if lane.get("scheduler_binding")
+            == {
+                "schema": "project-scheduler-lane-v1",
+                "task_id": str(task_id),
+                "milestone_id": str(milestone_id),
+            }
+        ]
+        if (
+            len(matching) != 1
+            or matching[0].get("state") != "waiting-for-integration"
+            or not isinstance(matching[0].get("writer"), Mapping)
+            or not _is_hex_identifier(
+                matching[0].get("terminal_evidence")
+            )
+        ):
+            raise ProjectStateError(
+                "milestone completion requires one exact terminal lane"
+            )
+        lane = matching[0]
+        acceptances = [
+            acceptance
+            for acceptance in integration_acceptances
+            if acceptance.get("lane_id") == lane.get("lane_id")
+        ]
+        if (
+            len(acceptances) != 1
+            or acceptances[0].get("writer") != lane.get("writer")
+            or acceptances[0].get("terminal_archive")
+            != lane.get("terminal_evidence")
+            or acceptances[0].get("admitted_commit") != lane.get("base")
+            or not _is_hex_identifier(
+                acceptances[0].get("acceptance_id")
+            )
+        ):
+            raise ProjectStateError(
+                "milestone completion requires exact integration acceptance"
+            )
+        acceptance_id = str(acceptances[0]["acceptance_id"])
+        owned_hard = [
+            scope
+            for scope in scopes
+            if scope.get("owner") == lane.get("lane_id")
+            and scope.get("mode") == "hard"
+            and scope.get("kind") in _SCOPE_KIND_ORDER
+        ]
+        if not owned_hard or any(
+            scope.get("status") not in {"released", "cancelled"}
+            or (
+                scope.get("status") == "released"
+                and (
+                    not isinstance(scope.get("release"), Mapping)
+                    or scope["release"].get("acceptance_id")
+                    != acceptance_id
+                )
+            )
+            for scope in owned_hard
+        ):
+            raise ProjectStateError(
+                "milestone completion requires released hard scopes"
+            )
+        recovery_root_value = lane_session.get("recovery_root")
+        if not isinstance(recovery_root_value, str):
+            raise ProjectStateError(
+                "milestone completion recovery binding is unavailable"
+            )
+        self._scope_terminal_release(
+            lane,
+            Path(recovery_root_value),
+        )
 
     def _validate_lane_writer_transitions(
         self,
@@ -3810,6 +4349,11 @@ class ProjectStateStore:
                     for value in scopes
                 ]
                 _validate_lane_scope_uniqueness(validated_lanes, validated_scopes)
+                _validate_milestone_lane_projection(
+                    state["milestones"],
+                    validated_lanes,
+                    validated_scopes,
+                )
                 if protected_adoption_receipt is not None:
                     _verify_protected_adoption_transition(
                         self.project,

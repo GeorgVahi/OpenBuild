@@ -223,6 +223,147 @@ class ProjectLaneCoordinator:
             ):
                 raise ProjectLaneError("Git common-directory identity drifted")
 
+    @staticmethod
+    def _assert_scheduler_activation(
+        state: Mapping[str, Any],
+        lane: Mapping[str, Any],
+        *,
+        require_ready: bool,
+    ) -> None:
+        scheduler_binding = lane.get("scheduler_binding")
+        if not isinstance(scheduler_binding, Mapping):
+            return
+        milestone = next(
+            (
+                item
+                for item in state.get("milestones", [])
+                if isinstance(item, Mapping)
+                and item.get("task_id")
+                == scheduler_binding.get("task_id")
+                and item.get("milestone_id")
+                == scheduler_binding.get("milestone_id")
+            ),
+            None,
+        )
+        if milestone is None:
+            raise ProjectLaneError(
+                "lane milestone is not bound to a project DAG record",
+            )
+        milestone_state = milestone.get("state")
+        if require_ready and milestone_state != "ready":
+            raise ProjectLaneError(
+                "runner milestone is waiting for DAG dependencies"
+            )
+        if (
+            not require_ready
+            and lane.get("state") == "running"
+            and milestone_state != "ready"
+        ):
+            raise ProjectLaneError(
+                "running lane milestone is no longer scheduler-ready"
+            )
+        if (
+            lane.get("state") == "recovery-ready"
+            and milestone_state != "ready"
+        ):
+            raise ProjectLaneError(
+                "recovery milestone is waiting for DAG dependencies"
+            )
+        if (
+            lane.get("state") == "waiting-for-integration"
+            and milestone_state not in {"ready", "completed"}
+        ):
+            raise ProjectLaneError(
+                "terminal lane milestone scheduler binding changed"
+            )
+
+    @staticmethod
+    def _assert_scheduler_lane_request(
+        state: Mapping[str, Any],
+        lane_id: str,
+        scheduler_binding: Mapping[str, Any] | None,
+        requested_scopes: Sequence[Mapping[str, Any]],
+    ) -> dict[str, str] | None:
+        if scheduler_binding is None:
+            return None
+        if (
+            set(scheduler_binding)
+            != {"schema", "task_id", "milestone_id"}
+            or scheduler_binding.get("schema")
+            != "project-scheduler-lane-v1"
+            or not _LANE.fullmatch(
+                str(scheduler_binding.get("task_id", "")),
+            )
+            or not _LANE.fullmatch(
+                str(scheduler_binding.get("milestone_id", "")),
+            )
+        ):
+            raise ProjectLaneError(
+                "scheduler lane binding is invalid",
+            )
+        parsed_binding = {
+            "schema": "project-scheduler-lane-v1",
+            "task_id": str(scheduler_binding["task_id"]),
+            "milestone_id": str(scheduler_binding["milestone_id"]),
+        }
+        milestones = [
+            item
+            for item in state.get("milestones", [])
+            if isinstance(item, Mapping)
+        ]
+        milestone = next(
+            (
+                item
+                for item in milestones
+                if item.get("task_id") == parsed_binding["task_id"]
+                and item.get("milestone_id")
+                == parsed_binding["milestone_id"]
+            ),
+            None,
+        )
+        if milestone is None:
+            raise ProjectLaneError(
+                "lane milestone is not bound to a project DAG record"
+            )
+        if any(
+            lane.get("scheduler_binding") == parsed_binding
+            and lane.get("lane_id") != lane_id
+            for lane in state.get("lanes", [])
+        ):
+            raise ProjectLaneError(
+                "milestone is already bound to another lane"
+            )
+        planned = {
+            (
+                item["kind"],
+                str(item["path"]).casefold(),
+                item["mode"],
+            )
+            for item in milestone.get("hard_scopes", [])
+        }
+        requested = {
+            (
+                item["kind"],
+                str(item["path"]).casefold(),
+                item["mode"],
+            )
+            for item in requested_scopes
+            if item.get("mode") == "hard"
+        }
+        if requested != planned:
+            raise ProjectLaneError(
+                "lane hard scopes differ from the milestone plan"
+            )
+        if milestone.get("state") == "waiting":
+            raise ProjectLaneError(
+                "lane milestone is waiting for DAG dependencies"
+            )
+        if milestone.get("state") == "completed":
+            raise ProjectLaneError(
+                "lane milestone is already completed"
+            )
+        return parsed_binding
+
     def _publish(self, state: Mapping[str, Any], lanes: Sequence[Mapping[str, Any]], scopes: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         try:
             return self.store.replace_lane_state(self.anchor_id, expected_generation=state["generation"], lanes=lanes, scopes=scopes)
@@ -366,13 +507,26 @@ class ProjectLaneCoordinator:
     def create(
         self,
         lane_id: str,
-        milestone: str,
+        milestone: object,
         worktree: Path,
         scopes: Sequence[object],
         *,
         _cas_budget: int = 8,
     ) -> dict[str, Any]:
-        if not _LANE.fullmatch(lane_id) or not isinstance(milestone, str) or not milestone or len(milestone) > 256:
+        scheduler_binding: Mapping[str, Any] | None = None
+        if isinstance(milestone, Mapping):
+            scheduler_binding = milestone
+            milestone_text = (
+                f"{milestone.get('task_id')}:{milestone.get('milestone_id')}"
+            )
+        else:
+            milestone_text = milestone
+        if (
+            not _LANE.fullmatch(lane_id)
+            or not isinstance(milestone_text, str)
+            or not milestone_text
+            or len(milestone_text) > 256
+        ):
             raise ProjectLaneError("lane identifier or milestone is invalid")
         self.base = self._git(
             "rev-parse",
@@ -404,6 +558,12 @@ class ProjectLaneCoordinator:
         _assert_no_link_or_reparse_ancestors(worktree.parent)
         state = self._state()
         self._assert_binding(state)
+        parsed_scheduler_binding = self._assert_scheduler_lane_request(
+            state,
+            lane_id,
+            scheduler_binding,
+            requested_scopes,
+        )
         self._assert_legacy_vacancy()
         lanes = list(state["lanes"])
         inventory = self._dirty_scopes()
@@ -514,7 +674,9 @@ class ProjectLaneCoordinator:
                         _cas_budget=_cas_budget - 1,
                     )
             if (
-                existing_lane.get("milestone") != milestone
+                existing_lane.get("milestone") != milestone_text
+                or existing_lane.get("scheduler_binding")
+                != parsed_scheduler_binding
                 or existing_lane.get("branch") != branch
                 or existing_lane.get("worktree") != str(worktree)
                 or existing_lane.get("scopes") != canonical_scopes
@@ -582,7 +744,9 @@ class ProjectLaneCoordinator:
             and request["mode"] == "hard"
             for protected in external
         )
-        lane = {"lane_id": lane_id, "milestone": milestone, "reader_floor": PROJECT_LANE_READER_FLOOR, "common": self.common, "base": self.base, "branch": branch, "worktree": str(worktree), "scopes": canonical_scopes, "scope_schema": "project-scopes-v1", "scope_requests": requested_scopes, "scope_enqueue_sequence": int(state["generation"]) + 1, "state": "waiting-for-scope" if waiting else "creating", "writer": None}
+        lane = {"lane_id": lane_id, "milestone": milestone_text, "reader_floor": PROJECT_LANE_READER_FLOOR, "common": self.common, "base": self.base, "branch": branch, "worktree": str(worktree), "scopes": canonical_scopes, "scope_schema": "project-scopes-v1", "scope_requests": requested_scopes, "scope_enqueue_sequence": int(state["generation"]) + 1, "state": "waiting-for-scope" if waiting else "creating", "writer": None}
+        if parsed_scheduler_binding is not None:
+            lane["scheduler_binding"] = parsed_scheduler_binding
         self._trip("before-lane-state")
         try:
             self._publish(state, [*lanes, lane], merged_scopes)
@@ -711,6 +875,11 @@ class ProjectLaneCoordinator:
         )
         if not isinstance(lane, dict):
             raise ProjectLaneError("runner lane does not exist")
+        self._assert_scheduler_activation(
+            state,
+            lane,
+            require_ready=require_ready,
+        )
         if require_ready:
             expected_state = (
                 "recovery-ready"
@@ -1123,6 +1292,11 @@ class ProjectLaneCoordinator:
                 "quarantined",
             }:
                 raise ProjectLaneError("lane is not ready for a contained writer")
+            self._assert_scheduler_activation(
+                state,
+                lane,
+                require_ready=lane.get("state") in {"ready", "recovery-ready"},
+            )
             if lease_kind == "normal-contained":
                 try:
                     self.scope_manager.assert_lane_authority(lane_id)

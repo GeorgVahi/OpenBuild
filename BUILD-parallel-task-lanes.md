@@ -1,7 +1,7 @@
 # Build: параллельные task lanes OpenBuild
 
-- Status: In progress — M1–M3 complete; M4 milestone DAG scheduling is next after the `2.4.0-alpha.4` milestone release
-- Last updated: 2026-07-23
+- Status: In progress — M1–M4 complete; M5 single-writer integration queue is next after the `2.4.0-alpha.5` milestone release
+- Last updated: 2026-07-24
 - Original request: Поддержать безопасную параллельную работу нескольких независимых экземпляров OpenBuild над разными ТЗ одного Git-проекта. Непересекающиеся части должны выполняться одновременно, пересекающиеся файлы, контракты и runtime-ресурсы — ожидать освобождения scope, а большие задачи — дробиться на небольшие независимо проверяемые и интегрируемые milestones. Подготовить GitHub-facing документацию и выпустить новую стабильную версию плагина после реализации и validation.
 - Primary signal: детерминированный concurrency-тест запускает минимум две независимые task lanes одного Git common directory, подтверждает параллельное выполнение непересекающихся milestones, сериализацию пересекающегося scope до принятия предыдущего результата в общую integration base и локализацию crash/quarantine одной lane без остановки соседей и потери изменений.
 - Review baseline: `main@6e75b861f2c3f202f7db65d2bf346ec70ad576f8`; исходный status `## main...origin/main`, staged/unstaged/untracked изменений нет, remote `origin` настроен.
@@ -500,11 +500,11 @@ Fixtures inject concurrent I0 setup/update versus bootstrap; root/lock/key creat
 - [ ] AC-04: Разные файлы, связанные одним `contract:api.*`, сериализуются, когда одна задача меняет контракт; read-only consumer получает stale marker после интеграции.
 - [ ] AC-05: Task-branch commit без integration acceptance не освобождает project scope и не позволяет соседу стартовать на старом baseline.
 - [ ] AC-06: После successful integration предыдущего owner следующая lane refreshes common base, повторно подтверждает dependency/spec/allowed-set binding и только затем получает scope.
-- [ ] AC-07: Большое ТЗ может завершить и интегрировать ранний coherent hotspot milestone, освободив scope до завершения остальных milestones задачи.
-- [ ] AC-08: Milestone commit, не проходящий focused green или оставляющий проект в недопустимом промежуточном состоянии, не принимается integration queue и не освобождает scope.
+- [x] AC-07: Большое ТЗ может завершить и интегрировать ранний coherent hotspot milestone, освободив scope до завершения остальных milestones задачи.
+- [x] AC-08: Milestone commit, не проходящий focused green или оставляющий проект в недопустимом промежуточном состоянии, не принимается integration queue и не освобождает scope.
 - [ ] AC-09: Soft intent виден scheduler, но не блокирует готовую соседнюю задачу; hard grant остаётся единственным write authority.
 - [ ] AC-10: Dynamic expansion до записи либо атомарно расширяет lease/allowed set, либо terminalizes milestone как waiting; post-write request отклоняет handoff.
-- [ ] AC-11: Ожидающий milestone не удерживает живой Codex/worker process; task может выполнять только DAG-независимую работу.
+- [x] AC-11: Ожидающий milestone не удерживает живой Codex/worker process; task может выполнять только DAG-независимую работу.
 - [ ] AC-12: Planned-set reservation/canonical ordering предотвращает обычный deadlock, а injected dynamic cycle сначала детерминированно снимает более новую невыполненную reservation; уже активные owners переходят в T-015 safe-stop flow без force-release.
 - [ ] AC-13: Crash, timeout или containment loss одной lane не останавливает непересекающиеся lanes; её scope остаётся quarantined до full-tree-zero и lane-local terminal close.
 - [ ] AC-14: Scope никогда не освобождается только по heartbeat expiry, PID disappearance или timeout.
@@ -765,17 +765,17 @@ Public status содержит:
 
 ### M4. Milestone DAG scheduler и non-idle wait/resume
 
-- Status: Pending
+- Status: Complete in the validated `2.4.0-alpha.5` release candidate
 - Scope: decomposition contract, ready/pending DAG, independent progress, durable waiting, hotspot-first integration.
 - Excludes: automatic product decomposition without root verification.
 - Implementation mode: TDD-first
 - Delegation: bounded-worker, high-risk route.
 - Red signal: task-wide lease блокирует независимый milestone либо waiting сохраняет живой worker.
-- Focused green: scheduler dependency/stop/resume fixtures.
+- Focused green: `16` scheduler dependency/stop/resume/CAS/legacy fixtures; combined M1–M4 project lifecycle passes `84` tests with four OS-permission skips.
 - Acceptance: AC-07, AC-08, AC-11.
-- Review: Pending
-- Version: root finalizer выделяет следующий never-reused prerelease target minor на каждый non-empty commit.
-- Commit: Pending
+- Review: A-071 through A-075 findings were remediated; A-076 returned `ACCEPT`, confidence `0.98`, with no actionable M4 defects.
+- Version: `2.4.0-alpha.5`; manifest, changelog and README pins synchronized.
+- Commit: the scoped alpha.5 release commit after the final green review gate.
 
 ### M5. Single-writer integration queue и ownership transfer
 
@@ -990,7 +990,7 @@ Non-blocking assumptions:
 
 ## 11. Agent activity ledger
 
-Created logical agent runs through the exact OpenBuild runner: `69`.
+Created logical agent runs through the exact OpenBuild runner: `76`.
 
 | Run | Created | Role/task | Actual model | Effort | Status/outcome | Work and specification mapping | Evidence |
 |---|---|---|---|---|---|---|---|
@@ -1063,6 +1063,13 @@ Created logical agent runs through the exact OpenBuild runner: `69`.
 | A-067 | yes | review / R-032 M3b initial-lane writer attach pass | `gpt-5.6-sol` | high | completed, `REVISE`, confidence `0.99` | Found that a new legacy-shaped lane with a writer skipped registry validation because no prior lane existed; root now treats the initial writer projection as an attach, validates exact active registry authority, and preserves legacy-migration fixtures with explicit active-registry evidence | exact receipt `20260724T035031Z-3191f81718`: observed model/agent, `turn.completed`, exit `0`, process tree stopped, valid result |
 | A-068 | yes | review / R-032 M3b durable lane-set pass | `gpt-5.6-sol` | high | completed, `REVISE`, confidence `0.99` | Found that generic replacement could omit an existing live legacy lane and erase its project authority without reading the active registry; root added set-level no-removal enforcement and a direct no-generation-mutation regression | exact receipt `20260724T040107Z-8674fede3b`: observed model/agent, `turn.completed`, exit `0`, process tree stopped, valid result |
 | A-069 | yes | review / R-032 M3b alpha.4 release closure | `gpt-5.6-sol` | high | completed, `ACCEPT`, confidence `0.99` | Verified set-level no-removal, initial writer attach, same-writer re-entry, real released-A/archive/active-B substitution, detached integration proof and the complete real two-lane lifecycle; no actionable M3b defects remain | exact receipt `20260724T041020Z-c9d91e9743`: observed model/agent, `turn.completed`, exit `0`, process tree stopped, valid result |
+| A-070 | yes | implementation / R-032 M4 scheduler | `gpt-5.6-terra` | medium | completed; handoff rejected after generated outside-set drift | Produced the bounded scheduler/state/lane/test baseline. Root removed only generated ignored test fixtures, completed exact terminal abandonment, recorded same-scope root completion and preserved the implementation diff as authoritative | exact receipt `20260724T042600Z-985f863a39`: observed model/agent, `turn.completed`, exit `0`, process tree stopped; no handoff |
+| A-071 | yes | review / R-032 M4 initial pass | `gpt-5.6-terra` | medium | completed, `REVISE`, high confidence | Found missing real lane lifecycle binding, non-canonical scope strings, direct-store readiness bypass and non-canonical plan replay; root remediated all four | exact receipt `20260724T043839Z-557aa41e97`: observed model/agent, `turn.completed`, exit `0`, process tree stopped, valid result |
+| A-072 | yes | review / R-032 M4 strong pass | `gpt-5.6-terra` | xhigh | completed, `REVISE`, confidence `0.98` | Found ambiguous lane-to-DAG binding, completion without exact terminal registry evidence, Windows path aliases and recovery authorization before readiness; root moved all gates into durable owner paths | exact receipt `20260724T044939Z-c7ffa843f7`: observed model/agent, `turn.completed`, exit `0`, process tree stopped, valid result |
+| A-073 | yes | review / R-032 M4 Sol-high pass | `gpt-5.6-sol` | high | completed, `REVISE`, confidence `0.98` | Found dependency unblock before integration/scope release, waiting milestone scope reservation and mock-only positive completion; root required acceptance-bound release and added two real runner lifecycles | exact receipt `20260724T050803Z-fe41dab70d`: observed model/agent, `turn.completed`, exit `0`, process tree stopped, valid result |
+| A-074 | yes | review / R-032 M4 remediation pass | `gpt-5.6-sol` | high | completed, `REVISE`, confidence `0.99` | Found legacy milestone collisions, missing file/directory ancestor rejection, non-actionable hotspot ordering and incomplete midpoint/CAS evidence; root added an explicit scheduler binding schema and corresponding owner tests | exact receipt `20260724T052644Z-6f06ec432c`: observed model/agent, `turn.completed`, exit `0`, process tree stopped, valid result |
+| A-075 | yes | review / R-032 M4 durable-sink pass | `gpt-5.6-sol` | high | completed, `REVISE`, confidence `0.99` | Reduced the remaining gap to generic-sink admission of a scope-less creating lane for a waiting scheduler milestone; root made the durable projection reject every such lane state | exact receipt `20260724T054316Z-07269c36ba`: observed model/agent, `turn.completed`, exit `0`, process tree stopped, valid result |
+| A-076 | yes | review / R-032 M4 alpha.5 release closure | `gpt-5.6-sol` | high | completed, `ACCEPT`, confidence `0.98` | Verified unconditional durable waiting-lane rejection, legacy compatibility, exact binding/scopes, hotspot priority, CAS/task isolation, terminal acceptance/release and the real midpoint-denial two-runner lifecycle; no actionable M4 defects remain | exact receipt `20260724T055237Z-a6a2aa338c`: observed model/agent, `turn.completed`, exit `0`, process tree stopped, valid result |
 
 Native collaboration review runs, not created through `agent_runner.py` and therefore not included in the exact-runner count:
 
@@ -1539,3 +1546,14 @@ Pre-spawn dispatch failures (not included in created count): four historical loc
 - Recovery correction: successful recovery-target finalization revalidates its authorized parent checkpoint without persisting a new digest into the immutable authorization source; the live allowed-set result is bound into the handoff, while outside/control-plane drift remains ineligible.
 - Validation: project-state/lane suite passes `68` tests with four portability skips; combined runner/recovery suite passes `215` tests with four platform skips; the focused real two-lane test passes. Package validation, AST parsing and `git diff --check` are green at `2.4.0-alpha.4`.
 - Review history: A-059 through A-068 each returned evidence-backed `REVISE`; every finding was reproduced and closed in its authoritative owner with direct red/green coverage. A-069 returned `ACCEPT`, confidence `0.99`, with no actionable M3b defects.
+
+### 2026-07-24 — M4 durable milestone DAG scheduler
+
+- Writer lifecycle: A-070 produced the bounded scheduler/state/lane/test baseline. Generated ignored filesystem fixtures caused exact outside-set drift, so root removed only those verified test artifacts, completed terminal abandonment with no handoff, recorded the same-scope root-completion authorization and retained the writer diff as authoritative.
+- Changed: added task-local immutable DAG plans, dependency-derived `ready`/`waiting` state, hotspot-first ready projection, multi-task generation-CAS convergence and one-completion-per-CAS. Explicit `project-scheduler-lane-v1` bindings distinguish scheduler lanes from arbitrary legacy milestone strings.
+- Admission and completion: dependency-waiting milestones cannot acquire any durable scheduler lane, worktree, hard scope, writer or recovery authorization through either the coordinator wrapper or generic state sink. Completion requires focused green, a valid intermediate state, the exact successful lane terminal archive, registry-resident integration acceptance and acceptance-bound release/cancellation of all hard scopes.
+- Scope/compatibility: planner and durable sink reject normalization, Windows device/trailing aliases, controls, duplicate/case aliases and file/directory ancestor collisions. Legacy colon and bare milestone names remain readable and runnable because only explicit scheduler bindings participate in the DAG.
+- Real lifecycle evidence: the M4 filesystem fixture runs two actual runner/guardian/RecoveryRegistry lifecycles. It terminalizes the producer, proves the dependent and recovery route are still denied before integration acceptance/release, integrates and completes the producer, then admits, integrates and completes the dependent. A synchronized two-publisher fixture proves CAS convergence without task-plan loss.
+- Validation: focused scheduler suite passes `16` tests; combined M1–M4 project suite passes `84` tests with four portability-only OS-permission skips. AST parsing and `git diff --check` are green.
+- Review: A-071 through A-075 findings were reproduced and remediated in the owning layer. A-076 exact Sol/high changed-diff review returned `ACCEPT`, confidence `0.98`, with no material findings.
+- Version/publication: manifest, changelog and README install pins use `2.4.0-alpha.5`; scoped commit, push, immutable annotated tag, GitHub prerelease and local reinstall follow the commit gate before M5 begins.
