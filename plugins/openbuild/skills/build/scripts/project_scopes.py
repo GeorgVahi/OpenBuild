@@ -18,11 +18,19 @@ from project_state import (
     ProjectStateError,
     ProjectStateStore,
     _is_link_or_reparse,
+    _safe_stop_intent_id,
 )
 
 
 class ProjectScopeError(RuntimeError):
     pass
+
+
+class _LiveCycleSafeStop(RuntimeError):
+    def __init__(self, lane_id: str, reservation: str) -> None:
+        super().__init__(lane_id, reservation)
+        self.lane_id = lane_id
+        self.reservation = reservation
 
 
 _LANE = re.compile(r"[a-z][a-z0-9-]{0,62}\Z")
@@ -389,9 +397,11 @@ class ProjectScopeManager:
                     and lane.get("state") in {"running", "quarantined"}
                     and lane.get("writer") is not None
                 ):
-                    raise ProjectScopeError(
-                        "live scope cycle requires the runner safe-stop bridge"
-                    )
+                    if lane.get("state") != "running":
+                        raise ProjectScopeError(
+                            "quarantined live scope cycle cannot be rebound"
+                        )
+                    raise _LiveCycleSafeStop(owner, reservation)
                 for item in scopes:
                     if item.get("reservation") == reservation and item.get("status") == "waiting":
                         item["status"] = "cancelled"
@@ -405,6 +415,116 @@ class ProjectScopeManager:
                 changed = True
             if not changed:
                 return cancelled
+
+    def _request_live_cycle_rebind(
+        self,
+        state: Mapping[str, Any],
+        lanes: list[dict[str, Any]],
+        scopes: list[dict[str, Any]],
+        live_cycle: _LiveCycleSafeStop,
+    ) -> dict[str, Any]:
+        lane = next(
+            (
+                item
+                for item in lanes
+                if item.get("lane_id") == live_cycle.lane_id
+            ),
+            None,
+        )
+        if (
+            not isinstance(lane, dict)
+            or lane.get("state") != "running"
+            or not isinstance(lane.get("writer"), dict)
+        ):
+            raise ProjectScopeError("live cycle safe-stop owner is not running")
+        requested = [
+            item
+            for item in scopes
+            if item.get("owner") == live_cycle.lane_id
+            and item.get("reservation") == live_cycle.reservation
+            and item.get("phase") == "expansion"
+            and item.get("kind") in _KINDS
+        ]
+        requested_shape = [
+            {key: item[key] for key in ("kind", "path", "mode")}
+            for item in sorted(requested, key=self._order)
+        ]
+        if not requested_shape or any(
+            item.get("mode") != "hard" for item in requested
+        ):
+            raise ProjectScopeError("live cycle safe-stop reservation is invalid")
+        existing_intent = lane.get("safe_stop")
+        if existing_intent is not None:
+            if (
+                isinstance(existing_intent, dict)
+                and existing_intent.get("lane_id") == live_cycle.lane_id
+                and existing_intent.get("reservation")
+                == live_cycle.reservation
+                and existing_intent.get("requested_scopes")
+                == requested_shape
+            ):
+                return {
+                    "status": "safe-stop-requested",
+                    "reservation": live_cycle.reservation,
+                    "intent_id": existing_intent["intent_id"],
+                    "cancelled": [],
+                    "replayed": True,
+                }
+            raise ProjectScopeError("live cycle safe-stop binding changed")
+        grants = [
+            {
+                key: item[key]
+                for key in (
+                    "kind",
+                    "path",
+                    "mode",
+                    "sequence",
+                    "reservation",
+                    "phase",
+                )
+            }
+            for item in scopes
+            if item.get("owner") == live_cycle.lane_id
+            and item.get("kind") in _KINDS
+            and item.get("mode") == "hard"
+            and item.get("status") == "active"
+        ]
+        grants.sort(key=self._order)
+        session = state.get("lane_session")
+        if not isinstance(session, dict):
+            raise ProjectScopeError("live cycle lane session is unavailable")
+        intent = {
+            "schema": "project-lane-safe-stop-v1",
+            "status": "requested",
+            "anchor_id": self.anchor_id,
+            "lane_id": live_cycle.lane_id,
+            "intent_generation": int(state["generation"]) + 1,
+            "session": session,
+            "writer": dict(lane["writer"]),
+            "old_hard_grants": grants,
+            "requested_scopes": requested_shape,
+            "reservation": live_cycle.reservation,
+            "reason": "scope-wait-cycle",
+        }
+        intent["intent_id"] = _safe_stop_intent_id(intent)
+        lane["safe_stop"] = intent
+        try:
+            self.store.request_safe_stop_rebind(
+                self.anchor_id,
+                expected_generation=int(state["generation"]),
+                lanes=lanes,
+                scopes=scopes,
+                intent_id=intent["intent_id"],
+            )
+        except ProjectStateError as exc:
+            raise ProjectScopeError(str(exc)) from exc
+        return {
+            "status": "safe-stop-requested",
+            "reservation": live_cycle.reservation,
+            "intent_id": intent["intent_id"],
+            "cancelled": [],
+            "replayed": False,
+        }
 
     def migrate_legacy_claims(self) -> dict[str, Any]:
         """Turn claimless alpha.2 lane prefixes into explicit hard leases."""
@@ -642,7 +762,20 @@ class ProjectScopeManager:
                 if existing_shape != normalized:
                     raise ProjectScopeError("planned scope reservation binding changed")
                 changed = self._promote(lanes, scopes)
-                cancelled = self._cancel_cycles(lanes, scopes)
+                try:
+                    cancelled = self._cancel_cycles(lanes, scopes)
+                except _LiveCycleSafeStop as live_cycle:
+                    try:
+                        return self._request_live_cycle_rebind(
+                            state,
+                            lanes,
+                            scopes,
+                            live_cycle,
+                        )
+                    except ProjectScopeError as exc:
+                        if str(exc) == "project generation changed":
+                            continue
+                        raise
                 if changed or cancelled:
                     try:
                         self._publish(state, lanes, scopes)
@@ -672,7 +805,20 @@ class ProjectScopeManager:
                 if len(matching) == 1:
                     group = matching[0]
                     changed = self._promote(lanes, scopes)
-                    cancelled = self._cancel_cycles(lanes, scopes)
+                    try:
+                        cancelled = self._cancel_cycles(lanes, scopes)
+                    except _LiveCycleSafeStop as live_cycle:
+                        try:
+                            return self._request_live_cycle_rebind(
+                                state,
+                                lanes,
+                                scopes,
+                                live_cycle,
+                            )
+                        except ProjectScopeError as exc:
+                            if str(exc) == "project generation changed":
+                                continue
+                            raise
                     hard = [item for item in group if item["mode"] == "hard"]
                     status = (
                         "active"
@@ -718,7 +864,20 @@ class ProjectScopeManager:
             ]
             scopes.extend(claims)
             self._promote(lanes, scopes)
-            cancelled = self._cancel_cycles(lanes, scopes)
+            try:
+                cancelled = self._cancel_cycles(lanes, scopes)
+            except _LiveCycleSafeStop as live_cycle:
+                try:
+                    return self._request_live_cycle_rebind(
+                        state,
+                        lanes,
+                        scopes,
+                        live_cycle,
+                    )
+                except ProjectScopeError as exc:
+                    if str(exc) == "project generation changed":
+                        continue
+                    raise
             hard = [item for item in claims if item["mode"] == "hard"]
             status = (
                 "active"
@@ -750,6 +909,115 @@ class ProjectScopeManager:
     def reserve_planned(self, lane_id: str, requested: Sequence[object]) -> dict[str, Any]:
         return self._reserve(lane_id, requested, phase="planned")
 
+    def _request_live_rebind(
+        self,
+        lane_id: str,
+        requested: Sequence[object],
+    ) -> dict[str, Any]:
+        normalized = self.normalize(requested)
+        if any(item["mode"] != "hard" for item in normalized):
+            raise ProjectScopeError("live scope expansion requires hard typed scopes")
+        for _ in range(8):
+            state = self._state()
+            lanes = [dict(item) for item in state["lanes"]]
+            lane = next((item for item in lanes if item.get("lane_id") == lane_id), None)
+            if (
+                not isinstance(lane, dict)
+                or lane.get("state") != "running"
+                or not isinstance(lane.get("writer"), dict)
+            ):
+                raise ProjectScopeError("live scope expansion owner is not running")
+            existing_intent = lane.get("safe_stop")
+            if (
+                existing_intent is not None
+                and (
+                    not isinstance(existing_intent, Mapping)
+                    or existing_intent.get("status") != "completed"
+                )
+            ):
+                if (
+                    isinstance(existing_intent, dict)
+                    and existing_intent.get("requested_scopes") == normalized
+                    and existing_intent.get("lane_id") == lane_id
+                ):
+                    return {
+                        "status": "safe-stop-requested",
+                        "reservation": existing_intent["reservation"],
+                        "intent_id": existing_intent["intent_id"],
+                        "replayed": True,
+                    }
+                raise ProjectScopeError("live safe-stop rebind binding changed")
+            scopes = [dict(item) for item in state["scopes"]]
+            reservation = f"{lane_id}:expansion:{int(state['generation']) + 1}"
+            claims = [
+                {
+                    **item,
+                    "owner": lane_id,
+                    "status": "waiting",
+                    "sequence": int(state["generation"]) + 1,
+                    "reservation": reservation,
+                    "phase": "expansion",
+                }
+                for item in normalized
+            ]
+            scopes.extend(claims)
+            grants = [
+                {
+                    key: item[key]
+                    for key in (
+                        "kind",
+                        "path",
+                        "mode",
+                        "sequence",
+                        "reservation",
+                        "phase",
+                    )
+                }
+                for item in scopes
+                if item.get("owner") == lane_id
+                and item.get("kind") in _KINDS
+                and item.get("mode") == "hard"
+                and item.get("status") == "active"
+            ]
+            grants.sort(key=self._order)
+            session = state.get("lane_session")
+            if not isinstance(session, dict):
+                raise ProjectScopeError("live safe-stop lane session is unavailable")
+            intent = {
+                "schema": "project-lane-safe-stop-v1",
+                "status": "requested",
+                "anchor_id": self.anchor_id,
+                "lane_id": lane_id,
+                "intent_generation": int(state["generation"]) + 1,
+                "session": session,
+                "writer": dict(lane["writer"]),
+                "old_hard_grants": grants,
+                "requested_scopes": normalized,
+                "reservation": reservation,
+                "reason": "scope-expansion-wait",
+            }
+            intent["intent_id"] = _safe_stop_intent_id(intent)
+            lane["safe_stop"] = intent
+            try:
+                self.store.request_safe_stop_rebind(
+                    self.anchor_id,
+                    expected_generation=int(state["generation"]),
+                    lanes=lanes,
+                    scopes=scopes,
+                    intent_id=intent["intent_id"],
+                )
+            except ProjectStateError as exc:
+                if str(exc) == "project generation changed":
+                    continue
+                raise ProjectScopeError(str(exc)) from exc
+            return {
+                "status": "safe-stop-requested",
+                "reservation": reservation,
+                "intent_id": intent["intent_id"],
+                "replayed": False,
+            }
+        raise ProjectScopeError("live safe-stop rebind could not win the project generation CAS")
+
     def expand(
         self,
         lane_id: str,
@@ -763,8 +1031,10 @@ class ProjectScopeManager:
         lane = next((item for item in state["lanes"] if item.get("lane_id") == lane_id), None)
         if not isinstance(lane, dict):
             raise ProjectScopeError("scope owner lane does not exist")
+        if lane.get("state") == "running" and lane.get("writer") is not None:
+            return self._request_live_rebind(lane_id, requested)
         if (
-            lane.get("state") in {"running", "quarantined", "waiting-for-integration"}
+            lane.get("state") in {"quarantined", "waiting-for-integration"}
             or lane.get("writer") is not None
         ):
             raise ProjectScopeError("post-write scope expansion is rejected")
@@ -775,7 +1045,20 @@ class ProjectScopeManager:
             state = self._state()
             lanes = [dict(item) for item in state["lanes"]]
             scopes = [dict(item) for item in state["scopes"]]
-            cancelled = self._cancel_cycles(lanes, scopes)
+            try:
+                cancelled = self._cancel_cycles(lanes, scopes)
+            except _LiveCycleSafeStop as live_cycle:
+                try:
+                    return self._request_live_cycle_rebind(
+                        state,
+                        lanes,
+                        scopes,
+                        live_cycle,
+                    )
+                except ProjectScopeError as exc:
+                    if str(exc) == "project generation changed":
+                        continue
+                    raise
             if not cancelled:
                 return {"cancelled": []}
             try:
@@ -791,12 +1074,54 @@ class ProjectScopeManager:
         self,
         lane_id: str,
         *,
-        acceptance: Mapping[str, Any],
+        acceptance: str,
     ) -> dict[str, Any]:
-        del lane_id, acceptance
-        raise ProjectScopeError(
-            "scope release requires registry-resident integration-owner acceptance"
-        )
+        if not _LANE.fullmatch(lane_id) or not isinstance(acceptance, str):
+            raise ProjectScopeError(
+                "scope release requires registry-resident integration-owner acceptance"
+            )
+        for _ in range(8):
+            state = self._state()
+            if not any(
+                item.get("acceptance_id") == acceptance
+                and item.get("lane_id") == lane_id
+                for item in state.get("integration_acceptances", [])
+            ):
+                raise ProjectScopeError(
+                    "scope release requires registry-resident integration-owner acceptance"
+                )
+            lanes = [dict(item) for item in state["lanes"]]
+            scopes = [dict(item) for item in state["scopes"]]
+            for scope in scopes:
+                if (
+                    scope.get("owner") == lane_id
+                    and scope.get("kind") in _KINDS
+                    and scope.get("mode") == "hard"
+                ):
+                    if scope.get("status") == "active":
+                        scope["status"] = "released"
+                        scope["release"] = {
+                            "acceptance_id": acceptance,
+                            "released_generation": int(state["generation"]) + 1,
+                        }
+                    elif scope.get("status") == "waiting":
+                        scope["status"] = "cancelled"
+            self._promote(lanes, scopes)
+            try:
+                result = self.store.release_scope_integration_acceptance(
+                    self.anchor_id,
+                    expected_generation=int(state["generation"]),
+                    lane_id=lane_id,
+                    acceptance_id=acceptance,
+                    lanes=lanes,
+                    scopes=scopes,
+                )
+            except ProjectStateError as exc:
+                if str(exc) == "project generation changed":
+                    continue
+                raise ProjectScopeError(str(exc)) from exc
+            return {"released": True, "replayed": bool(result["replayed"])}
+        raise ProjectScopeError("scope release could not win the project generation CAS")
 
     def assert_lane_authority(self, lane_id: str) -> None:
         state = self._state()
@@ -823,13 +1148,23 @@ class ProjectScopeManager:
         if any(item.get("status") != "active" for item in hard):
             raise ProjectScopeError("lane hard scopes are not active")
 
-    def assert_write_authority(self, lane_id: str, allowed_paths: Sequence[str]) -> None:
+    def assert_write_authority(
+        self,
+        lane_id: str,
+        allowed_paths: Sequence[str],
+        *,
+        allow_waiting: bool = False,
+    ) -> None:
         state = self._state()
         lane = next(
             (item for item in state["lanes"] if item.get("lane_id") == lane_id),
             None,
         )
-        if isinstance(lane, dict) and lane.get("safe_stop") is not None:
+        safe_stop = lane.get("safe_stop") if isinstance(lane, dict) else None
+        if (
+            isinstance(safe_stop, Mapping)
+            and safe_stop.get("status") in {"requested", "stopping"}
+        ):
             raise ProjectScopeError("safe-stop lane has no continuing write authority")
         claims = [
             item
@@ -845,7 +1180,16 @@ class ProjectScopeManager:
             for item in claims
             if item.get("mode") == "hard" and item.get("status") != "cancelled"
         ]
-        if not hard or any(item.get("status") != "active" for item in hard):
+        active_hard = [
+            item for item in hard if item.get("status") == "active"
+        ]
+        if (
+            not active_hard
+            or (
+                not allow_waiting
+                and any(item.get("status") != "active" for item in hard)
+            )
+        ):
             raise ProjectScopeError("lane hard scopes are not active")
         for path in allowed_paths:
             allowed = {"kind": "file", "path": path}
@@ -856,7 +1200,7 @@ class ProjectScopeManager:
                     item["kind"] == "directory"
                     or item["path"].casefold() == path.casefold()
                 )
-                for item in hard
+                for item in active_hard
             ):
                 raise ProjectScopeError(
                     "runner allowed path escapes active file or directory scopes"

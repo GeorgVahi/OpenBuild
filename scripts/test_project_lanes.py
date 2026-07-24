@@ -382,7 +382,8 @@ class ProjectLaneM2Tests(unittest.TestCase):
         active_registry.state.return_value = {"lease": lease, "outbox": None, "quarantine": None, "history": []}
         coordinator = self.coordinator_for()
         with mock.patch.object(coordinator, "_assert_legacy_vacancy"), \
-             mock.patch("project_lanes.RecoveryRegistry", return_value=active_registry):
+             mock.patch("project_lanes.RecoveryRegistry", return_value=active_registry), \
+             mock.patch("project_state.RecoveryRegistry", return_value=active_registry):
             lane = coordinator.attach_contained_writer(
                 "timeout",
                 lease_id="timeout-contained",
@@ -398,6 +399,7 @@ class ProjectLaneM2Tests(unittest.TestCase):
         archive = {
             "event": "contained-terminal-released",
             "lease_id": "timeout-contained",
+            "run_id": "timeout-run",
             "lease_kind": "normal-contained",
             "allowed_set_digest": allowed_set_digest,
             "archive_digest": "b" * 64,
@@ -445,6 +447,9 @@ class ProjectLaneM2Tests(unittest.TestCase):
         ), mock.patch(
             "project_lanes.RecoveryRegistry",
             return_value=active_registry,
+        ), mock.patch(
+            "project_state.RecoveryRegistry",
+            return_value=active_registry,
         ):
             running = coordinator.attach_contained_writer(
                 "successful",
@@ -456,6 +461,7 @@ class ProjectLaneM2Tests(unittest.TestCase):
         release = {
             "event": "contained-terminal-released",
             "lease_id": writer["lease_id"],
+            "run_id": writer["run_id"],
             "lease_kind": "normal-contained",
             "allowed_set_digest": allowed_set_digest,
             "terminal_success": True,
@@ -515,6 +521,9 @@ class ProjectLaneM2Tests(unittest.TestCase):
         ), mock.patch(
             "project_lanes.RecoveryRegistry",
             return_value=active_registry,
+        ), mock.patch(
+            "project_state.RecoveryRegistry",
+            return_value=active_registry,
         ):
             running = coordinator.attach_contained_writer(
                 "recoverable",
@@ -531,6 +540,7 @@ class ProjectLaneM2Tests(unittest.TestCase):
         release = {
             "event": "contained-terminal-released",
             "lease_id": source_writer["lease_id"],
+            "run_id": source_writer["run_id"],
             "lease_kind": "normal-contained",
             "allowed_set_digest": allowed_set_digest,
             "terminal_success": False,
@@ -549,6 +559,9 @@ class ProjectLaneM2Tests(unittest.TestCase):
         checkpoint_digest = "f" * 64
         with mock.patch(
             "project_lanes.RecoveryRegistry",
+            return_value=vacant_registry,
+        ), mock.patch(
+            "project_state.RecoveryRegistry",
             return_value=vacant_registry,
         ):
             recovery_ready = coordinator.record_recovery_ready(
@@ -589,6 +602,9 @@ class ProjectLaneM2Tests(unittest.TestCase):
         ), mock.patch(
             "project_lanes.RecoveryRegistry",
             return_value=recovery_registry,
+        ), mock.patch(
+            "project_state.RecoveryRegistry",
+            return_value=recovery_registry,
         ):
             recovered_running = coordinator.attach_contained_writer(
                 "recoverable",
@@ -626,7 +642,8 @@ class ProjectLaneM2Tests(unittest.TestCase):
         }
         coordinator = self.coordinator_for()
         with mock.patch.object(coordinator, "_assert_legacy_vacancy"), \
-             mock.patch("project_lanes.RecoveryRegistry", return_value=active_registry):
+             mock.patch("project_lanes.RecoveryRegistry", return_value=active_registry), \
+             mock.patch("project_state.RecoveryRegistry", return_value=active_registry):
             quarantined = coordinator.cancel_or_crash("cancel-race", "timeout")
             replayed = coordinator.attach_contained_writer(
                 "cancel-race",
@@ -649,13 +666,6 @@ class ProjectLaneM2Tests(unittest.TestCase):
         state = self.store.read_state(self.anchor)["state"]
         lane["state"] = "running"
         lane["writer"] = writer
-        self.store.replace_lane_state(
-            self.anchor,
-            expected_generation=state["generation"],
-            lanes=[lane],
-            scopes=state["scopes"],
-        )
-        (Path(lane["worktree"]) / "running.py").write_text("writer change\n", encoding="utf-8")
         active_registry = mock.Mock()
         active_registry.state.return_value = {
             "lease": {
@@ -667,6 +677,17 @@ class ProjectLaneM2Tests(unittest.TestCase):
             "quarantine": None,
             "history": [],
         }
+        with mock.patch(
+            "project_state.RecoveryRegistry",
+            return_value=active_registry,
+        ):
+            self.store.replace_lane_state(
+                self.anchor,
+                expected_generation=state["generation"],
+                lanes=[lane],
+                scopes=state["scopes"],
+            )
+        (Path(lane["worktree"]) / "running.py").write_text("writer change\n", encoding="utf-8")
         coordinator = self.coordinator_for()
         with mock.patch.object(coordinator, "_assert_legacy_vacancy"), \
              mock.patch("project_lanes.RecoveryRegistry", return_value=active_registry):
@@ -750,12 +771,27 @@ class ProjectLaneM2Tests(unittest.TestCase):
             "allowed_set_digest": "f" * 64,
             "lease_kind": "normal-contained",
         }
-        self.store.replace_lane_state(
-            self.anchor,
-            expected_generation=state["generation"],
-            lanes=[running],
-            scopes=state["scopes"],
-        )
+        active_registry = mock.Mock()
+        active_registry.state.return_value = {
+            "lease": {
+                **running["writer"],
+                "recovery_capable": True,
+                "state": "running",
+            },
+            "outbox": None,
+            "quarantine": None,
+            "history": [],
+        }
+        with mock.patch(
+            "project_state.RecoveryRegistry",
+            return_value=active_registry,
+        ):
+            self.store.replace_lane_state(
+                self.anchor,
+                expected_generation=state["generation"],
+                lanes=[running],
+                scopes=state["scopes"],
+            )
         first = self.coordinator_for().cancel_or_crash("terminal-replay", "timeout")
         second = self.coordinator_for().cancel_or_crash("terminal-replay", "timeout")
         self.assertEqual((first["state"], second["state"]), ("quarantined", "quarantined"))
@@ -1029,6 +1065,7 @@ class ProjectLaneM2Tests(unittest.TestCase):
         }
         with mock.patch.object(ProjectLaneCoordinator, "_assert_legacy_vacancy"), \
              mock.patch("project_lanes.RecoveryRegistry", return_value=active_registry), \
+             mock.patch("project_state.RecoveryRegistry", return_value=active_registry), \
              concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             attached = list(
                 pool.map(
@@ -1640,17 +1677,94 @@ class ProjectScopeM3Tests(unittest.TestCase):
             if item.get("owner") == owner
         ]
 
+    def replace_with_active_writer(
+        self,
+        state: dict[str, object],
+        lanes: list[dict[str, object]],
+        scopes: list[dict[str, object]],
+        lane_id: str,
+    ) -> None:
+        lane = next(item for item in lanes if item["lane_id"] == lane_id)
+        writer = lane["writer"]
+        self.assertIsInstance(writer, dict)
+        registry = mock.Mock()
+        registry.state.return_value = {
+            "lease": {
+                **writer,
+                "recovery_capable": True,
+                "state": "running",
+            },
+            "outbox": None,
+            "quarantine": None,
+            "history": [],
+        }
+        with mock.patch(
+            "project_state.RecoveryRegistry",
+            return_value=registry,
+        ):
+            self.store.replace_lane_state(
+                self.anchor,
+                expected_generation=state["generation"],
+                lanes=lanes,
+                scopes=scopes,
+            )
+
+    @staticmethod
+    def active_registry_factory(
+        lanes: list[dict[str, object]],
+    ):
+        writers = {
+            os.path.normcase(os.path.abspath(str(lane["worktree"]))): lane[
+                "writer"
+            ]
+            for lane in lanes
+            if isinstance(lane.get("writer"), dict)
+        }
+
+        def factory(workspace: Path, *, state_root: Path):
+            del state_root
+            writer = writers.get(
+                os.path.normcase(os.path.abspath(str(workspace)))
+            )
+            if not isinstance(writer, dict):
+                raise AssertionError("unexpected lane registry lookup")
+            registry = mock.Mock()
+            registry.state.return_value = {
+                "lease": {
+                    **writer,
+                    "recovery_capable": True,
+                    "state": "running",
+                },
+                "outbox": None,
+                "quarantine": None,
+                "history": [],
+            }
+            return registry
+
+        return factory
+
     def mark_waiting_for_integration(self, lane_id: str) -> dict[str, object]:
         state = self.store.read_state(self.anchor)["state"]
         lanes = list(state["lanes"])
         lane = next(item for item in lanes if item["lane_id"] == lane_id)
-        lane["state"] = "waiting-for-integration"
+        lane["state"] = "running"
         lane["writer"] = {
             "lease_id": f"{lane_id}-writer",
             "run_id": f"{lane_id}-run",
             "allowed_set_digest": "c" * 64,
             "lease_kind": "normal-contained",
         }
+        lane.pop("scope_wait_from", None)
+        self.replace_with_active_writer(
+            state,
+            lanes,
+            state["scopes"],
+            lane_id,
+        )
+        state = self.store.read_state(self.anchor)["state"]
+        lanes = list(state["lanes"])
+        lane = next(item for item in lanes if item["lane_id"] == lane_id)
+        lane["state"] = "waiting-for-integration"
         lane["terminal_evidence"] = "d" * 64
         self.store.replace_lane_state(
             self.anchor,
@@ -1776,12 +1890,16 @@ class ProjectScopeM3Tests(unittest.TestCase):
             "state": "running",
             "writer": writer,
         }
-        self.store.replace_lane_state(
-            self.anchor,
-            expected_generation=state["generation"],
-            lanes=[legacy_lane],
-            scopes=state["scopes"],
-        )
+        with mock.patch(
+            "project_state.RecoveryRegistry",
+            side_effect=self.active_registry_factory([legacy_lane]),
+        ):
+            self.store.replace_lane_state(
+                self.anchor,
+                expected_generation=state["generation"],
+                lanes=[legacy_lane],
+                scopes=state["scopes"],
+            )
         admitted = self.store.read_state(self.anchor)["state"]
         forged = dict(legacy_lane)
         forged["scope_schema"] = "project-scopes-v1"
@@ -1845,12 +1963,16 @@ class ProjectScopeM3Tests(unittest.TestCase):
                     },
                 }
             )
-        self.store.replace_lane_state(
-            self.anchor,
-            expected_generation=state["generation"],
-            lanes=lanes,
-            scopes=state["scopes"],
-        )
+        with mock.patch(
+            "project_state.RecoveryRegistry",
+            side_effect=self.active_registry_factory(lanes),
+        ):
+            self.store.replace_lane_state(
+                self.anchor,
+                expected_generation=state["generation"],
+                lanes=lanes,
+                scopes=state["scopes"],
+            )
         before = self.store.read_state(self.anchor)["state"]
         with self.assertRaisesRegex(
             ProjectScopeError,
@@ -1893,12 +2015,16 @@ class ProjectScopeM3Tests(unittest.TestCase):
                 }
             )
         state = self.store.read_state(self.anchor)["state"]
-        self.store.replace_lane_state(
-            self.anchor,
-            expected_generation=state["generation"],
-            lanes=lanes,
-            scopes=state["scopes"],
-        )
+        with mock.patch(
+            "project_state.RecoveryRegistry",
+            side_effect=self.active_registry_factory(lanes),
+        ):
+            self.store.replace_lane_state(
+                self.anchor,
+                expected_generation=state["generation"],
+                lanes=lanes,
+                scopes=state["scopes"],
+            )
         before = self.store.read_state(self.anchor)["state"]
         with self.assertRaisesRegex(
             ProjectLaneError,
@@ -1995,12 +2121,16 @@ class ProjectScopeM3Tests(unittest.TestCase):
                     },
                 }
             )
-        self.store.replace_lane_state(
-            self.anchor,
-            expected_generation=state["generation"],
-            lanes=[*state["lanes"], *legacy_lanes],
-            scopes=state["scopes"],
-        )
+        with mock.patch(
+            "project_state.RecoveryRegistry",
+            side_effect=self.active_registry_factory(legacy_lanes),
+        ):
+            self.store.replace_lane_state(
+                self.anchor,
+                expected_generation=state["generation"],
+                lanes=[*state["lanes"], *legacy_lanes],
+                scopes=state["scopes"],
+            )
         before = self.store.read_state(self.anchor)["state"]
         with self.assertRaisesRegex(
             ProjectLaneError,
@@ -2283,6 +2413,9 @@ class ProjectScopeM3Tests(unittest.TestCase):
         ), mock.patch(
             "project_lanes.RecoveryRegistry",
             return_value=active_registry,
+        ), mock.patch(
+            "project_state.RecoveryRegistry",
+            return_value=active_registry,
         ):
             attached = coordinator.attach_contained_writer(
                 "mixed-authority",
@@ -2469,11 +2602,11 @@ class ProjectScopeM3Tests(unittest.TestCase):
             "allowed_set_digest": "a" * 64,
             "lease_kind": "normal-contained",
         }
-        self.store.replace_lane_state(
-            self.anchor,
-            expected_generation=state["generation"],
-            lanes=lanes,
-            scopes=state["scopes"],
+        self.replace_with_active_writer(
+            state,
+            lanes,
+            state["scopes"],
+            "expand-one",
         )
         with self.assertRaisesRegex(ProjectScopeError, "post-write"):
             self.scopes().expand("expand-one", ["four.py"], pre_write=False)
@@ -2501,7 +2634,921 @@ class ProjectScopeM3Tests(unittest.TestCase):
                 require_ready=True,
             )
 
-    def test_live_prewrite_expansion_fails_closed_until_runner_bridge(self) -> None:
+    def test_live_expansion_requires_safe_stop_before_fresh_allowed_set_binding(self) -> None:
+        lane = self.create(
+            "live-rebind",
+            [{"kind": "file", "path": "one.py", "mode": "hard"}],
+        )
+        state = self.store.read_state(self.anchor)["state"]
+        lanes = list(state["lanes"])
+        running = next(item for item in lanes if item["lane_id"] == "live-rebind")
+        writer = {
+            "lease_id": "live-rebind-lease",
+            "run_id": "live-rebind-run",
+            "allowed_set_digest": "a" * 64,
+            "lease_kind": "normal-contained",
+        }
+        running["state"] = "running"
+        running["writer"] = writer
+        active_registry = mock.Mock()
+        active_registry.state.return_value = {
+            "lease": {
+                **writer,
+                "state": "running",
+            },
+            "outbox": None,
+            "quarantine": None,
+            "history": [],
+        }
+        with mock.patch(
+            "project_state.RecoveryRegistry",
+            return_value=active_registry,
+        ):
+            self.store.replace_lane_state(
+                self.anchor,
+                expected_generation=state["generation"],
+                lanes=lanes,
+                scopes=state["scopes"],
+            )
+
+        requested = [{"kind": "file", "path": "two.py", "mode": "hard"}]
+        result = self.scopes().expand("live-rebind", requested, pre_write=True)
+        self.assertEqual(result["status"], "safe-stop-requested")
+        state = self.store.read_state(self.anchor)["state"]
+        running = next(item for item in state["lanes"] if item["lane_id"] == "live-rebind")
+        intent = running["safe_stop"]
+        self.assertEqual(intent["status"], "requested")
+        self.assertEqual(intent["anchor_id"], self.anchor)
+        self.assertEqual(intent["lane_id"], "live-rebind")
+        self.assertEqual(intent["writer"], writer)
+        self.assertEqual(intent["session"]["common"], running["common"])
+        self.assertEqual(intent["session"]["integration_ref"], self.integration_ref)
+        self.assertEqual(intent["requested_scopes"], requested)
+        self.assertEqual(
+            [claim["path"] for claim in intent["old_hard_grants"]], ["one.py"]
+        )
+        coordinator = self.lanes_coordinator()
+        with self.assertRaisesRegex(ProjectLaneError, "safe-stop"):
+            coordinator.runner_writer_binding(
+                "live-rebind",
+                Path(str(lane["worktree"])),
+                ["two.py"],
+                require_ready=False,
+            )
+
+        consumed = coordinator.consume_safe_stop_rebind(
+            "live-rebind",
+            writer=writer,
+            intent_id=intent["intent_id"],
+        )
+        self.assertEqual(consumed["safe_stop"]["status"], "stopping")
+        archive = {
+            "event": "contained-terminal-released",
+            "lease_id": writer["lease_id"],
+            "run_id": writer["run_id"],
+            "lease_kind": writer["lease_kind"],
+            "allowed_set_digest": writer["allowed_set_digest"],
+            "terminal_success": False,
+            "handoff_digest": None,
+            "outbox_digest": None,
+            "archive_digest": "b" * 64,
+        }
+        registry = mock.Mock()
+        registry.state.return_value = {
+            "lease": None,
+            "outbox": None,
+            "quarantine": None,
+            "history": [archive],
+        }
+        with mock.patch.object(
+            coordinator,
+            "_lane_registry_state",
+            return_value=registry.state(),
+        ), mock.patch(
+            "project_state.RecoveryRegistry",
+            return_value=registry,
+        ):
+            rebound = coordinator.complete_safe_stop_rebind(
+                "live-rebind",
+                intent_id=intent["intent_id"],
+            )
+        self.assertEqual(rebound["state"], "ready")
+        self.assertIsNone(rebound["writer"])
+        self.assertEqual(rebound["safe_stop"]["status"], "completed")
+        self.assertEqual(
+            rebound["safe_stop"]["terminal_archive"],
+            archive["archive_digest"],
+        )
+        self.assertEqual(
+            [
+                (claim["path"], claim["status"])
+                for claim in self.scope_records("live-rebind")
+            ],
+            [("one.py", "active"), ("two.py", "active")],
+        )
+        binding = coordinator.runner_writer_binding(
+            "live-rebind",
+            Path(str(lane["worktree"])),
+            ["two.py"],
+            require_ready=True,
+        )
+        self.assertEqual(binding["allowed_paths"], ["two.py"])
+
+    def test_generic_store_rejects_two_cas_writer_substitution(self) -> None:
+        self.create("two-cas-writer", ["owned.py"])
+        state = self.store.read_state(self.anchor)["state"]
+        writer_a = {
+            "lease_id": "two-cas-a",
+            "run_id": "two-cas-run-a",
+            "allowed_set_digest": "a" * 64,
+            "lease_kind": "normal-contained",
+        }
+        lanes = [dict(item) for item in state["lanes"]]
+        lane = next(
+            item for item in lanes if item["lane_id"] == "two-cas-writer"
+        )
+        lane["state"] = "running"
+        lane["writer"] = writer_a
+        active_registry = mock.Mock()
+        active_registry.state.return_value = {
+            "lease": {**writer_a, "state": "running"},
+            "outbox": None,
+            "quarantine": None,
+            "history": [],
+        }
+        with mock.patch(
+            "project_state.RecoveryRegistry",
+            return_value=active_registry,
+        ):
+            self.store.replace_lane_state(
+                self.anchor,
+                expected_generation=state["generation"],
+                lanes=lanes,
+                scopes=state["scopes"],
+            )
+
+        attached = self.store.read_state(self.anchor)["state"]
+        detached_lanes = [dict(item) for item in attached["lanes"]]
+        detached = next(
+            item
+            for item in detached_lanes
+            if item["lane_id"] == "two-cas-writer"
+        )
+        detached["state"] = "ready"
+        detached["writer"] = None
+        vacant_registry = mock.Mock()
+        vacant_registry.state.return_value = {
+            "lease": None,
+            "outbox": None,
+            "quarantine": None,
+            "history": [],
+        }
+        with mock.patch(
+            "project_state.RecoveryRegistry",
+            return_value=vacant_registry,
+        ), self.assertRaisesRegex(
+            ProjectStateError,
+            "owning lifecycle",
+        ):
+            self.store.replace_lane_state(
+                self.anchor,
+                expected_generation=attached["generation"],
+                lanes=detached_lanes,
+                scopes=attached["scopes"],
+            )
+        self.assertEqual(
+            self.store.read_state(self.anchor)["state"]["generation"],
+            attached["generation"],
+        )
+
+        ready = self.create("two-cas-ready", ["other.py"])
+        ready_state = self.store.read_state(self.anchor)["state"]
+        forged_lanes = [dict(item) for item in ready_state["lanes"]]
+        forged = next(
+            item for item in forged_lanes if item["lane_id"] == ready["lane_id"]
+        )
+        forged["state"] = "running"
+        forged["writer"] = {
+            "lease_id": "two-cas-b",
+            "run_id": "two-cas-run-b",
+            "allowed_set_digest": "b" * 64,
+            "lease_kind": "normal-contained",
+        }
+        with mock.patch(
+            "project_state.RecoveryRegistry",
+            return_value=vacant_registry,
+        ), self.assertRaisesRegex(
+            ProjectStateError,
+            "active registry authority",
+        ):
+            self.store.replace_lane_state(
+                self.anchor,
+                expected_generation=ready_state["generation"],
+                lanes=forged_lanes,
+                scopes=ready_state["scopes"],
+            )
+
+    def test_safe_stop_sink_rejects_two_cas_writer_substitution_without_terminal_authority(
+        self,
+    ) -> None:
+        created = self.create("safe-stop-two-cas", ["owned.py"])
+        registry = RecoveryRegistry(
+            Path(str(created["worktree"])),
+            state_root=self.recovery,
+        )
+
+        def start_writer(
+            lease_id: str,
+            run_id: str,
+            ordinal: int,
+        ) -> dict[str, str]:
+            guardian_id = f"safe-stop-guardian-{ordinal}"
+            worker_identity = f"safe-stop-worker-{ordinal}"
+            worker_pid = 100 + ordinal
+            launch_token = f"safe-stop-token-{ordinal}"
+            preflight = registry.prepare_source_checkpoint(
+                source_id=f"{lease_id}-source",
+                source_lease_id=lease_id,
+                source_milestone="M3b-source",
+                target_milestone="M3b-recovery",
+                allowed_paths=["owned.py"],
+                specification_revision="R-032",
+            )
+            registry.reserve_normal(
+                lease_id,
+                allowed_set_digest=preflight["allowed_set_digest"],
+                recovery_capable=True,
+                source_state_id=preflight["source_state_id"],
+                run_id=run_id,
+                containment_plan={
+                    "guardian_id": guardian_id,
+                    "provider_plan_id": f"provider-plan-{ordinal}",
+                    "ipc_plan_id": f"ipc-plan-{ordinal}",
+                    "contained_launch_token": launch_token,
+                    "fallback_token": f"fallback-token-{ordinal}",
+                    "recovery_target": False,
+                },
+            )
+            registry.bind_reserved_source_snapshot(lease_id, preflight)
+            registry.claim_contained_launch(lease_id, launch_token)
+            registry.bind_process_unactivated(
+                lease_id,
+                allowed_set_digest=preflight["allowed_set_digest"],
+                provider_receipt={
+                    "guardian_id": guardian_id,
+                    "guardian_pid": 200 + ordinal,
+                    "guardian_identity": f"safe-stop-guardian-process-{ordinal}",
+                    "provider": "windows-job",
+                    "provider_plan_id": f"provider-plan-{ordinal}",
+                    "ipc_plan_id": f"ipc-plan-{ordinal}",
+                    "policy": "kill-on-close-no-breakaway",
+                    "active_processes": 1,
+                    "anti_migration": None,
+                    "precommit": {
+                        "guardian_id": guardian_id,
+                        "guardian_pid": 200 + ordinal,
+                        "guardian_identity": (
+                            f"safe-stop-guardian-process-{ordinal}"
+                        ),
+                        "worker_pid": worker_pid,
+                        "worker_identity": worker_identity,
+                        "provider": "windows-job",
+                        "provider_plan_id": f"provider-plan-{ordinal}",
+                        "ipc_plan_id": f"ipc-plan-{ordinal}",
+                        "provider_populated": True,
+                        "membership_verified": True,
+                        "precommit_nonce": f"safe-stop-precommit-{ordinal}",
+                        "attested_at": "2026-07-24T00:00:01Z",
+                    },
+                },
+                process_receipt={
+                    "pid": worker_pid,
+                    "identity": worker_identity,
+                    "process_group_id": worker_pid,
+                    "started_at": "2026-07-24T00:00:00Z",
+                },
+            )
+            registry.commit_activation(
+                lease_id,
+                preflight["allowed_set_digest"],
+            )
+            return {
+                "lease_id": lease_id,
+                "run_id": run_id,
+                "allowed_set_digest": preflight["allowed_set_digest"],
+                "lease_kind": "normal-contained",
+            }
+
+        writer_a = start_writer("safe-stop-a", "safe-stop-run-a", 1)
+        state = self.store.read_state(self.anchor)["state"]
+        lanes = [dict(item) for item in state["lanes"]]
+        lane = next(
+            item for item in lanes if item["lane_id"] == "safe-stop-two-cas"
+        )
+        lane["state"] = "running"
+        lane["writer"] = writer_a
+        self.store.replace_lane_state(
+            self.anchor,
+            expected_generation=state["generation"],
+            lanes=lanes,
+            scopes=state["scopes"],
+        )
+
+        requested = self.scopes().expand(
+            "safe-stop-two-cas",
+            ["expanded.py"],
+            pre_write=True,
+        )
+        self.assertEqual(requested["status"], "safe-stop-requested")
+        coordinator = self.lanes_coordinator()
+        coordinator.consume_safe_stop_rebind(
+            "safe-stop-two-cas",
+            writer=writer_a,
+            intent_id=requested["intent_id"],
+        )
+        registry.record_terminal_evidence(
+            writer_a["lease_id"],
+            {
+                "success": False,
+                "binding_digest": "e" * 64,
+                "terminal_event": "turn.failed",
+            },
+            writer_a["allowed_set_digest"],
+        )
+        registry.prove_contained_tree_empty(
+            writer_a["lease_id"],
+            {
+                "populated": False,
+                "identity_verified": True,
+                "guardian_id": "safe-stop-guardian-1",
+                "provider": "windows-job",
+                "worker_pid": 101,
+                "worker_identity": "safe-stop-worker-1",
+                "proved_at": "2026-07-24T00:00:02Z",
+            },
+            writer_a["allowed_set_digest"],
+        )
+        registry.acknowledge_guardian_close(
+            writer_a["lease_id"],
+            {
+                "closed": True,
+                "guardian_id": "safe-stop-guardian-1",
+                "closed_at": "2026-07-24T00:00:03Z",
+            },
+        )
+        released_a = registry.release_contained_terminal(
+            writer_a["lease_id"]
+        )
+        archive_a = next(
+            event
+            for event in released_a["history"]
+            if event.get("event") == "contained-terminal-released"
+            and event.get("lease_id") == writer_a["lease_id"]
+        )
+        writer_b = start_writer("safe-stop-b", "safe-stop-run-b", 2)
+        active_b = registry.state()
+        self.assertEqual(active_b["lease"]["lease_id"], writer_b["lease_id"])
+        self.assertEqual(
+            next(
+                event
+                for event in active_b["history"]
+                if event.get("event") == "contained-terminal-released"
+            ),
+            archive_a,
+        )
+
+        stopping = self.store.read_state(self.anchor)["state"]
+        forged_lanes = [dict(item) for item in stopping["lanes"]]
+        forged_lane = next(
+            item
+            for item in forged_lanes
+            if item["lane_id"] == "safe-stop-two-cas"
+        )
+        forged_lane["state"] = "ready"
+        forged_lane["writer"] = None
+        forged_lane["safe_stop"] = {
+            **forged_lane["safe_stop"],
+            "status": "completed",
+            "completed_generation": stopping["generation"] + 1,
+            "completed_state": "ready",
+            "terminal_archive": archive_a["archive_digest"],
+            "recovery_checkpoint_digest": None,
+            "preserved_changes": False,
+        }
+        with self.assertRaisesRegex(
+            ProjectStateError,
+            "safe-stop detach lacks exact terminal registry authority",
+        ):
+            self.store.complete_safe_stop_rebind(
+                self.anchor,
+                expected_generation=stopping["generation"],
+                lanes=forged_lanes,
+                scopes=stopping["scopes"],
+                intent_id=requested["intent_id"],
+            )
+        unchanged = self.store.read_state(self.anchor)["state"]
+        unchanged_lane = next(
+            item
+            for item in unchanged["lanes"]
+            if item["lane_id"] == "safe-stop-two-cas"
+        )
+        self.assertEqual(unchanged["generation"], stopping["generation"])
+        self.assertEqual(unchanged_lane["state"], "running")
+        self.assertEqual(unchanged_lane["writer"], writer_a)
+        self.assertEqual(unchanged_lane["safe_stop"]["status"], "stopping")
+
+    def test_generic_store_revalidates_same_writer_transition_into_running(
+        self,
+    ) -> None:
+        self.create("same-writer-restart", ["owned.py"])
+        state = self.store.read_state(self.anchor)["state"]
+        writer = {
+            "lease_id": "same-writer-lease",
+            "run_id": "same-writer-run",
+            "allowed_set_digest": "a" * 64,
+            "lease_kind": "normal-contained",
+        }
+        lanes = [dict(item) for item in state["lanes"]]
+        lane = next(
+            item for item in lanes if item["lane_id"] == "same-writer-restart"
+        )
+        lane["state"] = "running"
+        lane["writer"] = writer
+        active_registry = mock.Mock()
+        active_registry.state.return_value = {
+            "lease": {
+                **writer,
+                "recovery_capable": True,
+                "state": "running",
+            },
+            "outbox": None,
+            "quarantine": None,
+            "history": [],
+        }
+        with mock.patch(
+            "project_state.RecoveryRegistry",
+            return_value=active_registry,
+        ):
+            self.store.replace_lane_state(
+                self.anchor,
+                expected_generation=state["generation"],
+                lanes=lanes,
+                scopes=state["scopes"],
+            )
+        coordinator = self.lanes_coordinator()
+        with mock.patch(
+            "project_lanes.RecoveryRegistry",
+            return_value=active_registry,
+        ):
+            quarantined_lane = coordinator.cancel_or_crash(
+                "same-writer-restart",
+                "timeout",
+            )
+        self.assertEqual(quarantined_lane["state"], "quarantined")
+
+        quarantined = self.store.read_state(self.anchor)["state"]
+        restarted_lanes = [dict(item) for item in quarantined["lanes"]]
+        restarted = next(
+            item
+            for item in restarted_lanes
+            if item["lane_id"] == "same-writer-restart"
+        )
+        restarted["state"] = "running"
+        restarted.pop("reason")
+        restarted.pop("terminal_from")
+        vacant_registry = mock.Mock()
+        vacant_registry.state.return_value = {
+            "lease": None,
+            "outbox": None,
+            "quarantine": None,
+            "history": [],
+        }
+        with mock.patch(
+            "project_state.RecoveryRegistry",
+            return_value=vacant_registry,
+        ), self.assertRaisesRegex(
+            ProjectStateError,
+            "active registry authority",
+        ):
+            self.store.replace_lane_state(
+                self.anchor,
+                expected_generation=quarantined["generation"],
+                lanes=restarted_lanes,
+                scopes=quarantined["scopes"],
+            )
+        unchanged = self.store.read_state(self.anchor)["state"]
+        unchanged_lane = next(
+            item
+            for item in unchanged["lanes"]
+            if item["lane_id"] == "same-writer-restart"
+        )
+        self.assertEqual(unchanged["generation"], quarantined["generation"])
+        self.assertEqual(unchanged_lane["state"], "quarantined")
+        self.assertEqual(unchanged_lane["writer"], writer)
+
+    def test_generic_store_rejects_new_writer_bearing_lane_without_registry_authority(
+        self,
+    ) -> None:
+        coordinator = self.lanes_coordinator()
+        worktree = self.lanes / "forged-new-writer"
+        self.git(
+            "worktree",
+            "add",
+            "-b",
+            "openbuild/lanes/forged-new-writer",
+            str(worktree),
+        )
+        registry = RecoveryRegistry(worktree, state_root=self.recovery)
+        registry.initialize()
+        state = self.store.read_state(self.anchor)["state"]
+        forged_lane = {
+            "lane_id": "forged-new-writer",
+            "milestone": "M3b",
+            "reader_floor": "2.3.6",
+            "common": coordinator.common,
+            "base": coordinator.base,
+            "branch": "refs/heads/openbuild/lanes/forged-new-writer",
+            "worktree": str(worktree),
+            "scopes": ["owned.py"],
+            "state": "running",
+            "writer": {
+                "lease_id": "forged-new-lease",
+                "run_id": "forged-new-run",
+                "allowed_set_digest": "f" * 64,
+                "lease_kind": "normal-contained",
+            },
+        }
+        with self.assertRaisesRegex(
+            ProjectStateError,
+            "active registry authority",
+        ):
+            self.store.replace_lane_state(
+                self.anchor,
+                expected_generation=state["generation"],
+                lanes=[*state["lanes"], forged_lane],
+                scopes=state["scopes"],
+            )
+        unchanged = self.store.read_state(self.anchor)["state"]
+        self.assertEqual(unchanged["generation"], state["generation"])
+        self.assertEqual(unchanged["lanes"], state["lanes"])
+
+    def test_generic_store_rejects_live_legacy_lane_removal(self) -> None:
+        coordinator = self.lanes_coordinator()
+        worktree = self.lanes / "legacy-removal"
+        self.git(
+            "worktree",
+            "add",
+            "-b",
+            "openbuild/lanes/legacy-removal",
+            str(worktree),
+        )
+        legacy_lane = {
+            "lane_id": "legacy-removal",
+            "milestone": "M2",
+            "reader_floor": "2.3.6",
+            "common": coordinator.common,
+            "base": coordinator.base,
+            "branch": "refs/heads/openbuild/lanes/legacy-removal",
+            "worktree": str(worktree),
+            "scopes": ["owned.py"],
+            "state": "running",
+            "writer": {
+                "lease_id": "legacy-removal-lease",
+                "run_id": "legacy-removal-run",
+                "allowed_set_digest": "a" * 64,
+                "lease_kind": "normal-contained",
+            },
+        }
+        state = self.store.read_state(self.anchor)["state"]
+        with mock.patch(
+            "project_state.RecoveryRegistry",
+            side_effect=self.active_registry_factory([legacy_lane]),
+        ):
+            self.store.replace_lane_state(
+                self.anchor,
+                expected_generation=state["generation"],
+                lanes=[legacy_lane],
+                scopes=state["scopes"],
+            )
+        admitted = self.store.read_state(self.anchor)["state"]
+        with self.assertRaisesRegex(
+            ProjectStateError,
+            "lane removal requires its owning lifecycle",
+        ):
+            self.store.replace_lane_state(
+                self.anchor,
+                expected_generation=admitted["generation"],
+                lanes=[],
+                scopes=admitted["scopes"],
+            )
+        unchanged = self.store.read_state(self.anchor)["state"]
+        self.assertEqual(unchanged["generation"], admitted["generation"])
+        self.assertEqual(unchanged["lanes"], admitted["lanes"])
+
+    def test_scope_release_consumes_only_resident_integration_acceptance(self) -> None:
+        self.create("release-owner", ["shared.py"])
+        self.create("release-waiter", ["shared.py"])
+        self.create("release-blocker", ["blocked.py"])
+        self.assertEqual(
+            self.scopes().expand(
+                "release-owner",
+                ["blocked.py"],
+                pre_write=True,
+            )["status"],
+            "waiting-for-scope",
+        )
+        owner = self.mark_waiting_for_integration("release-owner")
+        coordinator = self.lanes_coordinator()
+
+        with self.assertRaisesRegex(ProjectScopeError, "registry-resident"):
+            self.scopes().release("release-owner", acceptance={"accepted": True})
+        with self.assertRaisesRegex(ProjectScopeError, "registry-resident"):
+            self.scopes().release("release-owner", acceptance="forged")
+
+        with self.assertRaisesRegex(ProjectLaneError, "terminal archive"):
+            coordinator.record_scope_integration_acceptance(
+                "release-owner",
+                admitted_commit=str(owner["base"]),
+                accepted_commit=str(owner["base"]),
+                validation_argv=["git", "diff", "--check"],
+            )
+        with self.assertRaisesRegex(
+            ProjectStateError,
+            "terminal archive",
+        ):
+            self.store.record_scope_integration_acceptance(
+                self.anchor,
+                expected_generation=self.store.read_state(self.anchor)[
+                    "state"
+                ]["generation"],
+                lane_id="release-owner",
+                admitted_commit=str(owner["base"]),
+                accepted_commit=str(owner["base"]),
+                validation_argv=["git", "diff", "--check"],
+            )
+        terminal_registry = {
+            "lease": None,
+            "outbox": None,
+            "quarantine": None,
+            "history": [
+                {
+                    "event": "contained-terminal-released",
+                    "lease_id": owner["writer"]["lease_id"],
+                    "run_id": owner["writer"]["run_id"],
+                    "lease_kind": owner["writer"]["lease_kind"],
+                    "allowed_set_digest": owner["writer"][
+                        "allowed_set_digest"
+                    ],
+                    "terminal_success": True,
+                    "semantic_disposition": None,
+                    "final_state": "handoff-committed",
+                    "archive_digest": owner["terminal_evidence"],
+                    "handoff_digest": "f" * 64,
+                    "outbox_digest": "a" * 64,
+                }
+            ],
+        }
+        owner_worktree = Path(str(owner["worktree"]))
+        self.git(
+            "commit",
+            "--allow-empty",
+            "-m",
+            "empty lane result",
+            cwd=owner_worktree,
+        )
+        empty_commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=owner_worktree,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ).stdout.decode("ascii").strip()
+        self.git("update-ref", self.integration_ref, empty_commit)
+        registry = mock.Mock()
+        registry.state.return_value = terminal_registry
+        forged_state = self.store.read_state(self.anchor)["state"]
+        forged_lanes = [dict(item) for item in forged_state["lanes"]]
+        forged_lane = next(
+            item for item in forged_lanes if item["lane_id"] == "release-owner"
+        )
+        forged_lane["writer"] = {
+            **forged_lane["writer"],
+            "run_id": "forged-run",
+        }
+        with self.assertRaisesRegex(ProjectStateError, "writer binding"):
+            self.store.replace_lane_state(
+                self.anchor,
+                expected_generation=forged_state["generation"],
+                lanes=forged_lanes,
+                scopes=forged_state["scopes"],
+            )
+        redirected_lanes = [dict(item) for item in forged_state["lanes"]]
+        redirected_lane = next(
+            item
+            for item in redirected_lanes
+            if item["lane_id"] == "release-owner"
+        )
+        redirected_lane["worktree"] = str(self.temp / "redirected-lane")
+        with self.assertRaisesRegex(ProjectStateError, "durable identity"):
+            self.store.replace_lane_state(
+                self.anchor,
+                expected_generation=forged_state["generation"],
+                lanes=redirected_lanes,
+                scopes=forged_state["scopes"],
+            )
+        with mock.patch(
+            "project_state.RecoveryRegistry",
+            return_value=registry,
+        ), self.assertRaisesRegex(
+            ProjectLaneError,
+            "non-empty accepted commit",
+        ):
+            coordinator.record_scope_integration_acceptance(
+                "release-owner",
+                admitted_commit=str(owner["base"]),
+                accepted_commit=empty_commit,
+                validation_argv=[
+                    "git",
+                    "diff",
+                    "--check",
+                    str(owner["base"]),
+                    empty_commit,
+                ],
+            )
+        (owner_worktree / "shared.py").write_text(
+            "coherent lane result\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        self.git("add", "shared.py", cwd=owner_worktree)
+        self.git("commit", "-m", "coherent lane result", cwd=owner_worktree)
+        accepted_commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=owner_worktree,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ).stdout.decode("ascii").strip()
+        self.git("update-ref", self.integration_ref, accepted_commit)
+        validation_argv = [
+            sys.executable,
+            "-c",
+            (
+                "from pathlib import Path; import sys; "
+                "assert Path.cwd().resolve() != Path(sys.argv[1]).resolve(); "
+                "assert Path('shared.py').read_text(encoding='utf-8') "
+                "== 'coherent lane result\\n'"
+            ),
+            str(owner_worktree),
+        ]
+        forged_terminal_registry = json.loads(json.dumps(terminal_registry))
+        forged_terminal_registry["history"][0]["run_id"] = "forged-run"
+        forged_registry = mock.Mock()
+        forged_registry.state.return_value = forged_terminal_registry
+        with mock.patch(
+            "project_state.RecoveryRegistry",
+            return_value=forged_registry,
+        ), self.assertRaisesRegex(
+            ProjectLaneError,
+            "terminal archive",
+        ):
+            coordinator.record_scope_integration_acceptance(
+                "release-owner",
+                admitted_commit=str(owner["base"]),
+                accepted_commit=accepted_commit,
+                validation_argv=validation_argv,
+            )
+        with mock.patch(
+            "project_state.RecoveryRegistry",
+            return_value=registry,
+        ):
+            with self.assertRaisesRegex(
+                ProjectLaneError,
+                "validation did not pass",
+            ):
+                coordinator.record_scope_integration_acceptance(
+                    "release-owner",
+                    admitted_commit=str(owner["base"]),
+                    accepted_commit=accepted_commit,
+                    validation_argv=[
+                        sys.executable,
+                        "-c",
+                        "raise SystemExit(19)",
+                    ],
+                )
+            acceptance = coordinator.record_scope_integration_acceptance(
+                "release-owner",
+                admitted_commit=str(owner["base"]),
+                accepted_commit=accepted_commit,
+                validation_argv=validation_argv,
+            )
+            replay = coordinator.record_scope_integration_acceptance(
+                "release-owner",
+                admitted_commit=str(owner["base"]),
+                accepted_commit=accepted_commit,
+                validation_argv=validation_argv,
+            )
+        self.assertEqual(acceptance["lane_id"], "release-owner")
+        self.assertEqual(acceptance["writer"], owner["writer"])
+        self.assertEqual(acceptance["terminal_archive"], owner["terminal_evidence"])
+        self.assertEqual(
+            acceptance["validation"]["command"],
+            validation_argv,
+        )
+        self.assertEqual(
+            acceptance["validation"]["head_before"],
+            accepted_commit,
+        )
+        self.assertEqual(replay, acceptance)
+        with self.assertRaises(TypeError):
+            self.store.record_scope_integration_acceptance(
+                self.anchor,
+                expected_generation=self.store.read_state(self.anchor)[
+                    "state"
+                ]["generation"],
+                lane_id="release-owner",
+                admitted_commit=str(owner["base"]),
+                accepted_commit=accepted_commit,
+                validation_argv=validation_argv,
+                recovery_root=self.temp / "alternate-recovery",
+            )
+
+        before_forgery = self.store.read_state(self.anchor)["state"]
+        forged_scopes = [
+            dict(scope) for scope in before_forgery["scopes"]
+        ]
+        forged_other = next(
+            scope
+            for scope in forged_scopes
+            if scope.get("owner") == "release-blocker"
+            and scope.get("status") == "active"
+        )
+        forged_other["status"] = "released"
+        forged_other["release"] = {
+            "acceptance_id": acceptance["acceptance_id"],
+            "released_generation": before_forgery["generation"] + 1,
+        }
+        with self.assertRaisesRegex(
+            ProjectStateError,
+            "another lane scope",
+        ):
+            self.store.release_scope_integration_acceptance(
+                self.anchor,
+                expected_generation=before_forgery["generation"],
+                lane_id="release-owner",
+                acceptance_id=acceptance["acceptance_id"],
+                lanes=before_forgery["lanes"],
+                scopes=forged_scopes,
+            )
+        self.assertEqual(
+            self.store.read_state(self.anchor)["state"]["generation"],
+            before_forgery["generation"],
+        )
+
+        released = self.scopes().release(
+            "release-owner",
+            acceptance=acceptance["acceptance_id"],
+        )
+        self.assertTrue(released["released"])
+        self.assertEqual(
+            {
+                claim["path"]: claim["status"]
+                for claim in self.scope_records("release-owner")
+            },
+            {"blocked.py": "cancelled", "shared.py": "released"},
+        )
+        self.assertEqual(
+            [claim["status"] for claim in self.scope_records("release-waiter")],
+            ["active"],
+        )
+        replayed = self.scopes().release(
+            "release-owner",
+            acceptance=acceptance["acceptance_id"],
+        )
+        self.assertTrue(replayed["replayed"])
+        before_later_transition = [
+            dict(scope)
+            for scope in self.store.read_state(self.anchor)["state"][
+                "scopes"
+            ]
+            if scope.get("owner") == "release-owner"
+            and scope.get("status") == "released"
+        ]
+        self.create("unrelated-later", ["later.py"])
+        after_later_transition = [
+            dict(scope)
+            for scope in self.store.read_state(self.anchor)["state"][
+                "scopes"
+            ]
+            if scope.get("owner") == "release-owner"
+            and scope.get("status") == "released"
+        ]
+        self.assertEqual(
+            after_later_transition,
+            before_later_transition,
+        )
+
+    def test_live_prewrite_expansion_waits_for_runner_safe_stop(self) -> None:
         self.create("live-expand", ["one.py"])
         self.create("live-blocker", ["two.py"])
         state = self.store.read_state(self.anchor)["state"]
@@ -2514,25 +3561,26 @@ class ProjectScopeM3Tests(unittest.TestCase):
             "allowed_set_digest": "f" * 64,
             "lease_kind": "normal-contained",
         }
-        self.store.replace_lane_state(
-            self.anchor,
-            expected_generation=state["generation"],
-            lanes=lanes,
-            scopes=state["scopes"],
+        self.replace_with_active_writer(
+            state,
+            lanes,
+            state["scopes"],
+            "live-expand",
         )
-        with self.assertRaisesRegex(ProjectScopeError, "post-write"):
-            self.scopes().expand(
-                "live-expand",
-                ["two.py", "three.py"],
-                pre_write=True,
-            )
+        requested = self.scopes().expand(
+            "live-expand",
+            ["two.py", "three.py"],
+            pre_write=True,
+        )
+        self.assertEqual(requested["status"], "safe-stop-requested")
         state = self.store.read_state(self.anchor)["state"]
         lane = next(item for item in state["lanes"] if item["lane_id"] == "live-expand")
-        self.assertNotIn("safe_stop", lane)
+        self.assertEqual(lane["safe_stop"]["status"], "requested")
+        self.assertEqual(lane["safe_stop"]["intent_id"], requested["intent_id"])
         claims = self.scope_records("live-expand")
         self.assertEqual(
             [(claim["path"], claim["status"]) for claim in claims],
-            [("one.py", "active")],
+            [("one.py", "active"), ("three.py", "waiting"), ("two.py", "waiting")],
         )
 
     def test_cycle_cancels_newer_cycle_edge_not_unrelated_newer_wait(self) -> None:
@@ -2619,7 +3667,7 @@ class ProjectScopeM3Tests(unittest.TestCase):
         )
         self.assertEqual(binding["allowed_paths"], ["b.py"])
 
-    def test_live_cycle_fails_closed_without_runner_safe_stop_bridge(self) -> None:
+    def test_live_cycle_requests_exact_runner_safe_stop_and_replays(self) -> None:
         self.create("cycle-live-a", ["a.py"])
         self.create("cycle-live-b", ["b.py"])
         self.scopes().expand("cycle-live-a", ["b.py"], pre_write=True)
@@ -2643,14 +3691,84 @@ class ProjectScopeM3Tests(unittest.TestCase):
             "reservation": "cycle-live-b:expansion:injected",
             "phase": "expansion",
         }
-        self.store.replace_lane_state(
-            self.anchor,
-            expected_generation=state["generation"],
-            lanes=lanes,
-            scopes=[*state["scopes"], injected],
+        self.replace_with_active_writer(
+            state,
+            lanes,
+            [*state["scopes"], injected],
+            "cycle-live-b",
         )
-        with self.assertRaisesRegex(ProjectScopeError, "runner safe-stop bridge"):
-            self.scopes().resolve_wait_cycles()
+        resolved = self.scopes().resolve_wait_cycles()
+        self.assertEqual(resolved["status"], "safe-stop-requested")
+        self.assertFalse(resolved["replayed"])
+        state = self.store.read_state(self.anchor)["state"]
+        victim = next(
+            item for item in state["lanes"] if item["lane_id"] == "cycle-live-b"
+        )
+        self.assertEqual(victim["safe_stop"]["reason"], "scope-wait-cycle")
+        self.assertEqual(
+            victim["safe_stop"]["reservation"],
+            "cycle-live-b:expansion:injected",
+        )
+        self.assertEqual(
+            victim["safe_stop"]["intent_id"],
+            resolved["intent_id"],
+        )
+        replayed = self.scopes().resolve_wait_cycles()
+        self.assertTrue(replayed["replayed"])
+        self.assertEqual(replayed["intent_id"], resolved["intent_id"])
+        with self.assertRaisesRegex(ProjectLaneError, "binding"):
+            self.lanes_coordinator().consume_safe_stop_rebind(
+                "cycle-live-b",
+                writer=victim["writer"],
+                intent_id="f" * 64,
+            )
+        coordinator = self.lanes_coordinator()
+        coordinator.consume_safe_stop_rebind(
+            "cycle-live-b",
+            writer=victim["writer"],
+            intent_id=resolved["intent_id"],
+        )
+        terminal_registry = {
+            "lease": None,
+            "outbox": None,
+            "quarantine": None,
+            "history": [
+                {
+                    "event": "contained-terminal-released",
+                    "lease_id": victim["writer"]["lease_id"],
+                    "run_id": victim["writer"]["run_id"],
+                    "lease_kind": victim["writer"]["lease_kind"],
+                    "allowed_set_digest": victim["writer"][
+                        "allowed_set_digest"
+                    ],
+                    "terminal_success": False,
+                    "handoff_digest": None,
+                    "outbox_digest": None,
+                    "archive_digest": "e" * 64,
+                }
+            ],
+        }
+        sink_registry = mock.Mock()
+        sink_registry.state.return_value = terminal_registry
+        with mock.patch.object(
+            coordinator,
+            "_lane_registry_state",
+            return_value=terminal_registry,
+        ), mock.patch(
+            "project_state.RecoveryRegistry",
+            return_value=sink_registry,
+        ):
+            recovery_ready = coordinator.complete_safe_stop_rebind(
+                "cycle-live-b",
+                intent_id=resolved["intent_id"],
+                recovery_checkpoint_digest="d" * 64,
+                preserved_changes=False,
+            )
+        self.assertEqual(recovery_ready["state"], "recovery-ready")
+        self.assertEqual(
+            recovery_ready["recovery_checkpoint_digest"],
+            "d" * 64,
+        )
         claims = [
             record
             for record in self.scope_records("cycle-live-b")

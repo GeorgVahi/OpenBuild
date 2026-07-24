@@ -4,6 +4,28 @@ OpenBuild follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### 2.4.0-alpha.4
+
+#### Added
+
+- Added generation-bound runner safe-stop/rebind intents with exact guardian consumption, full-tree-zero evidence, clean allowed-set rebind, and checkpoint-bound dirty recovery.
+- Added immutable session binding for the lane recovery root and durable-owner integration validation in a separate owner-private detached checkout of the exact non-empty integration-ref tip.
+- Extended the real two-lane process fixture through dirty recovery, coherent-prefix integration, active-scope release, waiting-expansion cancellation, and terminal progress of the neighboring lane.
+- Added a crash-boundary regression proving that a durable safe-stop completion can replay and materialize its local receipt without closing the rebound lane.
+
+#### Changed
+
+- Allowed recovery targets to resume across their active checkpoint-authorized scope subset while a conflicting dynamic expansion remains waiting.
+- Made successful recovery verification observe the authorized parent checkpoint without mutating its immutable authorization binding.
+- Preserved already released scope records across unrelated later lane transitions while continuing to reject new or changed release state outside the acceptance-owned sink.
+- Rejected direct-store evidence forgery, empty-commit acceptance, validation checkout mutation, and use of one lane's acceptance to release another lane's active scopes.
+- Bound clean validation status, HEAD and tree before and after execution, removed caller-selected recovery roots from the durable sink, and covered later unrelated transitions preserving released records byte-for-byte.
+- Bound every new contained terminal archive and integration acceptance to the exact writer `run_id`, and made lane writer/worktree identity immutable across generic durable transitions.
+- Required every durable writer attach and every same-writer transition back into `running` to match the exact active lane-local registry lease. Detach remains limited to an exact vacant recovery-ready archive or a safe-stop completion whose durable sink independently reloads a vacant registry and matches the full schema-valid terminal archive.
+- Made the durable lane set append-only through the generic state sink, preventing a live or legacy lane from disappearing without a future purpose-specific terminal lifecycle.
+- Persisted completed safe-stop evidence in the project lane before materializing the runner-local receipt, closing the post-CAS crash window.
+- Synchronized the manifest, changelog and README install pins for `2.4.0-alpha.4`; DAG scheduling, the full integration queue and the stable release remain later milestones.
+
 ### 2.4.0-alpha.3
 
 #### Added

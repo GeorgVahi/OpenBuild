@@ -515,7 +515,12 @@ def _validate_terminal_archive(value: Mapping[str, Any]) -> None:
         "outbox_digest",
         "archive_digest",
     }
-    if set(value) != required or value.get("event") != "contained-terminal-released":
+    fields = set(value)
+    if fields == required | {"run_id"}:
+        _require_string(value.get("run_id"), "contained terminal archive run ID")
+    elif fields != required:
+        raise RecoveryStateError("contained terminal archive fields are malformed")
+    if value.get("event") != "contained-terminal-released":
         raise RecoveryStateError("contained terminal archive fields are malformed")
     if not isinstance(value.get("lease_id"), str) or not value["lease_id"]:
         raise RecoveryStateError("contained terminal archive lease is malformed")
@@ -3936,7 +3941,12 @@ class RecoveryRegistry:
                 "semantic escalation requires an authoritative zero-write snapshot"
             )
 
-    def revalidate_checkpoint(self, checkpoint: Mapping[str, Any]) -> dict[str, Any]:
+    def revalidate_checkpoint(
+        self,
+        checkpoint: Mapping[str, Any],
+        *,
+        persist: bool = True,
+    ) -> dict[str, Any]:
         source_state_id = checkpoint.get("source_state_id")
         if not isinstance(source_state_id, str):
             raise RecoveryStateError("checkpoint source state ID is missing")
@@ -3950,7 +3960,11 @@ class RecoveryRegistry:
             ):
                 raise RecoveryStateError("semantic escalation made this checkpoint recovery-ineligible")
             source = self._read_source_locked(source_state_id)
-            _, public = self._revalidate_source_locked(source, checkpoint, persist=True)
+            _, public = self._revalidate_source_locked(
+                source,
+                checkpoint,
+                persist=persist,
+            )
             return public
 
     def grant_authorization(
@@ -6054,6 +6068,7 @@ class RecoveryRegistry:
             archive = {
                 "event": "contained-terminal-released",
                 "lease_id": lease_id,
+                "run_id": _lease_run_id(lease),
                 "lease_kind": lease.get("lease_kind"),
                 "final_state": lease.get("state"),
                 "allowed_set_digest": lease.get("allowed_set_digest"),

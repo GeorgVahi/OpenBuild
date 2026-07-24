@@ -65,7 +65,9 @@ class ProjectLaneCoordinator:
         self.checkout = _safe_dir(checkout)
         self.store = store
         self.anchor_id = anchor_id
-        self.recovery_root = Path(recovery_root)
+        self.recovery_root = Path(
+            os.path.abspath(os.fspath(recovery_root))
+        )
         self.lane_root = _safe_dir(lane_root)
         if (
             not isinstance(integration_ref, str)
@@ -137,6 +139,7 @@ class ProjectLaneCoordinator:
         if (
             session.get("integration_ref") != self.integration_ref
             or session.get("reader_floor") != PROJECT_LANE_READER_FLOOR
+            or session.get("recovery_root") != str(self.recovery_root)
         ):
             raise ProjectLaneError("lane session integration binding changed")
         return state
@@ -146,6 +149,7 @@ class ProjectLaneCoordinator:
             "common": self.common,
             "integration_ref": integration_ref,
             "reader_floor": PROJECT_LANE_READER_FLOOR,
+            "recovery_root": str(self.recovery_root),
         }
         for _ in range(8):
             result = self.store.read_state(self.anchor_id)
@@ -163,6 +167,7 @@ class ProjectLaneCoordinator:
                     expected_generation=state["generation"],
                     common=self.common,
                     integration_ref=integration_ref,
+                    recovery_root=self.recovery_root,
                 )
             except ProjectStateError as exc:
                 if str(exc) == "project generation changed":
@@ -779,7 +784,11 @@ class ProjectLaneCoordinator:
         ):
             raise ProjectLaneError("runner lane worktree is dirty before activation")
         try:
-            self.scope_manager.assert_write_authority(lane_id, canonical_allowed)
+            self.scope_manager.assert_write_authority(
+                lane_id,
+                canonical_allowed,
+                allow_waiting=lease_kind == "recovery-target",
+            )
         except ProjectScopeError as exc:
             raise ProjectLaneError(str(exc)) from exc
         binding = {
@@ -812,6 +821,238 @@ class ProjectLaneCoordinator:
         if not isinstance(lane, dict):
             raise ProjectLaneError("lane does not exist")
         return dict(lane)
+
+    def consume_safe_stop_rebind(
+        self,
+        lane_id: str,
+        *,
+        writer: Mapping[str, Any],
+        intent_id: str,
+    ) -> dict[str, Any]:
+        """Durably acknowledge the exact live guardian stop before termination."""
+
+        if not _LANE.fullmatch(lane_id) or not re.fullmatch(r"[0-9a-f]{64}", intent_id):
+            raise ProjectLaneError("safe-stop rebind binding is invalid")
+        for _ in range(8):
+            state = self._state()
+            self._assert_binding(state)
+            lanes = [dict(item) for item in state["lanes"]]
+            lane = next((item for item in lanes if item.get("lane_id") == lane_id), None)
+            if not isinstance(lane, dict):
+                raise ProjectLaneError("safe-stop lane does not exist")
+            intent = lane.get("safe_stop")
+            if (
+                not isinstance(intent, dict)
+                or intent.get("intent_id") != intent_id
+                or intent.get("writer") != dict(writer)
+                or lane.get("writer") != dict(writer)
+                or lane.get("state") != "running"
+            ):
+                raise ProjectLaneError("safe-stop rebind binding changed")
+            if intent.get("status") == "stopping":
+                return lane
+            if intent.get("status") != "requested":
+                raise ProjectLaneError("safe-stop rebind is not awaiting consumption")
+            intent = dict(intent)
+            intent["status"] = "stopping"
+            intent["consumed_generation"] = int(state["generation"]) + 1
+            lane["safe_stop"] = intent
+            try:
+                self.store.consume_safe_stop_rebind(
+                    self.anchor_id,
+                    expected_generation=int(state["generation"]),
+                    lanes=lanes,
+                    scopes=state["scopes"],
+                    intent_id=intent_id,
+                )
+            except ProjectStateError as exc:
+                if str(exc) == "project generation changed":
+                    continue
+                raise ProjectLaneError(str(exc)) from exc
+            return lane
+        raise ProjectLaneError("safe-stop rebind consumption could not win the project generation CAS")
+
+    def complete_safe_stop_rebind(
+        self,
+        lane_id: str,
+        *,
+        intent_id: str,
+        recovery_checkpoint_digest: str | None = None,
+        preserved_changes: bool = False,
+    ) -> dict[str, Any]:
+        """Clear a consumed intent only after the exact contained tree is archived zero."""
+
+        if (
+            not _LANE.fullmatch(lane_id)
+            or not re.fullmatch(r"[0-9a-f]{64}", intent_id)
+            or not isinstance(preserved_changes, bool)
+            or (
+                recovery_checkpoint_digest is not None
+                and not re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    recovery_checkpoint_digest,
+                )
+            )
+        ):
+            raise ProjectLaneError("safe-stop rebind binding is invalid")
+        for _ in range(8):
+            state = self._state()
+            self._assert_binding(state)
+            lanes = [dict(item) for item in state["lanes"]]
+            lane = next((item for item in lanes if item.get("lane_id") == lane_id), None)
+            if not isinstance(lane, dict):
+                raise ProjectLaneError("safe-stop lane does not exist")
+            intent = lane.get("safe_stop")
+            if (
+                not isinstance(intent, dict)
+                or intent.get("intent_id") != intent_id
+                or intent.get("status") != "stopping"
+                or not isinstance(lane.get("writer"), dict)
+            ):
+                raise ProjectLaneError("safe-stop rebind binding changed")
+            writer = dict(lane["writer"])
+            registry_state = self._lane_registry_state(lane)
+            if (
+                registry_state.get("lease") is not None
+                or registry_state.get("outbox") is not None
+                or registry_state.get("quarantine") is not None
+            ):
+                raise ProjectLaneError("safe-stop contained writer is not terminally vacant")
+            releases = [
+                event
+                for event in registry_state.get("history", [])
+                if event.get("event") == "contained-terminal-released"
+                and event.get("lease_id") == writer.get("lease_id")
+                and event.get("run_id") == writer.get("run_id")
+                and event.get("lease_kind") == writer.get("lease_kind")
+                and event.get("allowed_set_digest") == writer.get("allowed_set_digest")
+                and event.get("terminal_success") is False
+                and event.get("handoff_digest") is None
+                and event.get("outbox_digest") is None
+                and re.fullmatch(r"[0-9a-f]{64}", str(event.get("archive_digest")))
+            ]
+            if len(releases) != 1:
+                raise ProjectLaneError("safe-stop full-tree-zero terminal archive is missing or ambiguous")
+            scopes = [dict(item) for item in state["scopes"]]
+            requested = [
+                item
+                for item in scopes
+                if item.get("owner") == lane_id
+                and item.get("reservation") == intent.get("reservation")
+                and item.get("phase") == "expansion"
+                and item.get("kind") in {"file", "directory", "contract", "resource"}
+            ]
+            requested_shape = [
+                {key: item[key] for key in ("kind", "path", "mode")}
+                for item in sorted(requested, key=self.scope_manager._order)
+            ]
+            if requested_shape != intent.get("requested_scopes"):
+                raise ProjectLaneError("safe-stop requested scope binding changed")
+            self.scope_manager._promote(lanes, scopes)
+            hard_requested = [
+                item for item in requested if item.get("mode") == "hard"
+            ]
+            all_requested_active = bool(hard_requested) and all(
+                item.get("status") == "active" for item in hard_requested
+            )
+            requires_recovery = preserved_changes or not all_requested_active
+            terminal_archive = str(releases[0]["archive_digest"])
+            if requires_recovery:
+                if recovery_checkpoint_digest is None:
+                    raise ProjectLaneError(
+                        "safe-stop preserved work requires an eligible recovery checkpoint"
+                    )
+                terminal_evidence = terminal_archive
+                if not re.fullmatch(r"[0-9a-f]{64}", str(terminal_evidence)):
+                    raise ProjectLaneError(
+                        "safe-stop terminal archive digest is invalid"
+                    )
+                lane["state"] = "recovery-ready"
+                lane["reason"] = "cancelled"
+                lane["terminal_from"] = "running"
+                lane["terminal_evidence"] = terminal_evidence
+                lane["recovery_checkpoint_digest"] = recovery_checkpoint_digest
+                lane.pop("scope_wait_from", None)
+            else:
+                lane["state"] = "ready"
+                lane.pop("scope_wait_from", None)
+                lane.pop("reason", None)
+                lane.pop("terminal_from", None)
+                lane.pop("terminal_evidence", None)
+                lane.pop("recovery_checkpoint_digest", None)
+            lane["writer"] = None
+            completed_intent = dict(intent)
+            completed_intent.update(
+                {
+                    "status": "completed",
+                    "completed_generation": int(state["generation"]) + 1,
+                    "completed_state": lane["state"],
+                    "terminal_archive": terminal_archive,
+                    "recovery_checkpoint_digest": (
+                        recovery_checkpoint_digest
+                        if lane["state"] == "recovery-ready"
+                        else None
+                    ),
+                    "preserved_changes": preserved_changes,
+                }
+            )
+            lane["safe_stop"] = completed_intent
+            try:
+                self.store.complete_safe_stop_rebind(
+                    self.anchor_id,
+                    expected_generation=int(state["generation"]),
+                    lanes=lanes,
+                    scopes=scopes,
+                    intent_id=intent_id,
+                )
+            except ProjectStateError as exc:
+                if str(exc) == "project generation changed":
+                    continue
+                raise ProjectLaneError(str(exc)) from exc
+            return lane
+        raise ProjectLaneError("safe-stop rebind completion could not win the project generation CAS")
+
+    def record_scope_integration_acceptance(
+        self,
+        lane_id: str,
+        *,
+        admitted_commit: str,
+        accepted_commit: str,
+        validation_argv: Sequence[str],
+    ) -> dict[str, Any]:
+        """The bounded M3 integration owner: acceptance only, no merge queue."""
+
+        if (
+            not isinstance(validation_argv, Sequence)
+            or isinstance(validation_argv, (str, bytes))
+            or not validation_argv
+            or len(validation_argv) > 64
+            or any(
+                not isinstance(argument, str)
+                or not argument
+                or "\0" in argument
+                or len(argument) > 4096
+                for argument in validation_argv
+            )
+        ):
+            raise ProjectLaneError("integration validation command is invalid")
+        for _ in range(8):
+            state = self._state()
+            self._assert_binding(state)
+            try:
+                return self.store.record_scope_integration_acceptance(
+                    self.anchor_id,
+                    expected_generation=int(state["generation"]),
+                    lane_id=lane_id,
+                    admitted_commit=admitted_commit,
+                    accepted_commit=accepted_commit,
+                    validation_argv=validation_argv,
+                )
+            except ProjectStateError as exc:
+                if str(exc) == "project generation changed":
+                    continue
+                raise ProjectLaneError(str(exc)) from exc
+        raise ProjectLaneError("integration acceptance could not win the project generation CAS")
 
     def verify_runner_writer_binding(
         self,
@@ -882,10 +1123,11 @@ class ProjectLaneCoordinator:
                 "quarantined",
             }:
                 raise ProjectLaneError("lane is not ready for a contained writer")
-            try:
-                self.scope_manager.assert_lane_authority(lane_id)
-            except ProjectScopeError as exc:
-                raise ProjectLaneError(str(exc)) from exc
+            if lease_kind == "normal-contained":
+                try:
+                    self.scope_manager.assert_lane_authority(lane_id)
+                except ProjectScopeError as exc:
+                    raise ProjectLaneError(str(exc)) from exc
             writer = {
                 "lease_id": lease_id,
                 "run_id": run_id,
@@ -975,6 +1217,7 @@ class ProjectLaneCoordinator:
                 for event in registry_state.get("history", [])
                 if event.get("event") == "contained-terminal-released"
                 and event.get("lease_id") == writer.get("lease_id")
+                and event.get("run_id") == writer.get("run_id")
                 and event.get("lease_kind") == writer.get("lease_kind")
                 and event.get("allowed_set_digest")
                 == writer.get("allowed_set_digest")
@@ -1037,6 +1280,7 @@ class ProjectLaneCoordinator:
                 for event in registry_state.get("history", [])
                 if event.get("event") == "contained-terminal-released"
                 and event.get("lease_id") == writer.get("lease_id")
+                and event.get("run_id") == writer.get("run_id")
                 and event.get("lease_kind") == writer.get("lease_kind")
                 and event.get("allowed_set_digest")
                 == writer.get("allowed_set_digest")
@@ -1182,6 +1426,7 @@ class ProjectLaneCoordinator:
                         for event in registry_state.get("history", [])
                         if event.get("event") == "contained-terminal-released"
                         and event.get("lease_id") == writer.get("lease_id")
+                        and event.get("run_id") == writer.get("run_id")
                         and event.get("lease_kind") == writer.get("lease_kind")
                         and event.get("allowed_set_digest") == writer.get("allowed_set_digest")
                     ]

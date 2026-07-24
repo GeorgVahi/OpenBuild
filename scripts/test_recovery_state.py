@@ -2385,6 +2385,7 @@ class RegistryContractTests(unittest.TestCase):
             self.assertIsNone(released["outbox"])
             archive = released["history"][-1]
             self.assertEqual(archive["event"], "contained-terminal-released")
+            self.assertEqual(archive["run_id"], "contained-run")
             self.assertTrue(archive["terminal_success"])
             self.assertIsNone(archive["semantic_disposition"])
             for field in (

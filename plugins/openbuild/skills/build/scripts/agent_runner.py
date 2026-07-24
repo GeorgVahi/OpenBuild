@@ -1451,6 +1451,195 @@ def attach_project_lane_writer(request: Mapping[str, Any]) -> dict[str, Any] | N
         raise RunnerError(f"project lane writer attach failed closed: {exc}") from exc
 
 
+def project_lane_safe_stop_binding(
+    request: Mapping[str, Any],
+    *,
+    require_active_registry: bool,
+) -> tuple[ProjectLaneCoordinator, dict[str, Any]] | None:
+    """Return only the exact registry-published safe-stop bound to this run."""
+
+    project_lane = request.get("project_lane")
+    if project_lane is None:
+        return None
+    if not isinstance(project_lane, Mapping):
+        raise RunnerError("project lane request binding is malformed")
+    coordinator = _project_lane_coordinator(project_lane)
+    lane_id = project_lane.get("lane_id")
+    lease_id = request.get("lease_id")
+    allowed_set_digest = request.get("lifecycle_allowed_set_digest")
+    root_binding = request.get("root_completion_source_binding")
+    expected_run_id = (
+        root_binding.get("run_id")
+        if isinstance(root_binding, Mapping)
+        else None
+    )
+    if (
+        not isinstance(lane_id, str)
+        or not isinstance(lease_id, str)
+        or not isinstance(allowed_set_digest, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", allowed_set_digest)
+        or not isinstance(expected_run_id, str)
+        or not expected_run_id
+    ):
+        raise RunnerError("project lane safe-stop request binding is malformed")
+    try:
+        lane = coordinator.lane_projection(lane_id)
+    except (ProjectLaneError, ProjectStateError) as exc:
+        raise RunnerError(f"project lane safe-stop lookup failed closed: {exc}") from exc
+    intent = lane.get("safe_stop")
+    if intent is None:
+        return None
+    intent_writer = (
+        intent.get("writer")
+        if isinstance(intent, Mapping)
+        else None
+    )
+    if (
+        not isinstance(intent, dict)
+        or intent.get("status") not in {"requested", "stopping", "completed"}
+        or not re.fullmatch(r"[0-9a-f]{64}", str(intent.get("intent_id")))
+        or not isinstance(intent_writer, dict)
+    ):
+        raise RunnerError("project lane safe-stop binding changed")
+    if (
+        intent_writer.get("lease_id") != lease_id
+        or intent_writer.get("allowed_set_digest") != allowed_set_digest
+        or intent_writer.get("run_id") != expected_run_id
+    ):
+        if intent.get("status") == "completed":
+            return None
+        raise RunnerError("project lane safe-stop binding changed")
+    if intent.get("status") in {"requested", "stopping"} and (
+        lane.get("writer") != intent_writer
+        or lane.get("state") != "running"
+    ):
+        raise RunnerError("project lane safe-stop binding changed")
+    if require_active_registry:
+        registry = recovery_registry_for_request(request)
+        state = registry.state() if registry is not None else None
+        lease = state.get("lease") if isinstance(state, Mapping) else None
+        lease_kind = lease.get("lease_kind") if isinstance(lease, Mapping) else None
+        run_id = (
+            lease.get("plan", {}).get("run_id")
+            if lease_kind == "recovery-target" and isinstance(lease, Mapping)
+            else lease.get("run_id") if isinstance(lease, Mapping) else None
+        )
+        if (
+            not isinstance(lease, Mapping)
+            or lease.get("lease_id") != lease_id
+            or lease.get("state") not in {"running", "active"}
+            or lease.get("allowed_set_digest") != allowed_set_digest
+            or lease_kind != intent_writer.get("lease_kind")
+            or run_id != intent_writer.get("run_id")
+        ):
+            raise RunnerError("project lane safe-stop writer is not live and exact")
+    return coordinator, dict(intent)
+
+
+def consume_project_lane_safe_stop(request: Mapping[str, Any]) -> dict[str, Any] | None:
+    binding = project_lane_safe_stop_binding(request, require_active_registry=True)
+    if binding is None:
+        return None
+    coordinator, intent = binding
+    if intent.get("status") == "stopping":
+        return intent
+    try:
+        lane = coordinator.lane_projection(str(intent["lane_id"]))
+        consumed = coordinator.consume_safe_stop_rebind(
+            str(intent["lane_id"]),
+            writer=dict(lane["writer"]),
+            intent_id=str(intent["intent_id"]),
+        )
+    except (ProjectLaneError, ProjectStateError) as exc:
+        raise RunnerError(f"project lane safe-stop consumption failed closed: {exc}") from exc
+    result = consumed.get("safe_stop")
+    if not isinstance(result, dict) or result.get("status") != "stopping":
+        raise RunnerError("project lane safe-stop consumption is not durable")
+    return result
+
+
+def complete_project_lane_safe_stop(
+    request: Mapping[str, Any],
+    intent_id: str,
+    *,
+    recovery_checkpoint_digest: str | None,
+    preserved_changes: bool,
+) -> dict[str, Any]:
+    binding = project_lane_safe_stop_binding(request, require_active_registry=False)
+    if binding is None:
+        raise RunnerError("project lane safe-stop completion is absent")
+    coordinator, intent = binding
+    if intent.get("intent_id") != intent_id or intent.get("status") != "stopping":
+        raise RunnerError("project lane safe-stop completion binding changed")
+    try:
+        return coordinator.complete_safe_stop_rebind(
+            str(intent["lane_id"]),
+            intent_id=intent_id,
+            recovery_checkpoint_digest=recovery_checkpoint_digest,
+            preserved_changes=preserved_changes,
+        )
+    except (ProjectLaneError, ProjectStateError) as exc:
+        raise RunnerError(f"project lane safe-stop completion failed closed: {exc}") from exc
+
+
+def safe_stop_checkpoint_binding(
+    registry: RecoveryRegistry,
+    checkpoint: Mapping[str, Any] | None,
+) -> tuple[str | None, bool]:
+    """Return only a revalidated eligible checkpoint and its allowed-set delta."""
+
+    if not isinstance(checkpoint, Mapping):
+        return None, False
+    verified = registry.revalidate_checkpoint(checkpoint)
+    if verified.get("disposition") != "recovery-eligible":
+        return None, False
+    pre = verified.get("pre_snapshot")
+    candidate = verified.get("candidate_snapshot")
+    if not isinstance(pre, Mapping) or not isinstance(candidate, Mapping):
+        raise RunnerError("safe-stop checkpoint snapshots are malformed")
+    checkpoint_digest = verified.get("checkpoint_digest")
+    if not re.fullmatch(r"[0-9a-f]{64}", str(checkpoint_digest)):
+        raise RunnerError("safe-stop checkpoint digest is malformed")
+    preserved_changes = (
+        pre.get("allowed_inventory_digest")
+        != candidate.get("allowed_inventory_digest")
+    )
+    return str(checkpoint_digest), preserved_changes
+
+
+def materialize_project_lane_safe_stop_receipt(
+    path: Path,
+    completed_intent: Mapping[str, Any],
+) -> None:
+    """Materialize the lane-owner completion after its durable CAS."""
+
+    if (
+        completed_intent.get("status") != "completed"
+        or not re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(completed_intent.get("intent_id")),
+        )
+        or completed_intent.get("completed_state")
+        not in {"ready", "recovery-ready"}
+        or not re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(completed_intent.get("terminal_archive")),
+        )
+    ):
+        raise RunnerError("project lane safe-stop completion receipt is invalid")
+    atomic_write_json(
+        path,
+        {
+            "schema": "project-lane-safe-stop-rebind-v1",
+            "intent_id": completed_intent["intent_id"],
+            "lane_id": completed_intent["lane_id"],
+            "state": completed_intent["completed_state"],
+            "terminal_archive": completed_intent["terminal_archive"],
+            "completed_generation": completed_intent["completed_generation"],
+        },
+    )
+
+
 def quarantine_project_lane_writer(
     request: Mapping[str, Any],
     reason: str,
@@ -3888,16 +4077,33 @@ def guardian_run(run_dir: Path) -> int:
                 and worker.pid not in query_linux_cgroup_members(provider_handle)
             ):
                 raise RunnerError("Linux worker escaped its cgroup after the durable boundary")
-            if cancel_path.is_file() and not cancellation_applied:
-                cancellation = read_guardian_message(
-                    cancel_path,
-                    secret,
-                    "guardian-cancel",
-                )
-                if cancellation.get("guardian_id") != guardian_id:
-                    raise RunnerError("guardian cancellation changed the private guardian identity")
-                terminate_guardian_provider(provider, provider_handle)
-                cancellation_applied = True
+            if not cancellation_applied:
+                safe_stop = consume_project_lane_safe_stop(private_request)
+                if safe_stop is not None:
+                    write_guardian_message(
+                        run_dir / "guardian-safe-stop.json",
+                        secret,
+                        "guardian-safe-stop",
+                        {
+                            "guardian_id": guardian_id,
+                            "intent_id": safe_stop["intent_id"],
+                            "intent_generation": safe_stop["intent_generation"],
+                            "writer": safe_stop["writer"],
+                            "consumed_at": utc_now(),
+                        },
+                    )
+                    terminate_guardian_provider(provider, provider_handle)
+                    cancellation_applied = True
+                elif cancel_path.is_file():
+                    cancellation = read_guardian_message(
+                        cancel_path,
+                        secret,
+                        "guardian-cancel",
+                    )
+                    if cancellation.get("guardian_id") != guardian_id:
+                        raise RunnerError("guardian cancellation changed the private guardian identity")
+                    terminate_guardian_provider(provider, provider_handle)
+                    cancellation_applied = True
             time.sleep(0.1)
         if provider == "linux-cgroup-v2" and worker.poll() is None:
             raise RunnerError("Linux cgroup became empty while the creation-bound worker remained alive")
@@ -4563,17 +4769,72 @@ def reconcile_implementation_registry(
     lease_id = request.get("lease_id")
     if registry is None or not isinstance(lease_id, str):
         return
+    safe_stop_receipt_path = run_dir / "safe-stop-rebind.json"
+    safe_stop_reconciled = safe_stop_receipt_path.is_file()
+    safe_stop_intent: dict[str, Any] | None = None
+    safe_stop_completion: dict[str, Any] | None = None
+    if request.get("project_lane") is not None and not safe_stop_reconciled:
+        binding = project_lane_safe_stop_binding(
+            request,
+            require_active_registry=False,
+        )
+        if binding is not None:
+            _, safe_stop_intent = binding
+            if safe_stop_intent.get("status") == "completed":
+                safe_stop_completion = safe_stop_intent
+                safe_stop_intent = None
+            elif safe_stop_intent.get("status") != "stopping":
+                safe_stop_intent = None
     project_lane_close_required = (
         receipt.get("status") == "failed"
         or terminal_abandonment
         or (run_dir / "semantic-rejection.json").is_file()
         or (run_dir / "terminal-abandonment.json").is_file()
-    )
+    ) and not safe_stop_reconciled and safe_stop_intent is None
     project_lane_quarantined = False
     state = registry.state()
     lease = state.get("lease")
+    if safe_stop_completion is not None:
+        if (
+            lease is not None
+            or state.get("outbox") is not None
+            or state.get("quarantine") is not None
+        ):
+            raise RunnerError(
+                "completed project lane safe-stop registry is not vacant"
+            )
+        materialize_project_lane_safe_stop_receipt(
+            safe_stop_receipt_path,
+            safe_stop_completion,
+        )
+        garbage_collect_owner_prompt_snapshots(registry)
+        return
     if lease is None:
-        if project_lane_close_required and request.get("project_lane") is not None:
+        if safe_stop_reconciled:
+            garbage_collect_owner_prompt_snapshots(registry)
+            return
+        if safe_stop_intent is not None:
+            checkpoint_path = run_dir / "recovery-checkpoint.json"
+            checkpoint_value = (
+                read_json(checkpoint_path)
+                if checkpoint_path.is_file()
+                else None
+            )
+            checkpoint_digest, preserved_changes = safe_stop_checkpoint_binding(
+                registry,
+                checkpoint_value,
+            )
+            completed = complete_project_lane_safe_stop(
+                request,
+                str(safe_stop_intent["intent_id"]),
+                recovery_checkpoint_digest=checkpoint_digest,
+                preserved_changes=preserved_changes,
+            )
+            materialize_project_lane_safe_stop_receipt(
+                safe_stop_receipt_path,
+                completed["safe_stop"],
+            )
+        elif project_lane_close_required and request.get("project_lane") is not None:
             recovery_checkpoint_digest = _project_lane_recovery_checkpoint_digest(
                 run_dir,
                 receipt,
@@ -4820,7 +5081,10 @@ def reconcile_implementation_registry(
 
         parent_checkpoint = request.get("recovery_parent_checkpoint")
         if isinstance(parent_checkpoint, dict) and semantic_success:
-            verification_checkpoint = registry.revalidate_checkpoint(parent_checkpoint)
+            verification_checkpoint = registry.revalidate_checkpoint(
+                parent_checkpoint,
+                persist=False,
+            )
             atomic_write_json(
                 run_dir / "recovery-parent-verification.json",
                 verification_checkpoint,
@@ -4886,7 +5150,22 @@ def reconcile_implementation_registry(
             )
             registry.acknowledge_guardian_close(lease_id, closed)
         registry.release_contained_terminal(lease_id)
-        if project_lane_close_required:
+        if safe_stop_intent is not None:
+            checkpoint_digest, preserved_changes = safe_stop_checkpoint_binding(
+                registry,
+                checkpoint,
+            )
+            completed = complete_project_lane_safe_stop(
+                request,
+                str(safe_stop_intent["intent_id"]),
+                recovery_checkpoint_digest=checkpoint_digest,
+                preserved_changes=preserved_changes,
+            )
+            materialize_project_lane_safe_stop_receipt(
+                safe_stop_receipt_path,
+                completed["safe_stop"],
+            )
+        elif project_lane_close_required:
             recovery_checkpoint_digest = _project_lane_recovery_checkpoint_digest(
                 run_dir,
                 receipt,
@@ -5076,6 +5355,7 @@ def _containment_loss_release_is_complete(
         for event in state.get("history", [])
         if event.get("event") == "contained-terminal-released"
         and event.get("lease_id") == lease_id
+        and event.get("run_id") == run_id
         and event.get("semantic_disposition") == "abandoned"
         and event.get("terminal_success") is False
         and event.get("handoff_digest") is None

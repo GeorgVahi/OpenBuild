@@ -29,7 +29,11 @@ if SPEC is None or SPEC.loader is None:
     raise RuntimeError(f"cannot load agent runner from {RUNNER_PATH}")
 agent_runner = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(agent_runner)
-from project_lanes import ProjectLaneCoordinator  # type: ignore[import-not-found]
+from project_lanes import (  # type: ignore[import-not-found]
+    ProjectLaneCoordinator,
+    ProjectLaneError,
+)
+from project_scopes import ProjectScopeManager  # type: ignore[import-not-found]
 from project_state import ProjectStateStore  # type: ignore[import-not-found]
 from recovery_state import RecoveryRegistry  # type: ignore[import-not-found]
 
@@ -2163,6 +2167,7 @@ class CodexInvocationTests(unittest.TestCase):
                     {
                         "event": "contained-terminal-released",
                         "lease_id": "lease-1",
+                        "run_id": "run-1",
                         "semantic_disposition": "abandoned",
                         "terminal_success": False,
                         "handoff_digest": None,
@@ -2223,6 +2228,7 @@ class CodexInvocationTests(unittest.TestCase):
                 {
                     "event": "contained-terminal-released",
                     "lease_id": "lease-1",
+                    "run_id": "run-1",
                     "semantic_disposition": "abandoned",
                     "terminal_success": False,
                     "handoff_digest": None,
@@ -4178,6 +4184,7 @@ class CodexInvocationTests(unittest.TestCase):
                         {
                             "event": "contained-terminal-released",
                             "lease_id": "lease-root-audit",
+                            "run_id": "run-1",
                             "terminal_success": False,
                             "handoff_digest": None,
                             "outbox_digest": None,
@@ -4574,6 +4581,9 @@ class CodexInvocationTests(unittest.TestCase):
             ), mock.patch(
                 "project_lanes.RecoveryRegistry",
                 return_value=active_registry,
+            ), mock.patch(
+                "project_state.RecoveryRegistry",
+                return_value=active_registry,
             ):
                 coordinator.attach_contained_writer(
                     "mixed-recovery",
@@ -4586,6 +4596,7 @@ class CodexInvocationTests(unittest.TestCase):
             release = {
                 "event": "contained-terminal-released",
                 "lease_id": source_writer["lease_id"],
+                "run_id": source_writer["run_id"],
                 "lease_kind": "normal-contained",
                 "allowed_set_digest": source_writer["allowed_set_digest"],
                 "terminal_success": False,
@@ -4603,6 +4614,9 @@ class CodexInvocationTests(unittest.TestCase):
             }
             with mock.patch(
                 "project_lanes.RecoveryRegistry",
+                return_value=vacant_registry,
+            ), mock.patch(
+                "project_state.RecoveryRegistry",
                 return_value=vacant_registry,
             ):
                 coordinator.record_recovery_ready(
@@ -4957,7 +4971,7 @@ class CodexInvocationTests(unittest.TestCase):
                     "lane-two",
                     "M2-two",
                     lane_root / "two",
-                    ["two.py"],
+                    ["two.py", "after-recovery.py"],
                 ),
             }
 
@@ -4989,13 +5003,15 @@ class CodexInvocationTests(unittest.TestCase):
                         "    if time.monotonic() >= deadline:",
                         "        raise SystemExit(23)",
                         "    time.sleep(0.05)",
-                        "(repo / payload['allowed']).write_text(",
-                        "    f'{lane} worker wrote concurrently\\n',",
-                        "    encoding='utf-8',",
-                        "    newline='\\n',",
-                        ")",
+                        "if payload.get('write', True):",
+                        "    (repo / payload['allowed']).write_text(",
+                        "        f'{lane} worker wrote concurrently\\n',",
+                        "        encoding='utf-8',",
+                        "        newline='\\n',",
+                        "    )",
                         "(barrier / f'{group}-{lane}.working').write_text('working\\n', encoding='utf-8')",
-                        "while not (barrier / 'release').exists():",
+                        "release = payload.get('release', 'release')",
+                        "while not (barrier / release).exists():",
                         "    time.sleep(0.05)",
                         "result_index = sys.argv.index('-o') + 1",
                         "Path(sys.argv[result_index]).write_text('completed\\n', encoding='utf-8')",
@@ -5038,7 +5054,7 @@ class CodexInvocationTests(unittest.TestCase):
                 allowed = "one.py" if lane_id == "lane-one" else "two.py"
                 prompt = (
                     "Run the bounded test worker.\n"
-                    f"OPENBUILD_TEST_PAYLOAD={json.dumps({'barrier': str(barrier), 'lane': lane_id, 'allowed': allowed, 'group': 'normal', 'expected': 2})}\n"
+                    f"OPENBUILD_TEST_PAYLOAD={json.dumps({'barrier': str(barrier), 'lane': lane_id, 'allowed': allowed, 'group': 'normal', 'expected': 2, 'write': lane_id != 'lane-one'})}\n"
                 )
                 lane = lanes[lane_id]
                 prompt_binding = agent_runner.stage_owner_prompt_snapshot(
@@ -5153,11 +5169,8 @@ class CodexInvocationTests(unittest.TestCase):
                     if time.monotonic() >= deadline:
                         self.fail("two real lane workers did not reach the live barrier")
                     time.sleep(0.05)
-                self.assertEqual(
-                    (
-                        Path(lanes["lane-one"]["worktree"]) / "one.py"
-                    ).read_text(encoding="utf-8"),
-                    "lane-one worker wrote concurrently\n",
+                self.assertFalse(
+                    (Path(lanes["lane-one"]["worktree"]) / "one.py").exists()
                 )
                 self.assertEqual(
                     (
@@ -5233,8 +5246,108 @@ class CodexInvocationTests(unittest.TestCase):
                     {"lane-one": "running", "lane-two": "running"},
                 )
 
-                cancelled_one = cancel("lane-one")
-                self.assertEqual(cancelled_one.returncode, 1, cancelled_one.stderr)
+                with self.assertRaisesRegex(
+                    ProjectLaneError,
+                    "scope|authority|reservation",
+                ):
+                    coordinator.runner_writer_binding(
+                        "lane-one",
+                        Path(lanes["lane-one"]["worktree"]),
+                        ["expanded.py"],
+                        require_ready=False,
+                    )
+                scopes = ProjectScopeManager(
+                    store,
+                    anchor_id,
+                    checkout=checkout,
+                )
+                safe_stop = scopes.expand(
+                    "lane-one",
+                    ["expanded.py"],
+                    pre_write=True,
+                )
+                self.assertEqual(safe_stop["status"], "safe-stop-requested")
+
+                deadline = time.monotonic() + 30.0
+                safe_stop_crash_injected = False
+                while True:
+                    lane_one_receipt = agent_runner.public_receipt(
+                        run_dirs["lane-one"]
+                    )
+                    if lane_one_receipt["status"] != "running":
+                        if not safe_stop_crash_injected:
+                            with mock.patch.object(
+                                agent_runner,
+                                "materialize_project_lane_safe_stop_receipt",
+                                side_effect=SystemExit(
+                                    "simulated post-CAS receipt crash"
+                                ),
+                            ), self.assertRaises(SystemExit):
+                                agent_runner.reconcile_implementation_registry(
+                                    run_dirs["lane-one"],
+                                    lane_one_receipt,
+                                )
+                            safe_stop_crash_injected = True
+                            crashed_state = store.read_state(anchor_id)["state"]
+                            crashed_lane = next(
+                                lane
+                                for lane in crashed_state["lanes"]
+                                if lane["lane_id"] == "lane-one"
+                            )
+                            self.assertEqual(crashed_lane["state"], "ready")
+                            self.assertEqual(
+                                crashed_lane["safe_stop"]["status"],
+                                "completed",
+                            )
+                            self.assertFalse(
+                                (
+                                    run_dirs["lane-one"]
+                                    / "safe-stop-rebind.json"
+                                ).exists()
+                            )
+                        agent_runner.reconcile_implementation_registry(
+                            run_dirs["lane-one"],
+                            lane_one_receipt,
+                        )
+                    project_state = store.read_state(anchor_id)["state"]
+                    lane_one = next(
+                        lane
+                        for lane in project_state["lanes"]
+                        if lane["lane_id"] == "lane-one"
+                    )
+                    if lane_one["state"] == "ready":
+                        break
+                    if time.monotonic() >= deadline:
+                        self.fail("live lane safe-stop did not reach a rebind-ready state")
+                    time.sleep(0.05)
+
+                lane_one_receipt = agent_runner.public_receipt(
+                    run_dirs["lane-one"]
+                )
+                self.assertTrue(lane_one_receipt["process_tree_stopped"])
+                safe_stop_receipt = agent_runner.read_guardian_message(
+                    run_dirs["lane-one"] / "guardian-safe-stop.json",
+                    agent_runner._guardian_secret(run_dirs["lane-one"]),
+                    "guardian-safe-stop",
+                )
+                self.assertEqual(
+                    safe_stop_receipt["intent_id"],
+                    safe_stop["intent_id"],
+                )
+                zero_receipt = agent_runner.read_guardian_message(
+                    run_dirs["lane-one"] / "guardian-zero.json",
+                    agent_runner._guardian_secret(run_dirs["lane-one"]),
+                    "guardian-zero",
+                )
+                self.assertFalse(zero_receipt["populated"])
+                self.assertIsNone(lane_one["writer"])
+                self.assertEqual(lane_one["safe_stop"]["status"], "completed")
+                self.assertTrue(
+                    (
+                        run_dirs["lane-one"] / "safe-stop-rebind.json"
+                    ).is_file()
+                )
+
                 project_state = store.read_state(anchor_id)["state"]
                 self.assertEqual(
                     next(
@@ -5242,7 +5355,7 @@ class CodexInvocationTests(unittest.TestCase):
                         for lane in project_state["lanes"]
                         if lane["lane_id"] == "lane-one"
                     )["state"],
-                    "recovery-ready",
+                    "ready",
                 )
                 self.assertEqual(
                     next(
@@ -5268,24 +5381,6 @@ class CodexInvocationTests(unittest.TestCase):
                     "running",
                 )
 
-                recovery_execution = "lane-one-recovery"
-                run_dirs[recovery_execution] = (
-                    root / "runs" / recovery_execution
-                )
-                recovery_prompt = (
-                    "Continue the exact lane checkpoint.\n"
-                    f"OPENBUILD_TEST_PAYLOAD={json.dumps({'barrier': str(barrier), 'lane': recovery_execution, 'allowed': 'one.py', 'group': 'recovery', 'expected': 1})}\n"
-                )
-                lane_one_registry = RecoveryRegistry(
-                    Path(lanes["lane-one"]["worktree"]),
-                    state_root=recovery_root,
-                )
-                recovery_prompt_binding = (
-                    agent_runner.stage_owner_prompt_snapshot(
-                        lane_one_registry,
-                        recovery_prompt.encode("utf-8"),
-                    )
-                )
                 project_arguments = [
                     "--project-lane-id",
                     "lane-one",
@@ -5302,6 +5397,167 @@ class CodexInvocationTests(unittest.TestCase):
                     "--project-integration-ref",
                     integration_ref,
                 ]
+                rebind_execution = "lane-one-rebind"
+                run_dirs[rebind_execution] = root / "runs" / rebind_execution
+                rebind_prompt = (
+                    "Continue with the expanded live-lane authority.\n"
+                    f"OPENBUILD_TEST_PAYLOAD={json.dumps({'barrier': str(barrier), 'lane': rebind_execution, 'allowed': 'expanded.py', 'group': 'rebind', 'expected': 1})}\n"
+                )
+                lane_one_registry = RecoveryRegistry(
+                    Path(lanes["lane-one"]["worktree"]),
+                    state_root=recovery_root,
+                )
+                rebind_prompt_binding = agent_runner.stage_owner_prompt_snapshot(
+                    lane_one_registry,
+                    rebind_prompt.encode("utf-8"),
+                )
+                dispatches[rebind_execution] = subprocess.Popen(
+                    [
+                        sys.executable,
+                        str(RUNNER_PATH),
+                        "dispatch",
+                        "--agent",
+                        "openbuild_implementation_fast",
+                        "--task-name",
+                        rebind_execution,
+                        "--repo",
+                        str(lanes["lane-one"]["worktree"]),
+                        "--prompt-snapshot-id",
+                        rebind_prompt_binding["prompt_snapshot_id"],
+                        "--prompt-sha256",
+                        rebind_prompt_binding["prompt_sha256"],
+                        "--lease-id",
+                        "lane-one-rebind-lease",
+                        "--allowed-file",
+                        "expanded.py",
+                        "--specification-revision",
+                        "R-032",
+                        "--recovery-target-milestone",
+                        "lane-one-rebind-recovery",
+                        "--run-dir",
+                        str(run_dirs[rebind_execution]),
+                        "--codex-bin",
+                        str(fake_codex),
+                        *project_arguments,
+                    ],
+                    cwd=ROOT,
+                    env=environment,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                rebind_output, rebind_error = dispatches[
+                    rebind_execution
+                ].communicate(timeout=60)
+                self.assertEqual(
+                    dispatches[rebind_execution].returncode,
+                    0,
+                    {"stdout": rebind_output, "stderr": rebind_error},
+                )
+                deadline = time.monotonic() + 30.0
+                while not (
+                    barrier / f"rebind-{rebind_execution}.working"
+                ).is_file():
+                    if time.monotonic() >= deadline:
+                        self.fail("expanded live lane did not rebind and resume")
+                    time.sleep(0.05)
+                self.assertEqual(
+                    (
+                        Path(lanes["lane-one"]["worktree"]) / "expanded.py"
+                    ).read_text(encoding="utf-8"),
+                    "lane-one-rebind worker wrote concurrently\n",
+                )
+                rebound = coordinator.runner_writer_binding(
+                    "lane-one",
+                    Path(lanes["lane-one"]["worktree"]),
+                    ["expanded.py"],
+                    require_ready=False,
+                )
+                self.assertEqual(rebound["allowed_paths"], ["expanded.py"])
+                self.assertEqual(
+                    agent_runner.public_receipt(run_dirs["lane-two"])["status"],
+                    "running",
+                )
+
+                dirty_safe_stop = scopes.expand(
+                    "lane-one",
+                    ["after-recovery.py"],
+                    pre_write=True,
+                )
+                self.assertEqual(
+                    dirty_safe_stop["status"],
+                    "safe-stop-requested",
+                )
+                deadline = time.monotonic() + 30.0
+                while True:
+                    rebind_receipt = agent_runner.public_receipt(
+                        run_dirs[rebind_execution]
+                    )
+                    if rebind_receipt["status"] != "running":
+                        agent_runner.reconcile_implementation_registry(
+                            run_dirs[rebind_execution],
+                            rebind_receipt,
+                        )
+                    project_state = store.read_state(anchor_id)["state"]
+                    stopped_lane = next(
+                        lane
+                        for lane in project_state["lanes"]
+                        if lane["lane_id"] == "lane-one"
+                    )
+                    if stopped_lane["state"] == "recovery-ready":
+                        break
+                    if time.monotonic() >= deadline:
+                        self.fail(
+                            "dirty safe-stop did not preserve a recovery checkpoint"
+                        )
+                    time.sleep(0.05)
+                self.assertEqual(
+                    stopped_lane["terminal_from"],
+                    "running",
+                )
+                self.assertRegex(
+                    stopped_lane["recovery_checkpoint_digest"],
+                    r"^[0-9a-f]{64}$",
+                )
+                self.assertTrue(
+                    agent_runner.public_receipt(
+                        run_dirs[rebind_execution]
+                    )["process_tree_stopped"]
+                )
+                project_state = store.read_state(anchor_id)["state"]
+                self.assertEqual(
+                    next(
+                        lane
+                        for lane in project_state["lanes"]
+                        if lane["lane_id"] == "lane-one"
+                    )["state"],
+                    "recovery-ready",
+                )
+                self.assertEqual(
+                    next(
+                        lane
+                        for lane in project_state["lanes"]
+                        if lane["lane_id"] == "lane-two"
+                    )["state"],
+                    "running",
+                )
+
+                recovery_execution = "lane-one-rebind-recovery"
+                run_dirs[recovery_execution] = (
+                    root / "runs" / recovery_execution
+                )
+                recovery_prompt = (
+                    "Continue the exact lane checkpoint.\n"
+                    f"OPENBUILD_TEST_PAYLOAD={json.dumps({'barrier': str(barrier), 'lane': recovery_execution, 'allowed': 'expanded.py', 'group': 'recovery', 'expected': 1, 'release': 'release-recovery'})}\n"
+                )
+                recovery_prompt_binding = (
+                    agent_runner.stage_owner_prompt_snapshot(
+                        lane_one_registry,
+                        recovery_prompt.encode("utf-8"),
+                    )
+                )
                 authorization = subprocess.run(
                     [
                         sys.executable,
@@ -5311,7 +5567,7 @@ class CodexInvocationTests(unittest.TestCase):
                         str(lanes["lane-one"]["worktree"]),
                         "--checkpoint-file",
                         str(
-                            run_dirs["lane-one"]
+                            run_dirs[rebind_execution]
                             / "recovery-checkpoint.json"
                         ),
                         "--prompt-snapshot-id",
@@ -5325,7 +5581,7 @@ class CodexInvocationTests(unittest.TestCase):
                         "--user-action-digest",
                         "a" * 64,
                         "--specification-revision",
-                        "R-031",
+                        "R-032",
                         *project_arguments,
                     ],
                     cwd=ROOT,
@@ -5361,11 +5617,11 @@ class CodexInvocationTests(unittest.TestCase):
                         "--lease-id",
                         "lane-one-recovery-lease",
                         "--allowed-file",
-                        "one.py",
+                        "expanded.py",
                         "--specification-revision",
-                        "R-031",
+                        "R-032",
                         "--recovery-target-milestone",
-                        "lane-one-recovery-next",
+                        "lane-one-rebind-recovery-next",
                         "--run-dir",
                         str(run_dirs[recovery_execution]),
                         "--codex-bin",
@@ -5402,9 +5658,9 @@ class CodexInvocationTests(unittest.TestCase):
                     time.sleep(0.05)
                 self.assertEqual(
                     (
-                        Path(lanes["lane-one"]["worktree"]) / "one.py"
+                        Path(lanes["lane-one"]["worktree"]) / "expanded.py"
                     ).read_text(encoding="utf-8"),
-                    "lane-one-recovery worker wrote concurrently\n",
+                    f"{recovery_execution} worker wrote concurrently\n",
                 )
                 recovered_state = store.read_state(anchor_id)["state"]
                 recovered_lane = next(
@@ -5425,12 +5681,168 @@ class CodexInvocationTests(unittest.TestCase):
                     )["state"],
                     "running",
                 )
+                (barrier / "release-recovery").write_text(
+                    "release\n",
+                    encoding="utf-8",
+                    newline="\n",
+                )
+                deadline = time.monotonic() + 30.0
+                while True:
+                    recovery_receipt = agent_runner.public_receipt(
+                        run_dirs[recovery_execution]
+                    )
+                    if recovery_receipt["status"] != "running":
+                        break
+                    if time.monotonic() >= deadline:
+                        self.fail("same-lane recovery worker did not terminalize")
+                    time.sleep(0.05)
+                self.assertEqual(recovery_receipt["status"], "completed")
+                agent_runner.reconcile_implementation_registry(
+                    run_dirs[recovery_execution],
+                    recovery_receipt,
+                    success_verification_digest="d" * 64,
+                )
+                integrated_state = store.read_state(anchor_id)["state"]
+                integrated_lane = next(
+                    lane
+                    for lane in integrated_state["lanes"]
+                    if lane["lane_id"] == "lane-one"
+                )
+                self.assertEqual(
+                    integrated_lane["state"],
+                    "waiting-for-integration",
+                )
+                lane_one_worktree = Path(lanes["lane-one"]["worktree"])
+                subprocess.run(
+                    ["git", "add", "expanded.py"],
+                    cwd=lane_one_worktree,
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                subprocess.run(
+                    ["git", "commit", "-m", "integrate recovered lane prefix"],
+                    cwd=lane_one_worktree,
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                accepted_commit = subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=lane_one_worktree,
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                ).stdout.decode("ascii").strip()
+                subprocess.run(
+                    ["git", "update-ref", integration_ref, accepted_commit],
+                    cwd=checkout,
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                acceptance = store.record_scope_integration_acceptance(
+                    anchor_id,
+                    expected_generation=integrated_state["generation"],
+                    lane_id="lane-one",
+                    admitted_commit=str(integrated_lane["base"]),
+                    accepted_commit=accepted_commit,
+                    validation_argv=[
+                        "git",
+                        "diff",
+                        "--check",
+                        str(integrated_lane["base"]),
+                        accepted_commit,
+                    ],
+                )
+                acceptance_replay = (
+                    store.record_scope_integration_acceptance(
+                        anchor_id,
+                        expected_generation=store.read_state(anchor_id)[
+                            "state"
+                        ]["generation"],
+                        lane_id="lane-one",
+                        admitted_commit=str(integrated_lane["base"]),
+                        accepted_commit=accepted_commit,
+                        validation_argv=[
+                            "git",
+                            "diff",
+                            "--check",
+                            str(integrated_lane["base"]),
+                            accepted_commit,
+                        ],
+                    )
+                )
+                self.assertEqual(acceptance_replay, acceptance)
+                release_result = scopes.release(
+                    "lane-one",
+                    acceptance=acceptance["acceptance_id"],
+                )
+                self.assertTrue(release_result["released"])
+                released_state = store.read_state(anchor_id)["state"]
+                self.assertEqual(
+                    {
+                        scope["path"]: scope["status"]
+                        for scope in released_state["scopes"]
+                        if scope.get("owner") == "lane-one"
+                    },
+                    {
+                        "after-recovery.py": "cancelled",
+                        "expanded.py": "released",
+                        "one.py": "released",
+                    },
+                )
+                lane_two_receipt = agent_runner.public_receipt(
+                    run_dirs["lane-two"]
+                )
+                self.assertEqual(lane_two_receipt["status"], "running")
+                self.assertEqual(
+                    agent_runner.process_record_state(
+                        {
+                            "pid": lane_two_receipt["codex_pid"],
+                            "identity": lane_two_receipt[
+                                "codex_process_identity"
+                            ],
+                        }
+                    ),
+                    "running",
+                )
+                (barrier / "release").write_text(
+                    "release\n",
+                    encoding="utf-8",
+                    newline="\n",
+                )
+                deadline = time.monotonic() + 30.0
+                while True:
+                    lane_two_receipt = agent_runner.public_receipt(
+                        run_dirs["lane-two"]
+                    )
+                    if lane_two_receipt["status"] != "running":
+                        break
+                    if time.monotonic() >= deadline:
+                        self.fail("surviving lane did not progress to terminal")
+                    time.sleep(0.05)
+                self.assertEqual(lane_two_receipt["status"], "completed")
+                agent_runner.reconcile_implementation_registry(
+                    run_dirs["lane-two"],
+                    lane_two_receipt,
+                    success_verification_digest="e" * 64,
+                )
+                progressed_state = store.read_state(anchor_id)["state"]
+                self.assertEqual(
+                    next(
+                        lane
+                        for lane in progressed_state["lanes"]
+                        if lane["lane_id"] == "lane-two"
+                    )["state"],
+                    "waiting-for-integration",
+                )
             finally:
                 for lane_id, process in dispatches.items():
                     if process.poll() is None:
                         process.kill()
                         process.wait(timeout=10)
-                    if run_dirs[lane_id].is_dir():
+                    if (run_dirs[lane_id] / "request.json").is_file():
                         receipt = agent_runner.public_receipt(
                             run_dirs[lane_id]
                         )
