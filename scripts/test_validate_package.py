@@ -461,6 +461,18 @@ class RecoveryControlPlanePackageTests(unittest.TestCase):
             ),
             (
                 "recovery",
+                "record_orphan_containment_loss_abandonment",
+                "trust_orphan_containment_loss_abandonment",
+                "orphan containment-loss abandonment transition",
+            ),
+            (
+                "runner",
+                "_orphan_containment_loss_observation",
+                "_trusted_containment_loss_observation",
+                "orphan containment-loss evidence verification",
+            ),
+            (
+                "recovery",
                 "acknowledge_containment_loss_close",
                 "trust_containment_loss_close",
                 "containment-loss guardian close",

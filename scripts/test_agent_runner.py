@@ -2478,6 +2478,291 @@ class CodexInvocationTests(unittest.TestCase):
                 status_before,
             )
 
+    def test_pre_zero_orphaned_guardian_reconciliation_preserves_dirty_diff_and_replays(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "tests@example.invalid"],
+                cwd=repo,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "Tests"], cwd=repo, check=True
+            )
+            allowed = repo / "allowed.txt"
+            allowed.write_text("seed\n", encoding="utf-8", newline="\n")
+            subprocess.run(["git", "add", "allowed.txt"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "--quiet", "-m", "baseline"], cwd=repo, check=True
+            )
+            allowed.write_text(
+                "preexisting user change\n", encoding="utf-8", newline="\n"
+            )
+
+            run_dir = root / "pre-zero-loss-run"
+            owner = agent_runner.RecoveryRegistry(repo, state_root=root / "state")
+            preflight = owner.prepare_source_checkpoint(
+                source_id=run_dir.name,
+                source_lease_id="lease-1",
+                source_milestone="M5-source",
+                target_milestone="M5-recovery",
+                allowed_paths=["allowed.txt"],
+                specification_revision="R-031",
+            )
+            owner.reserve_normal(
+                "lease-1",
+                allowed_set_digest=preflight["allowed_set_digest"],
+                recovery_capable=True,
+                source_state_id=preflight["source_state_id"],
+                run_id=run_dir.name,
+                prompt_sha256="a" * 64,
+                containment_plan=_containment_plan(),
+            )
+            owner.bind_reserved_source_snapshot("lease-1", preflight)
+            owner.claim_contained_launch("lease-1", "contained-token")
+            process = _process_receipt()
+            provider = _provider_receipt(worker=process)
+            owner.bind_process_unactivated(
+                "lease-1",
+                allowed_set_digest=preflight["allowed_set_digest"],
+                provider_receipt=provider,
+                process_receipt=process,
+            )
+            owner.commit_activation("lease-1", preflight["allowed_set_digest"])
+
+            agent_runner.ensure_private_run_dir(run_dir)
+            request = {
+                "profile": {"name": "openbuild_implementation_strongest"},
+                "task_name": "M5-source",
+                "repo": str(repo),
+                "lease_id": "lease-1",
+                "lifecycle_allowed_set_digest": preflight["allowed_set_digest"],
+                "recovery_preflight": preflight,
+                **self.private_run_request_identity(run_dir),
+            }
+            agent_runner.atomic_write_json(run_dir / "request.json", request)
+            secret = bytes.fromhex("65" * 32)
+            agent_runner.atomic_write_bytes(run_dir / "guardian.key", secret)
+            ready = {
+                **{key: value for key, value in provider.items() if key != "precommit"},
+                "worker": process,
+            }
+            agent_runner.write_guardian_message(
+                run_dir / "guardian-ready.json", secret, "guardian-ready", ready
+            )
+            agent_runner.write_guardian_message(
+                run_dir / "guardian-precommit-ready.json",
+                secret,
+                "guardian-precommit-ready",
+                {**provider["precommit"], "registry_digest": "b" * 64},
+            )
+            agent_runner.write_guardian_message(
+                run_dir / "containment-bound.json",
+                secret,
+                "containment-bound",
+                {
+                    "guardian_id": provider["guardian_id"],
+                    "worker_pid": process["pid"],
+                    "worker_identity": process["identity"],
+                    "allowed_set_digest": preflight["allowed_set_digest"],
+                    "provider_plan_id": provider["provider_plan_id"],
+                    "ipc_plan_id": provider["ipc_plan_id"],
+                    "precommit_nonce": provider["precommit"]["precommit_nonce"],
+                },
+            )
+            agent_runner.atomic_write_json(run_dir / "worker.json", process)
+            codex = {
+                "pid": 456,
+                "identity": "codex-created-1",
+                "process_group_id": 456,
+                "started_at": "2026-07-15T00:00:02Z",
+            }
+            agent_runner.atomic_write_json(
+                run_dir / "codex-spawn.json",
+                {
+                    **codex,
+                    "state": "started",
+                    "worker_pid": process["pid"],
+                },
+            )
+            agent_runner.atomic_write_json(run_dir / "codex.json", codex)
+            agent_runner.atomic_write_json(
+                run_dir / "activate.json",
+                {
+                    "activated_at": "2026-07-15T00:00:03Z",
+                    "codex_pid": codex["pid"],
+                    "codex_process_identity": codex["identity"],
+                    "observation_deadline_at": "2026-07-15T00:15:03Z",
+                    "observation_started_at": "2026-07-15T00:00:03Z",
+                    "root_completion_source_binding_digest": "c" * 64,
+                },
+            )
+            owner.quarantine_containment_loss(
+                "lease-1", "guardian-process-stopped"
+            )
+            allowed.write_text("writer change\n", encoding="utf-8", newline="\n")
+            (repo / "outside.txt").write_text(
+                "orchestrator artifact\n", encoding="utf-8", newline="\n"
+            )
+            status_before = subprocess.run(
+                ["git", "status", "--porcelain=v2", "-z"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+            ).stdout
+            registry_before = owner.path.read_bytes()
+            source_before = owner.source_path(
+                preflight["source_state_id"]
+            ).read_bytes()
+
+            with mock.patch.object(
+                agent_runner, "recovery_registry_for_request", return_value=owner
+            ), mock.patch.object(
+                agent_runner, "process_record_state", return_value="running"
+            ), mock.patch.object(
+                agent_runner, "process_tree_record_state", return_value="running"
+            ), self.assertRaisesRegex(
+                agent_runner.RunnerError, "original processes are not stopped"
+            ):
+                agent_runner.reconcile_containment_loss_run(
+                    Namespace(run_dir=str(run_dir))
+                )
+            self.assertEqual(owner.path.read_bytes(), registry_before)
+            self.assertEqual(
+                owner.source_path(preflight["source_state_id"]).read_bytes(),
+                source_before,
+            )
+
+            boundary_path = run_dir / "containment-bound.json"
+            boundary_bytes = boundary_path.read_bytes()
+            agent_runner.write_guardian_message(
+                boundary_path,
+                secret,
+                "containment-bound",
+                {
+                    "guardian_id": provider["guardian_id"],
+                    "worker_pid": process["pid"],
+                    "worker_identity": process["identity"],
+                    "allowed_set_digest": "d" * 64,
+                    "provider_plan_id": provider["provider_plan_id"],
+                    "ipc_plan_id": provider["ipc_plan_id"],
+                    "precommit_nonce": provider["precommit"]["precommit_nonce"],
+                },
+            )
+            with mock.patch.object(
+                agent_runner, "recovery_registry_for_request", return_value=owner
+            ), mock.patch.object(
+                agent_runner, "process_record_state", return_value="stopped"
+            ), mock.patch.object(
+                agent_runner, "process_tree_record_state", return_value="stopped"
+            ), self.assertRaisesRegex(
+                agent_runner.RunnerError, "boundary evidence drifted"
+            ):
+                agent_runner.reconcile_containment_loss_run(
+                    Namespace(run_dir=str(run_dir))
+                )
+            self.assertEqual(owner.path.read_bytes(), registry_before)
+            self.assertEqual(
+                owner.source_path(preflight["source_state_id"]).read_bytes(),
+                source_before,
+            )
+            agent_runner.atomic_write_bytes(boundary_path, boundary_bytes)
+
+            with mock.patch.object(
+                agent_runner, "recovery_registry_for_request", return_value=owner
+            ), mock.patch.object(
+                agent_runner, "process_record_state", return_value="stopped"
+            ), mock.patch.object(
+                agent_runner, "process_tree_record_state", return_value="stopped"
+            ), mock.patch.object(
+                owner,
+                "_commit_registry_locked",
+                side_effect=agent_runner.RecoveryStateError(
+                    "fixture registry publication crash"
+                ),
+            ), self.assertRaisesRegex(
+                agent_runner.RunnerError, "fixture registry publication crash"
+            ):
+                agent_runner.reconcile_containment_loss_run(
+                    Namespace(run_dir=str(run_dir))
+                )
+            self.assertEqual(owner.path.read_bytes(), registry_before)
+            self.assertNotEqual(
+                owner.source_path(preflight["source_state_id"]).read_bytes(),
+                source_before,
+            )
+            self.assertIsInstance(
+                owner.read_private_source(preflight["source_state_id"])[
+                    "public_checkpoint"
+                ],
+                dict,
+            )
+
+            output = io.StringIO()
+            with mock.patch.object(
+                agent_runner, "recovery_registry_for_request", return_value=owner
+            ), mock.patch.object(
+                agent_runner, "process_record_state", return_value="stopped"
+            ), mock.patch.object(
+                agent_runner, "process_tree_record_state", return_value="stopped"
+            ), redirect_stdout(output):
+                self.assertEqual(
+                    agent_runner.reconcile_containment_loss_run(
+                        Namespace(run_dir=str(run_dir))
+                    ),
+                    0,
+                )
+
+            result = json.loads(output.getvalue())
+            state = owner.state()
+            self.assertTrue(result["registry_vacant"])
+            self.assertIsNone(state["lease"])
+            self.assertIsNone(state["outbox"])
+            self.assertIsNone(state["quarantine"])
+            reconciliation = next(
+                event
+                for event in state["history"]
+                if event.get("event") == "containment-loss-reconciled"
+                and event.get("lease_id") == "lease-1"
+            )
+            self.assertEqual(
+                reconciliation["schema"],
+                "containment-loss-orphan-reconciliation-v1",
+            )
+            abandonment = next(
+                event
+                for event in state["history"]
+                if event.get("event") == "terminal-abandonment-recorded"
+                and event.get("lease_id") == "lease-1"
+            )
+            self.assertEqual(abandonment["schema"], "terminal-abandonment-v3")
+            self.assertFalse((run_dir / "guardian-zero.json").exists())
+            self.assertFalse((run_dir / "implementation-handoffs.jsonl").exists())
+            self.assertEqual(allowed.read_bytes(), b"writer change\n")
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "status", "--porcelain=v2", "-z"],
+                    cwd=repo,
+                    check=True,
+                    stdout=subprocess.PIPE,
+                ).stdout,
+                status_before,
+            )
+
+            with mock.patch.object(
+                agent_runner, "recovery_registry_for_request", return_value=owner
+            ), redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    agent_runner.reconcile_containment_loss_run(
+                        Namespace(run_dir=str(run_dir))
+                    ),
+                    0,
+                )
+            self.assertEqual(owner.state(), state)
+
     def test_containment_gate_rejects_tamper_before_worker_auth(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             run_dir = Path(temp)

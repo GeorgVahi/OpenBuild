@@ -4,6 +4,20 @@ OpenBuild follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### 2.4.0-alpha.6
+
+#### Added
+
+- Added an owner-verified recovery transition for an activated Windows Job lifecycle whose containment guardian stopped before publishing `guardian-zero` or a terminal receipt.
+- Added exact coverage for stopped/reused guardian, worker, and Codex identities, authenticated ready/precommit/boundary evidence, tamper and live-process rejection, pre-checkpoint materialization, crash replay, dirty-diff preservation, and registry vacancy without handoff.
+
+#### Changed
+
+- Extended private `_reconcile-containment-loss` with a distinct `containment-loss-orphan-reconciliation-v1` path limited to `normal-contained` + `running` + `containment-loss-after-boundary` under the exact `windows-job` / `kill-on-close-no-breakaway` policy.
+- Kept ordinary signed post-zero reconciliation unchanged; Linux, fallback, recovery-target, unknown/live identity, missing/tampered artifact, wrong policy, unsupported drift shape, and any ambiguous state remain fail-closed.
+- Bound owner-observed orphan zero evidence and the synthetic unsuccessful terminal record to the immutable run/lease/provider/process tuple and durable observation digest, materialized a missing source checkpoint replay-safely, and reused the existing abandonment, invalidation, close, archive, and release phases.
+- Synchronized the manifest, changelog and README install pins for `2.4.0-alpha.6`; M5 integration-queue work remains in progress after recovery.
+
 ### 2.4.0-alpha.5
 
 #### Added

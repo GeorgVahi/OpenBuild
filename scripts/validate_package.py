@@ -4951,8 +4951,17 @@ def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> lis
         ('"terminal_receipt_digest"', "contained terminal archive"),
         ("quarantine_containment_loss", "post-boundary containment quarantine"),
         ('b"openbuild-containment-loss-reconciliation-v1\\0"', "containment-loss reconciliation domain"),
+        (
+            'b"openbuild-containment-loss-orphan-observation-v1\\0"',
+            "orphan containment-loss observation domain",
+        ),
         ('"containment-loss-reconciled"', "containment-loss reconciliation history"),
         ("record_containment_loss_abandonment", "containment-loss abandonment transition"),
+        (
+            "record_orphan_containment_loss_abandonment",
+            "orphan containment-loss abandonment transition",
+        ),
+        ('"owner-orphan-recovery-v1"', "orphan containment-loss proof origin"),
         ("acknowledge_containment_loss_close", "containment-loss guardian close"),
         ("retire_for_downgrade", "reader floor retirement"),
         ("retire_authorization", "prompt authorization retirement"),
@@ -5239,6 +5248,14 @@ def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> lis
         ('"_reconcile-terminal-abandonment"', "terminal abandonment command"),
         ("reconcile_containment_loss_run", "containment-loss reconciliation lifecycle"),
         ("registry.record_containment_loss_abandonment", "containment-loss abandonment binding"),
+        (
+            "_orphan_containment_loss_observation",
+            "orphan containment-loss evidence verification",
+        ),
+        (
+            "registry.record_orphan_containment_loss_abandonment",
+            "orphan containment-loss abandonment binding",
+        ),
         ("registry.acknowledge_containment_loss_close", "containment-loss guardian close"),
         ('"_reconcile-containment-loss"', "containment-loss reconciliation command"),
         ('"containment-loss-reconciliation-v1"', "containment-loss public result"),
@@ -5294,8 +5311,18 @@ def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> lis
         "def _post_commit_root_completion_blocked", containment_owner
     )
     containment_ready = runner_text.find(
-        'read_guardian_message(\n                    run_dir / "guardian-ready.json"',
+        'run_dir / "guardian-ready.json"',
         containment_owner,
+        containment_end,
+    )
+    containment_orphan_observation = runner_text.find(
+        "_orphan_containment_loss_observation(",
+        containment_owner,
+        containment_end,
+    )
+    containment_orphan_record = runner_text.find(
+        "registry.record_orphan_containment_loss_abandonment(",
+        containment_orphan_observation,
         containment_end,
     )
     containment_receipt = runner_text.find(
@@ -5331,6 +5358,8 @@ def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> lis
         or containment_receipt < 0
         or containment_binding < 0
         or containment_record < 0
+        or containment_orphan_observation < 0
+        or containment_orphan_record < 0
         or containment_complete < 0
         or containment_close < 0
         or containment_release < 0
@@ -5343,6 +5372,10 @@ def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> lis
         < containment_close
         < containment_release
         < containment_end
+        or not containment_owner
+        < containment_orphan_observation
+        < containment_orphan_record
+        < containment_complete
     ):
         errors.append(
             "agent_runner.py containment-loss reconciliation: authenticated evidence and terminal binding must precede abandonment, invalidation, close, and release"

@@ -1,6 +1,6 @@
 {
   "name": "openbuild",
-  "version": "2.4.0-alpha.5",
+  "version": "2.4.0-alpha.6",
   "description": "Autonomous repository-grounded planning, implementation, validation, and exact-model agent review for Codex.",
   "author": {
     "name": "GeorgVahi",

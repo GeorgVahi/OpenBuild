@@ -5364,8 +5364,178 @@ def _containment_loss_release_is_complete(
     return len(reconciled) == len(recorded) == len(completed) == len(released) == 1
 
 
+def _orphan_containment_loss_observation(
+    run_dir: Path,
+    lease: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Verify the exact Windows Job boundary after its guardian died pre-zero."""
+    provider = lease.get("provider_receipt")
+    process = lease.get("process_receipt")
+    if not isinstance(provider, Mapping) or not isinstance(process, Mapping):
+        raise RecoveryStateError(
+            "orphan containment-loss reconciliation lacks process ownership evidence"
+        )
+    precommit = provider.get("precommit")
+    if (
+        provider.get("provider") != "windows-job"
+        or provider.get("policy") != "kill-on-close-no-breakaway"
+        or provider.get("anti_migration") is not None
+        or provider.get("active_processes") != 1
+        or not isinstance(precommit, Mapping)
+        or precommit.get("provider_populated") is not True
+        or precommit.get("membership_verified") is not True
+    ):
+        raise RecoveryStateError(
+            "orphan containment-loss reconciliation requires the exact "
+            "Windows kill-on-close boundary"
+        )
+    try:
+        secret = _guardian_secret(run_dir)
+        ready = read_guardian_message(
+            run_dir / "guardian-ready.json", secret, "guardian-ready"
+        )
+        precommit_ready = read_guardian_message(
+            run_dir / "guardian-precommit-ready.json",
+            secret,
+            "guardian-precommit-ready",
+        )
+        boundary = read_guardian_message(
+            run_dir / "containment-bound.json", secret, "containment-bound"
+        )
+        worker_artifact = read_json(run_dir / "worker.json")
+        codex = read_json(run_dir / "codex.json")
+        codex_spawn = read_json(run_dir / "codex-spawn.json")
+        activation = read_json(run_dir / "activate.json")
+    except (OSError, RunnerError, ValueError) as exc:
+        raise RecoveryStateError(
+            f"orphan containment-loss reconciliation evidence is unreadable: {exc}"
+        ) from exc
+
+    expected_ready = {
+        **{key: value for key, value in provider.items() if key != "precommit"},
+        "worker": dict(process),
+    }
+    if ready != expected_ready or worker_artifact != process:
+        raise RecoveryStateError(
+            "orphan containment-loss reconciliation guardian evidence drifted"
+        )
+    precommit_registry_digest = precommit_ready.get("registry_digest")
+    precommit_payload = dict(precommit_ready)
+    precommit_payload.pop("registry_digest", None)
+    if (
+        precommit_payload != precommit
+        or not isinstance(precommit_registry_digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", precommit_registry_digest) is None
+    ):
+        raise RecoveryStateError(
+            "orphan containment-loss reconciliation precommit evidence drifted"
+        )
+    expected_boundary = {
+        "guardian_id": provider.get("guardian_id"),
+        "worker_pid": process.get("pid"),
+        "worker_identity": process.get("identity"),
+        "allowed_set_digest": lease.get("allowed_set_digest"),
+        "provider_plan_id": provider.get("provider_plan_id"),
+        "ipc_plan_id": provider.get("ipc_plan_id"),
+        "precommit_nonce": precommit.get("precommit_nonce"),
+    }
+    if boundary != expected_boundary:
+        raise RecoveryStateError(
+            "orphan containment-loss reconciliation boundary evidence drifted"
+        )
+    expected_codex_fields = {
+        "pid",
+        "identity",
+        "process_group_id",
+        "started_at",
+    }
+    if (
+        set(codex) != expected_codex_fields
+        or codex_spawn
+        != {
+            **codex,
+            "state": "started",
+            "worker_pid": process.get("pid"),
+        }
+        or activation.get("codex_pid") != codex.get("pid")
+        or activation.get("codex_process_identity") != codex.get("identity")
+        or not isinstance(
+            activation.get("root_completion_source_binding_digest"), str
+        )
+        or re.fullmatch(
+            r"[0-9a-f]{64}",
+            activation["root_completion_source_binding_digest"],
+        )
+        is None
+    ):
+        raise RecoveryStateError(
+            "orphan containment-loss reconciliation Codex evidence drifted"
+        )
+
+    guardian_state = process_record_state(
+        {
+            "pid": provider.get("guardian_pid"),
+            "identity": provider.get("guardian_identity"),
+        }
+    )
+    worker_state = process_record_state(process)
+    codex_state = process_tree_record_state(codex)
+    if (
+        guardian_state not in {"stopped", "reused"}
+        or worker_state not in {"stopped", "reused"}
+        or codex_state not in {"stopped", "reused"}
+    ):
+        raise RecoveryStateError(
+            "orphan containment-loss reconciliation original processes are not stopped"
+        )
+    observation_basis = {
+        "schema": "containment-loss-orphan-reconciliation-v1",
+        "provider": provider["provider"],
+        "policy": provider["policy"],
+        "guardian_pid": provider["guardian_pid"],
+        "guardian_identity": provider["guardian_identity"],
+        "guardian_state": guardian_state,
+        "worker_pid": process["pid"],
+        "worker_identity": process["identity"],
+        "worker_state": worker_state,
+        "codex_pid": codex["pid"],
+        "codex_identity": codex["identity"],
+        "codex_state": codex_state,
+        "guardian_ready_digest": sha256_bytes(_canonical_json_bytes(ready)),
+        "precommit_ready_digest": sha256_bytes(
+            _canonical_json_bytes(precommit_ready)
+        ),
+        "containment_bound_digest": sha256_bytes(
+            _canonical_json_bytes(boundary)
+        ),
+    }
+    observation_path = run_dir / "containment-loss-orphan-observation.json"
+    if observation_path.is_file():
+        try:
+            existing = read_json(observation_path)
+        except (OSError, RunnerError, ValueError) as exc:
+            raise RecoveryStateError(
+                f"orphan containment-loss reconciliation observation is unreadable: {exc}"
+            ) from exc
+        reconciled_at = existing.get("reconciled_at")
+        existing_basis = dict(existing)
+        existing_basis.pop("reconciled_at", None)
+        if (
+            existing_basis != observation_basis
+            or not isinstance(reconciled_at, str)
+            or not reconciled_at
+        ):
+            raise RecoveryStateError(
+                "orphan containment-loss reconciliation observation replay drifted"
+            )
+        return dict(existing)
+    observation = {**observation_basis, "reconciled_at": utc_now()}
+    atomic_write_json(observation_path, observation)
+    return observation
+
+
 def reconcile_containment_loss_run(args: argparse.Namespace) -> int:
-    """Reconcile exact post-zero guardian loss without accepting a handoff."""
+    """Reconcile exact post-zero or Windows pre-zero guardian loss without handoff."""
     run_dir = resolve_run_reference(args.run_dir)
     request = read_json(run_dir / "request.json")
     lease_id = request.get("lease_id")
@@ -5413,89 +5583,126 @@ def reconcile_containment_loss_run(args: argparse.Namespace) -> int:
                         "containment-loss reconciliation replay is not authoritative"
                     )
             else:
-                if (
-                    state.get("quarantine") != "containment-loss-after-boundary"
-                    or lease.get("state") != "stopped-terminal"
-                    or semantic is not None
-                    or state.get("outbox") is not None
-                    or not isinstance(lease.get("zero_proof"), Mapping)
-                    or lease.get("guardian_close") is not None
-                    or (run_dir / "guardian-failure.json").exists()
-                    or (run_dir / "guardian-closed.json").exists()
-                ):
-                    raise RecoveryStateError(
-                        "containment-loss reconciliation requires exact post-zero quarantine"
-                    )
-                secret = _guardian_secret(run_dir)
-                ready = read_guardian_message(
-                    run_dir / "guardian-ready.json", secret, "guardian-ready"
+                post_zero = (
+                    state.get("quarantine") == "containment-loss-after-boundary"
+                    and lease.get("state") == "stopped-terminal"
+                    and semantic is None
+                    and state.get("outbox") is None
+                    and isinstance(lease.get("zero_proof"), Mapping)
+                    and lease.get("guardian_close") is None
+                    and not (run_dir / "guardian-failure.json").exists()
+                    and not (run_dir / "guardian-closed.json").exists()
                 )
-                zero = read_guardian_message(
-                    run_dir / "guardian-zero.json", secret, "guardian-zero"
+                orphan_pre_zero = (
+                    state.get("quarantine") == "containment-loss-after-boundary"
+                    and lease.get("lease_kind") == "normal-contained"
+                    and lease.get("state") == "running"
+                    and semantic is None
+                    and state.get("outbox") is None
+                    and lease.get("terminal_receipt") is None
+                    and lease.get("zero_proof") is None
+                    and lease.get("guardian_close") is None
+                    and not (run_dir / "guardian-failure.json").exists()
+                    and not (run_dir / "guardian-closed.json").exists()
+                    and not (run_dir / "guardian-zero.json").exists()
                 )
-                provider = lease.get("provider_receipt")
-                process = lease.get("process_receipt")
-                if not isinstance(provider, Mapping) or not isinstance(process, Mapping):
+                if not post_zero and not orphan_pre_zero:
                     raise RecoveryStateError(
-                        "containment-loss reconciliation lacks process ownership evidence"
+                        "containment-loss reconciliation requires exact post-zero or "
+                        "Windows orphan quarantine"
                     )
-                expected_ready = {
-                    **{key: value for key, value in provider.items() if key != "precommit"},
-                    "worker": dict(process),
-                }
-                if ready != expected_ready or zero != lease.get("zero_proof"):
-                    raise RecoveryStateError(
-                        "containment-loss reconciliation guardian evidence drifted"
+                if orphan_pre_zero:
+                    observation = _orphan_containment_loss_observation(
+                        run_dir, lease
                     )
-                receipt = public_receipt(run_dir)
-                if (
-                    receipt.get("status") != "completed"
-                    or receipt.get("process_tree_stopped") is not True
-                    or receipt.get("lease_id") != lease_id
-                ):
-                    raise RecoveryStateError(
-                        "containment-loss reconciliation requires stopped terminal receipt"
+                    state = registry.record_orphan_containment_loss_abandonment(
+                        lease_id,
+                        observation,
                     )
-                terminal_binding = lease.get("terminal_receipt", {}).get(
-                    "binding_digest"
-                )
-                if not isinstance(terminal_binding, str):
-                    raise RecoveryStateError(
-                        "containment-loss reconciliation terminal binding is missing"
+                else:
+                    secret = _guardian_secret(run_dir)
+                    ready = read_guardian_message(
+                        run_dir / "guardian-ready.json", secret, "guardian-ready"
                     )
-                _match_terminal_binding(
-                    receipt,
-                    run_dir=run_dir,
-                    run_id=run_dir.name,
-                    stored_digest=terminal_binding,
-                )
-                guardian_state = process_record_state(
-                    {
-                        "pid": provider.get("guardian_pid"),
-                        "identity": provider.get("guardian_identity"),
+                    zero = read_guardian_message(
+                        run_dir / "guardian-zero.json", secret, "guardian-zero"
+                    )
+                    provider = lease.get("provider_receipt")
+                    process = lease.get("process_receipt")
+                    if not isinstance(provider, Mapping) or not isinstance(
+                        process, Mapping
+                    ):
+                        raise RecoveryStateError(
+                            "containment-loss reconciliation lacks process "
+                            "ownership evidence"
+                        )
+                    expected_ready = {
+                        **{
+                            key: value
+                            for key, value in provider.items()
+                            if key != "precommit"
+                        },
+                        "worker": dict(process),
                     }
-                )
-                worker_state = process_record_state(process)
-                if guardian_state not in {"stopped", "reused"} or worker_state not in {
-                    "stopped",
-                    "reused",
-                }:
-                    raise RecoveryStateError(
-                        "containment-loss reconciliation original processes are not stopped"
+                    if ready != expected_ready or zero != lease.get("zero_proof"):
+                        raise RecoveryStateError(
+                            "containment-loss reconciliation guardian evidence drifted"
+                        )
+                    receipt = public_receipt(run_dir)
+                    if (
+                        receipt.get("status") != "completed"
+                        or receipt.get("process_tree_stopped") is not True
+                        or receipt.get("lease_id") != lease_id
+                    ):
+                        raise RecoveryStateError(
+                            "containment-loss reconciliation requires stopped "
+                            "terminal receipt"
+                        )
+                    terminal_binding = lease.get("terminal_receipt", {}).get(
+                        "binding_digest"
                     )
-                state = registry.record_containment_loss_abandonment(
-                    lease_id,
-                    {
-                        "schema": "containment-loss-reconciliation-v1",
-                        "guardian_pid": provider["guardian_pid"],
-                        "guardian_identity": provider["guardian_identity"],
-                        "guardian_state": guardian_state,
-                        "worker_pid": process["pid"],
-                        "worker_identity": process["identity"],
-                        "worker_state": worker_state,
-                        "reconciled_at": utc_now(),
-                    },
-                )
+                    if not isinstance(terminal_binding, str):
+                        raise RecoveryStateError(
+                            "containment-loss reconciliation terminal binding is "
+                            "missing"
+                        )
+                    _match_terminal_binding(
+                        receipt,
+                        run_dir=run_dir,
+                        run_id=run_dir.name,
+                        stored_digest=terminal_binding,
+                    )
+                    guardian_state = process_record_state(
+                        {
+                            "pid": provider.get("guardian_pid"),
+                            "identity": provider.get("guardian_identity"),
+                        }
+                    )
+                    worker_state = process_record_state(process)
+                    if guardian_state not in {
+                        "stopped",
+                        "reused",
+                    } or worker_state not in {
+                        "stopped",
+                        "reused",
+                    }:
+                        raise RecoveryStateError(
+                            "containment-loss reconciliation original processes "
+                            "are not stopped"
+                        )
+                    state = registry.record_containment_loss_abandonment(
+                        lease_id,
+                        {
+                            "schema": "containment-loss-reconciliation-v1",
+                            "guardian_pid": provider["guardian_pid"],
+                            "guardian_identity": provider["guardian_identity"],
+                            "guardian_state": guardian_state,
+                            "worker_pid": process["pid"],
+                            "worker_identity": process["identity"],
+                            "worker_state": worker_state,
+                            "reconciled_at": utc_now(),
+                        },
+                    )
 
             lease = state.get("lease")
             if not isinstance(lease, Mapping):
