@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from project_state import ProjectStateError, ProjectStateStore, _assert_no_link_or_reparse_ancestors, _identity, _is_link_or_reparse, _protected_scope_snapshot
+from project_runtime import ProjectRuntimeCoordinator, ProjectRuntimeError
 from project_scopes import ProjectScopeError, ProjectScopeManager
 from recovery_state import RecoveryRegistry, RecoveryStateError
 
@@ -448,11 +449,52 @@ class ProjectLaneCoordinator:
             )
         return parsed_binding
 
-    def _publish(self, state: Mapping[str, Any], lanes: Sequence[Mapping[str, Any]], scopes: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    def _publish(
+        self,
+        state: Mapping[str, Any],
+        lanes: Sequence[Mapping[str, Any]],
+        scopes: Sequence[Mapping[str, Any]],
+        *,
+        runtime_cancellation: Mapping[str, str] | None = None,
+    ) -> dict[str, Any]:
         try:
+            if runtime_cancellation is not None:
+                return self.store.cancel_unclaimed_runtime_with_lane_state(
+                    self.anchor_id,
+                    expected_generation=state["generation"],
+                    lanes=lanes,
+                    scopes=scopes,
+                    lane_id=runtime_cancellation["lane_id"],
+                    job_id=runtime_cancellation["job_id"],
+                )
             return self.store.replace_lane_state(self.anchor_id, expected_generation=state["generation"], lanes=lanes, scopes=scopes)
         except ProjectStateError as exc:
             raise ProjectLaneError(str(exc)) from exc
+
+    @staticmethod
+    def _unclaimed_runtime_cancellation(
+        state: Mapping[str, Any],
+        lane_id: str,
+    ) -> dict[str, str] | None:
+        jobs = [
+            item
+            for item in state.get("runtime", {}).get("jobs", [])
+            if isinstance(item, Mapping)
+            and item.get("lane_id") == lane_id
+            and item.get("owner_digest") is None
+            and item.get("status")
+            in {"waiting-for-capacity", "running"}
+        ]
+        if len(jobs) > 1:
+            raise ProjectLaneError(
+                "lane has more than one unclaimed runtime job"
+            )
+        if not jobs:
+            return None
+        return {
+            "lane_id": lane_id,
+            "job_id": str(jobs[0]["job_id"]),
+        }
 
     @staticmethod
     def _decode_paths(raw: bytes) -> set[str]:
@@ -1138,6 +1180,10 @@ class ProjectLaneCoordinator:
         *,
         require_ready: bool,
         lease_kind: str = "normal-contained",
+        runtime_owner: str | None = None,
+        runtime_claim: str | None = None,
+        allow_completed_runtime_replay: bool = False,
+        runtime_claim_receipt: dict[str, bool] | None = None,
     ) -> dict[str, Any]:
         """Bind one already-resolved lane worktree to its lane-local runner."""
         if (
@@ -1269,6 +1315,102 @@ class ProjectLaneCoordinator:
             )
         except ProjectScopeError as exc:
             raise ProjectLaneError(str(exc)) from exc
+        runtime_binding: dict[str, Any] | None = None
+        if runtime_owner is not None:
+            if (
+                not isinstance(runtime_owner, str)
+                or not runtime_owner
+                or len(runtime_owner) > 256
+            ):
+                raise ProjectLaneError("runner runtime owner is invalid")
+            claim = runtime_owner if runtime_claim is None else runtime_claim
+            if (
+                not isinstance(claim, str)
+                or not claim
+                or len(claim) > 256
+            ):
+                raise ProjectLaneError("runner runtime claim is invalid")
+            runtime_job_id = "run-" + hashlib.sha256(
+                _canonical(
+                    {
+                        "anchor_id": self.anchor_id,
+                        "lane_id": lane_id,
+                        "owner": runtime_owner,
+                    }
+                )
+            ).hexdigest()[:20]
+            owner_digest = hashlib.sha256(
+                _canonical(
+                    {
+                        "owner": runtime_owner,
+                        "claim": claim,
+                    }
+                )
+            ).hexdigest()
+            ports = [
+                int(match.group(1))
+                for request in lane.get("scope_requests", [])
+                if isinstance(request, Mapping)
+                and request.get("kind") == "resource"
+                and request.get("mode") == "hard"
+                and (
+                    match := re.fullmatch(
+                        r"port/(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|"
+                        r"6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3})",
+                        str(request.get("path")),
+                    )
+                )
+            ]
+            if len(ports) > 1:
+                raise ProjectLaneError(
+                    "runner lane has more than one non-namespacable port"
+                )
+            runtime = ProjectRuntimeCoordinator(self.store, self.anchor_id)
+            try:
+                allocation = (
+                    runtime.acquire(
+                        runtime_job_id,
+                        lane_id=lane_id,
+                        port=ports[0] if ports else None,
+                        owner_digest=owner_digest,
+                        claim_receipt=runtime_claim_receipt,
+                    )
+                    if require_ready
+                    else runtime.status(runtime_job_id)
+                )
+            except ProjectRuntimeError as exc:
+                raise ProjectLaneError(str(exc)) from exc
+            if (
+                allocation["status"] != "running"
+                and not (
+                    allow_completed_runtime_replay
+                    and not require_ready
+                    and allocation["status"] == "complete"
+                    and lane.get("state")
+                    in {
+                        "waiting-for-integration",
+                        "recovery-ready",
+                        "closed",
+                    }
+                )
+            ):
+                raise ProjectLaneError(
+                    "runner runtime capacity is not available"
+                )
+            if allocation.get("owner_digest") != owner_digest:
+                raise ProjectLaneError(
+                    "runner runtime is owned by another dispatch"
+                )
+            runtime_binding = {
+                "schema": "project-lane-runtime-v1",
+                "job_id": allocation["job_id"],
+                "lane_id": allocation["lane_id"],
+                "ticket": allocation["ticket"],
+                "namespace": allocation["namespace"],
+                "namespaces": dict(allocation["namespaces"]),
+                "port": ports[0] if ports else None,
+                "owner_digest": owner_digest,
+            }
         binding = {
             "schema": "project-lane-runner-v1",
             "anchor_id": self.anchor_id,
@@ -1284,6 +1426,8 @@ class ProjectLaneCoordinator:
             "integration_ref": self.integration_ref,
             "lease_kind": lease_kind,
         }
+        if runtime_binding is not None:
+            binding["runtime"] = runtime_binding
         binding["digest"] = hashlib.sha256(_canonical(binding)).hexdigest()
         return binding
 
@@ -1547,6 +1691,10 @@ class ProjectLaneCoordinator:
         self,
         expected: Mapping[str, Any],
         worktree: Path,
+        *,
+        runtime_owner: str | None = None,
+        runtime_claim: str | None = None,
+        allow_completed_runtime_replay: bool = False,
     ) -> dict[str, Any]:
         if (
             not isinstance(expected, Mapping)
@@ -1561,6 +1709,9 @@ class ProjectLaneCoordinator:
             expected["allowed_paths"],
             require_ready=False,
             lease_kind=str(expected.get("lease_kind")),
+            runtime_owner=runtime_owner,
+            runtime_claim=runtime_claim,
+            allow_completed_runtime_replay=allow_completed_runtime_replay,
         )
         if current != dict(expected):
             raise ProjectLaneError("runner lane binding changed")
@@ -1854,6 +2005,10 @@ class ProjectLaneCoordinator:
             if not isinstance(lane, dict):
                 raise ProjectLaneError("lane does not exist")
             lane_state = lane.get("state")
+            runtime_cancellation = self._unclaimed_runtime_cancellation(
+                state,
+                lane_id,
+            )
             if lane_state == "closed":
                 raise ProjectLaneError("closed lane cannot be cancelled")
             if lane_state in {"cancelled", "quarantined"} and lane.get("reason") != reason:
@@ -1894,10 +2049,14 @@ class ProjectLaneCoordinator:
                             ],
                         }
             if lane_state in {"cancelled", "quarantined"}:
-                if lane_state == "quarantined" or writer is None:
+                if lane_state == "quarantined":
                     return lane
-                lane["state"] = "quarantined"
-                lane["writer"] = writer
+                if writer is None:
+                    if runtime_cancellation is None:
+                        return lane
+                else:
+                    lane["state"] = "quarantined"
+                    lane["writer"] = writer
             else:
                 if lane_state not in {
                     "waiting-for-scope",
@@ -1911,7 +2070,12 @@ class ProjectLaneCoordinator:
                 lane["writer"] = writer
                 lane["state"] = "quarantined" if writer is not None else "cancelled"
             try:
-                self._publish(state, lanes, state["scopes"])
+                self._publish(
+                    state,
+                    lanes,
+                    state["scopes"],
+                    runtime_cancellation=runtime_cancellation,
+                )
             except ProjectLaneError as exc:
                 if str(exc) == "project generation changed":
                     continue
@@ -1929,6 +2093,10 @@ class ProjectLaneCoordinator:
                 return lane
             if not isinstance(lane, dict) or lane.get("state") not in {"quarantined", "cancelled"}:
                 raise ProjectLaneError("lane is not terminally closable")
+            runtime_cancellation = self._unclaimed_runtime_cancellation(
+                state,
+                lane_id,
+            )
             worktree = Path(str(lane["worktree"]))
             writer = lane.get("writer")
             if not worktree.exists():
@@ -1985,7 +2153,12 @@ class ProjectLaneCoordinator:
             lane["state"] = "closed"
             lane["terminal_evidence"] = terminal_evidence
             try:
-                self._publish(state, lanes, state["scopes"])
+                self._publish(
+                    state,
+                    lanes,
+                    state["scopes"],
+                    runtime_cancellation=runtime_cancellation,
+                )
             except ProjectLaneError as exc:
                 if str(exc) == "project generation changed":
                     continue

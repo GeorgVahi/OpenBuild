@@ -346,11 +346,14 @@ class ProjectIntegrator:
         lane_id: str,
         *,
         validation_argv: Sequence[str],
+        dependency_unblocking: bool = False,
     ) -> dict[str, Any]:
         """Admit exactly one terminal result tuple without releasing a scope."""
 
         if not isinstance(lane_id, str) or not _LANE.fullmatch(lane_id):
             raise ProjectIntegratorError("integration lane identifier is invalid")
+        if not isinstance(dependency_unblocking, bool):
+            raise ProjectIntegratorError("integration queue class is invalid")
         argv = self._validation_argv(validation_argv)
         self._ensure_integration_checkout()
         for _ in range(8):
@@ -376,6 +379,11 @@ class ProjectIntegrator:
                     result_commit=result_commit,
                     admitted_tip=self._integration_tip(),
                     validation_argv=argv,
+                    queue_class=(
+                        "dependency-unblocking"
+                        if dependency_unblocking
+                        else "ordinary"
+                    ),
                 )
             except ProjectStateError as exc:
                 if str(exc) == "project generation changed":

@@ -1301,11 +1301,25 @@ class ProjectScopeManager:
                         and producer_scheduler.get("milestone_id")
                         in consumer_record.get("depends_on", [])
                     )
+                live_consumer_scope = any(
+                    item.get("owner") == lane.get("lane_id")
+                    and item.get("kind") in _KINDS
+                    and item.get("mode") == "hard"
+                    and item.get("status") in {"active", "waiting"}
+                    for item in scopes
+                )
+                base_refresh_required = (
+                    lane.get("state")
+                    in {"waiting-for-scope", "creating", "ready"}
+                    and lane.get("base") != accepted["accepted_commit"]
+                )
                 if (
                     lane.get("lane_id") != lane_id
+                    and live_consumer_scope
                     and (
                         dependency_overlap
                         or scheduler_dependency
+                        or base_refresh_required
                     )
                 ):
                     lane["integration_stale"] = {

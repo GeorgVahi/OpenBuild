@@ -49,6 +49,7 @@ from discovery_contract import (
     validate_discovery_result,
 )
 from project_lanes import ProjectLaneCoordinator, ProjectLaneError
+from project_runtime import ProjectRuntimeCoordinator, ProjectRuntimeError
 from project_state import ProjectStateError, ProjectStateStore
 
 
@@ -1279,12 +1280,21 @@ def resolve_project_lane_start(
             )
             else "normal-contained"
         )
+        runtime_claim_receipt: dict[str, bool] = {}
         project_lane["lane_binding"] = coordinator.runner_writer_binding(
             project_lane["lane_id"],
             repo,
             allowed_files,
             require_ready=True,
             lease_kind=lease_kind,
+            runtime_owner=getattr(args, "lease_id", None),
+            runtime_claim=getattr(args, "_project_runtime_claim", None),
+            runtime_claim_receipt=runtime_claim_receipt,
+        )
+        setattr(
+            args,
+            "_project_runtime_claim_acquired",
+            runtime_claim_receipt.get("acquired") is True,
         )
         return project_lane
     except (
@@ -1385,6 +1395,8 @@ def resolve_project_lane_recovery_authorization(
 
 def _verified_project_lane(
     request: Mapping[str, Any],
+    *,
+    allow_completed_runtime_replay: bool = False,
 ) -> tuple[ProjectLaneCoordinator, Mapping[str, Any]] | None:
     project_lane = request.get("project_lane")
     if project_lane is None:
@@ -1397,10 +1409,147 @@ def _verified_project_lane(
         binding = coordinator.verify_runner_writer_binding(
             project_lane["lane_binding"],
             repo,
+            runtime_owner=(
+                request.get("lease_id")
+                if isinstance(project_lane.get("lane_binding"), Mapping)
+                and "runtime" in project_lane["lane_binding"]
+                else None
+            ),
+            runtime_claim=(
+                request.get("project_runtime_claim")
+                if isinstance(project_lane.get("lane_binding"), Mapping)
+                and "runtime" in project_lane["lane_binding"]
+                else None
+            ),
+            allow_completed_runtime_replay=allow_completed_runtime_replay,
         )
     except (OSError, ProjectLaneError, ProjectStateError) as exc:
         raise RunnerError(f"project lane binding verification failed: {exc}") from exc
     return coordinator, binding
+
+
+_PROJECT_RUNTIME_BINDING_FIELDS = {
+    "schema",
+    "job_id",
+    "lane_id",
+    "ticket",
+    "namespace",
+    "namespaces",
+    "port",
+    "owner_digest",
+}
+_PROJECT_RUNTIME_NAMESPACE_KINDS = {
+    "port",
+    "test-db",
+    "compose",
+    "temp",
+    "build",
+}
+_PROJECT_RUNTIME_ENVIRONMENT_KEYS = {
+    "OPENBUILD_RUNTIME_NAMESPACE",
+    "OPENBUILD_RUNTIME_PORT_NAMESPACE",
+    "OPENBUILD_RUNTIME_PORT",
+    "OPENBUILD_TEST_DB_NAMESPACE",
+    "COMPOSE_PROJECT_NAME",
+    "OPENBUILD_TEMP_NAMESPACE",
+    "OPENBUILD_BUILD_NAMESPACE",
+}
+
+
+def _project_runtime_binding(
+    request: Mapping[str, Any],
+) -> Mapping[str, Any] | None:
+    project_lane = request.get("project_lane")
+    if project_lane is None:
+        return None
+    lane_binding = (
+        project_lane.get("lane_binding")
+        if isinstance(project_lane, Mapping)
+        else None
+    )
+    runtime = (
+        lane_binding.get("runtime")
+        if isinstance(lane_binding, Mapping)
+        else None
+    )
+    if runtime is None:
+        return None
+    namespaces = runtime.get("namespaces") if isinstance(runtime, Mapping) else None
+    if (
+        not isinstance(runtime, Mapping)
+        or set(runtime) != _PROJECT_RUNTIME_BINDING_FIELDS
+        or runtime.get("schema") != "project-lane-runtime-v1"
+        or not isinstance(runtime.get("job_id"), str)
+        or not isinstance(runtime.get("lane_id"), str)
+        or not isinstance(runtime.get("ticket"), int)
+        or runtime["ticket"] < 1
+        or not isinstance(runtime.get("namespace"), str)
+        or not re.fullmatch(r"ob-[a-z0-9-]{1,80}", runtime["namespace"])
+        or not isinstance(namespaces, Mapping)
+        or set(namespaces) != _PROJECT_RUNTIME_NAMESPACE_KINDS
+        or any(
+            not isinstance(value, str)
+            or not re.fullmatch(r"ob-[a-z0-9-]{1,80}", value)
+            for value in namespaces.values()
+        )
+        or (
+            runtime.get("port") is not None
+            and (
+                not isinstance(runtime["port"], int)
+                or isinstance(runtime["port"], bool)
+                or not 1 <= runtime["port"] <= 65535
+            )
+        )
+        or not re.fullmatch(r"[0-9a-f]{64}", str(runtime.get("owner_digest")))
+    ):
+        raise RunnerError("project lane runtime binding is malformed")
+    return runtime
+
+
+def project_runtime_environment(
+    request: Mapping[str, Any],
+) -> dict[str, str]:
+    """Apply only opaque lane namespaces and an explicitly leased port."""
+
+    runtime = _project_runtime_binding(request)
+    if runtime is None:
+        return {}
+    namespaces = runtime["namespaces"]
+    assert isinstance(namespaces, Mapping)
+    environment = {
+        "OPENBUILD_RUNTIME_NAMESPACE": str(runtime["namespace"]),
+        "OPENBUILD_RUNTIME_PORT_NAMESPACE": str(namespaces["port"]),
+        "OPENBUILD_TEST_DB_NAMESPACE": str(namespaces["test-db"]),
+        "COMPOSE_PROJECT_NAME": str(namespaces["compose"]),
+        "OPENBUILD_TEMP_NAMESPACE": str(namespaces["temp"]),
+        "OPENBUILD_BUILD_NAMESPACE": str(namespaces["build"]),
+    }
+    if runtime["port"] is not None:
+        environment["OPENBUILD_RUNTIME_PORT"] = str(runtime["port"])
+    return environment
+
+
+def release_project_lane_runtime(
+    request: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    runtime = _project_runtime_binding(request)
+    if runtime is None:
+        return None
+    project_lane = request.get("project_lane")
+    assert isinstance(project_lane, Mapping)
+    coordinator = _project_lane_coordinator(project_lane)
+    try:
+        return ProjectRuntimeCoordinator(
+            coordinator.store,
+            coordinator.anchor_id,
+        ).release(
+            str(runtime["job_id"]),
+            owner_digest=str(runtime["owner_digest"]),
+        )
+    except ProjectRuntimeError as exc:
+        raise RunnerError(
+            f"project lane runtime release failed closed: {exc}"
+        ) from exc
 
 
 def attach_project_lane_writer(request: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -1572,12 +1721,14 @@ def complete_project_lane_safe_stop(
     if intent.get("intent_id") != intent_id or intent.get("status") != "stopping":
         raise RunnerError("project lane safe-stop completion binding changed")
     try:
-        return coordinator.complete_safe_stop_rebind(
+        completed = coordinator.complete_safe_stop_rebind(
             str(intent["lane_id"]),
             intent_id=intent_id,
             recovery_checkpoint_digest=recovery_checkpoint_digest,
             preserved_changes=preserved_changes,
         )
+        release_project_lane_runtime(request)
+        return completed
     except (ProjectLaneError, ProjectStateError) as exc:
         raise RunnerError(f"project lane safe-stop completion failed closed: {exc}") from exc
 
@@ -1664,7 +1815,9 @@ def close_project_lane_writer(
         raise RunnerError("project lane request binding is malformed")
     coordinator = _project_lane_coordinator(project_lane)
     try:
-        return coordinator.close_terminal(str(project_lane["lane_id"]))
+        closed = coordinator.close_terminal(str(project_lane["lane_id"]))
+        release_project_lane_runtime(request)
+        return closed
     except (ProjectLaneError, ProjectStateError) as exc:
         raise RunnerError(f"project lane terminal close failed closed: {exc}") from exc
 
@@ -1673,17 +1826,23 @@ def finalize_project_lane_terminal(
     request: Mapping[str, Any],
     reason: str,
 ) -> dict[str, Any] | None:
-    verified = _verified_project_lane(request)
+    verified = _verified_project_lane(
+        request,
+        allow_completed_runtime_replay=True,
+    )
     if verified is None:
         return None
     coordinator, binding = verified
     try:
         lane = coordinator.lane_projection(str(binding["lane_id"]))
         if lane.get("state") == "closed":
+            release_project_lane_runtime(request)
             return lane
         if lane.get("state") not in {"cancelled", "quarantined"}:
             coordinator.cancel_or_crash(str(binding["lane_id"]), reason)
-        return coordinator.close_terminal(str(binding["lane_id"]))
+        closed = coordinator.close_terminal(str(binding["lane_id"]))
+        release_project_lane_runtime(request)
+        return closed
     except (ProjectLaneError, ProjectStateError) as exc:
         raise RunnerError(
             f"project lane terminal finalization failed closed: {exc}"
@@ -1693,12 +1852,19 @@ def finalize_project_lane_terminal(
 def complete_project_lane_writer(
     request: Mapping[str, Any],
 ) -> dict[str, Any] | None:
-    verified = _verified_project_lane(request)
+    verified = _verified_project_lane(
+        request,
+        allow_completed_runtime_replay=True,
+    )
     if verified is None:
         return None
     coordinator, binding = verified
     try:
-        return coordinator.record_successful_terminal(str(binding["lane_id"]))
+        completed = coordinator.record_successful_terminal(
+            str(binding["lane_id"]),
+        )
+        release_project_lane_runtime(request)
+        return completed
     except (ProjectLaneError, ProjectStateError) as exc:
         raise RunnerError(
             f"project lane successful terminal transition failed closed: {exc}"
@@ -1709,15 +1875,20 @@ def prepare_project_lane_recovery(
     request: Mapping[str, Any],
     checkpoint_digest: str,
 ) -> dict[str, Any] | None:
-    verified = _verified_project_lane(request)
+    verified = _verified_project_lane(
+        request,
+        allow_completed_runtime_replay=True,
+    )
     if verified is None:
         return None
     coordinator, binding = verified
     try:
-        return coordinator.record_recovery_ready(
+        ready = coordinator.record_recovery_ready(
             str(binding["lane_id"]),
             checkpoint_digest,
         )
+        release_project_lane_runtime(request)
+        return ready
     except (ProjectLaneError, ProjectStateError) as exc:
         raise RunnerError(
             f"project lane recovery transition failed closed: {exc}"
@@ -1886,9 +2057,13 @@ def build_codex_command(
 
 
 def scrub_api_credentials(environment: Mapping[str, str]) -> dict[str, str]:
-    """Force the child to reuse saved ChatGPT authentication, never an ambient API key."""
+    """Remove ambient credentials, provider redirects, and managed runtime state."""
 
-    blocked = API_CREDENTIALS | PROVIDER_ENVIRONMENT_OVERRIDES
+    blocked = (
+        API_CREDENTIALS
+        | PROVIDER_ENVIRONMENT_OVERRIDES
+        | _PROJECT_RUNTIME_ENVIRONMENT_KEYS
+    )
     return {key: value for key, value in environment.items() if key.upper() not in blocked}
 
 
@@ -4803,6 +4978,7 @@ def reconcile_implementation_registry(
             raise RunnerError(
                 "completed project lane safe-stop registry is not vacant"
             )
+        release_project_lane_runtime(request)
         materialize_project_lane_safe_stop_receipt(
             safe_stop_receipt_path,
             safe_stop_completion,
@@ -6184,6 +6360,7 @@ def authorize_recovery_run(args: argparse.Namespace) -> int:
     lease_id = validate_lease_id("openbuild_implementation_fast", args.lease_id)
     if lease_id is None:
         raise RunnerError("recovery target lease ID is required")
+    setattr(args, "_project_runtime_claim", run_dir.name)
     try:
         checkpoint = read_json(checkpoint_path)
         project_lane = resolve_project_lane_recovery_authorization(
@@ -6587,7 +6764,7 @@ def apply_preboundary_guardian_failure(
     return _spawn_worker_process(run_dir, runner_log, contained=False), "fallback"
 
 
-def start_run(args: argparse.Namespace) -> int:
+def _start_run(args: argparse.Namespace) -> int:
     repo = Path(args.repo).expanduser().resolve()
     prompt_file_value = getattr(args, "prompt_file", None)
     prompt_file = Path(prompt_file_value).expanduser() if prompt_file_value else None
@@ -6612,12 +6789,29 @@ def start_run(args: argparse.Namespace) -> int:
         getattr(args, "specification_revision", None),
         getattr(args, "recovery_target_milestone", None),
     )
+    run_dir = (
+        Path(args.run_dir).expanduser().resolve()
+        if args.run_dir
+        else default_run_dir().resolve()
+    )
+    setattr(args, "_project_runtime_claim", run_dir.name)
     project_lane = resolve_project_lane_start(
         args,
         agent_name=args.agent,
         repo=repo,
         allowed_files=allowed_files,
     )
+    if project_lane is not None:
+        setattr(
+            args,
+            "_project_lane_runtime_request",
+            {"project_lane": project_lane},
+        )
+        setattr(
+            args,
+            "_project_lane_runtime_release_owned",
+            getattr(args, "_project_runtime_claim_acquired", False) is True,
+        )
     registry = recovery_registry_for_agent(
         args.agent,
         repo,
@@ -6694,7 +6888,6 @@ def start_run(args: argparse.Namespace) -> int:
         )
     source_prompt = task_prompt.encode("utf-8")
 
-    run_dir = Path(args.run_dir).expanduser().resolve() if args.run_dir else default_run_dir().resolve()
     if run_dir.exists() and any(run_dir.iterdir()):
         raise RunnerError(f"run directory must be absent or empty: {run_dir}")
     ensure_private_run_dir(run_dir)
@@ -6792,6 +6985,11 @@ def start_run(args: argparse.Namespace) -> int:
         "recovery_target": False,
         "containment_plan": None,
         "project_lane": project_lane,
+        "project_runtime_claim": (
+            run_dir.name
+            if project_lane is not None
+            else None
+        ),
     }
 
     if registry is not None and registry_lease_id is not None:
@@ -6954,6 +7152,7 @@ def start_run(args: argparse.Namespace) -> int:
     launch_mode = "unstarted"
     fallback_bind_attempted = False
     fallback_bind_verified = False
+    setattr(args, "_project_lane_startup_cleanup", True)
     try:
         runner_log = open_private_binary(run_dir / "runner.log", append=True)
         try:
@@ -7313,7 +7512,48 @@ def start_run(args: argparse.Namespace) -> int:
                 raise RunnerError(
                     f"{exc}; startup stopped but private workspace reservation could not be released: {release_exc}"
                 ) from exc
+        if (
+            project_lane is not None
+            and getattr(args, "_project_lane_runtime_release_owned", False)
+        ):
+            try:
+                release_project_lane_runtime(request)
+            except RunnerError as release_exc:
+                raise RunnerError(
+                    f"{exc}; startup stopped but project runtime capacity was retained: "
+                    f"{release_exc}"
+                ) from exc
         raise RunnerError(f"{exc}; startup process tree stopped; artifacts: {run_dir}") from exc
+
+
+def start_run(args: argparse.Namespace) -> int:
+    """Release project runtime admission when pre-dispatch setup fails."""
+
+    setattr(args, "_project_lane_runtime_request", None)
+    setattr(args, "_project_lane_startup_cleanup", False)
+    setattr(args, "_project_runtime_claim_acquired", False)
+    setattr(args, "_project_lane_runtime_release_owned", False)
+    try:
+        return _start_run(args)
+    except BaseException as exc:
+        runtime_request = getattr(
+            args,
+            "_project_lane_runtime_request",
+            None,
+        )
+        if (
+            isinstance(runtime_request, Mapping)
+            and not getattr(args, "_project_lane_startup_cleanup", False)
+            and getattr(args, "_project_lane_runtime_release_owned", False)
+        ):
+            try:
+                release_project_lane_runtime(runtime_request)
+            except RunnerError as release_exc:
+                raise RunnerError(
+                    f"{exc}; pre-dispatch project runtime capacity was retained: "
+                    f"{release_exc}"
+                ) from exc
+        raise
 
 
 def communicate_after_activation(
@@ -7467,6 +7707,7 @@ def worker_run(run_dir: Path) -> int:
         task_prompt = read_prompt_snapshot(prompt_file, request["prompt_sha256"])
         prompt = effective_prompt(profile, request["task_name"], task_prompt).encode("utf-8")
         environment = scrub_api_credentials(os.environ)
+        environment.update(project_runtime_environment(request))
         validate_subscription_configuration(Path(request["codex_home"]), Path(request["repo"]))
         if os.name == "nt" and ACTIVE_WINDOWS_JOB is None and not contained_by_guardian:
             ACTIVE_WINDOWS_JOB = create_windows_kill_job()

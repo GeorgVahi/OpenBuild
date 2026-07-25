@@ -4,6 +4,22 @@ OpenBuild follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### 2.4.0-alpha.8
+
+#### Added
+
+- Added durable bounded runtime capacity with monotonic FIFO tickets and opaque per-lane namespaces for ports, test databases, Docker Compose, temporary files, and build output.
+- Added an authoritative privacy-safe project status projection for running, scope wait, integration wait, stale, blocked, and complete outcomes, including queue position, dependency, reason, transition, and next action.
+- Added deterministic ten-lane stress plus real two-lane guardian/worker coverage for capacity, scope, integration, crash/quarantine, and namespace behavior.
+
+#### Changed
+
+- Connected runtime admission and release to the project-lane runner lifecycle, including recovery, safe-stop replay, terminal replay, pre-dispatch failure, and successful integration completion.
+- Scrubbed all managed runtime environment keys before applying the verified lane binding so ambient ports or namespaces cannot bypass isolation.
+- Made equal-owner duplicate dispatches fail atomically at the durable runtime claim, preventing a rejected replay from releasing a live process's capacity slot or promoting a waiter early.
+- Preserved FIFO age across scope and capacity waits while processing dependency-unblocking integration through its own priority class.
+- Synchronized the manifest, changelog, README install pins, and M6 specification record for `2.4.0-alpha.8`; M7 migration, documentation, and the full package gate remain next.
+
 ### 2.4.0-alpha.7
 
 #### Added

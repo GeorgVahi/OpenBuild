@@ -31,6 +31,15 @@ MAX_JSON_BYTES = 256 * 1024
 _HEX_64 = frozenset("0123456789abcdef")
 _MILESTONE_ID = re.compile(r"[a-z][a-z0-9-]{0,62}\Z")
 _MILESTONE_STATES = frozenset({"ready", "waiting", "completed"})
+_RUNTIME_JOB_ID = re.compile(r"[a-z][a-z0-9-]{0,62}\Z")
+_RUNTIME_NAMESPACE = re.compile(r"ob-[a-z0-9-]{1,80}\Z")
+_RUNTIME_NAMESPACE_KINDS = (
+    "port",
+    "test-db",
+    "compose",
+    "temp",
+    "build",
+)
 _SPECIFICATION_REVISION = re.compile(r"[A-Za-z0-9_.:-]{1,256}\Z")
 _VERSION_TARGET = re.compile(
     r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
@@ -2370,6 +2379,7 @@ _INTEGRATION_INTENT_STATES = frozenset(
         "no-op",
     }
 )
+_INTEGRATION_QUEUE_CLASSES = frozenset({"ordinary", "dependency-unblocking"})
 _INTEGRATION_DIAGNOSTICS = frozenset(
     {
         "cas-race",
@@ -2975,11 +2985,13 @@ def _validate_integration_queue(
         "schema", "intent_id", "enqueue_generation", "status", "result",
         "admitted_tip", "ticket", "candidate_commit", "acceptance_id",
         "release_generation", "diagnostic", "version_finalization",
+        "queue_class",
     }
+    legacy_required = required - {"queue_class"}
     for raw in value:
         if (
             not isinstance(raw, dict)
-            or set(raw) != required
+            or (set(raw) != required and set(raw) != legacy_required)
             or raw.get("schema") != "project-integration-intent-v1"
             or not _is_hex_identifier(raw.get("intent_id"))
             or not isinstance(raw.get("enqueue_generation"), int)
@@ -2989,34 +3001,38 @@ def _validate_integration_queue(
             or not _GIT_OBJECT.fullmatch(str(raw.get("admitted_tip")))
         ):
             raise ProjectStateError("integration intent is invalid")
+        legacy = set(raw) == legacy_required
+        normalized = {**raw, "queue_class": raw.get("queue_class", "ordinary")}
+        if normalized["queue_class"] not in _INTEGRATION_QUEUE_CLASSES:
+            raise ProjectStateError("integration intent queue class is invalid")
         assert lane_session is not None
         result = _validate_integration_result(
-            raw["result"],
+            normalized["result"],
             lane_session=lane_session,
             lanes=lanes,
             scopes=scopes,
         )
-        if raw["ticket"] is not None and (
-            not isinstance(raw["ticket"], int) or raw["ticket"] < 1
+        if normalized["ticket"] is not None and (
+            not isinstance(normalized["ticket"], int) or normalized["ticket"] < 1
         ):
             raise ProjectStateError("integration prerelease ticket is invalid")
-        if raw["candidate_commit"] is not None and not _GIT_OBJECT.fullmatch(
-            str(raw["candidate_commit"]),
+        if normalized["candidate_commit"] is not None and not _GIT_OBJECT.fullmatch(
+            str(normalized["candidate_commit"]),
         ):
             raise ProjectStateError("integration candidate binding is invalid")
-        if raw["acceptance_id"] is not None and not _is_hex_identifier(
-            raw["acceptance_id"],
+        if normalized["acceptance_id"] is not None and not _is_hex_identifier(
+            normalized["acceptance_id"],
         ):
             raise ProjectStateError("integration acceptance binding is invalid")
-        if raw["release_generation"] is not None and (
-            not isinstance(raw["release_generation"], int)
-            or raw["release_generation"] < 1
-            or raw["release_generation"] > generation
+        if normalized["release_generation"] is not None and (
+            not isinstance(normalized["release_generation"], int)
+            or normalized["release_generation"] < 1
+            or normalized["release_generation"] > generation
         ):
             raise ProjectStateError("integration release generation is invalid")
-        diagnostic = raw["diagnostic"]
+        diagnostic = normalized["diagnostic"]
         version_finalization = _validate_version_finalization(
-            raw["version_finalization"]
+            normalized["version_finalization"]
         )
         if diagnostic is not None and (
             not isinstance(diagnostic, dict)
@@ -3025,47 +3041,53 @@ def _validate_integration_queue(
             or not _is_hex_identifier(diagnostic.get("digest"))
         ):
             raise ProjectStateError("integration diagnostic is invalid")
-        status = raw["status"]
+        status = normalized["status"]
         if status == "queued" and any(
-            raw[key] is not None
+            normalized[key] is not None
             for key in (
                 "ticket", "candidate_commit", "acceptance_id",
                 "release_generation", "diagnostic", "version_finalization",
             )
         ):
             raise ProjectStateError("queued integration intent is not immutable")
-        if status in {"integrating", "candidate", "validated", "cas-applied", "accepted", "released"} and raw["ticket"] is None:
+        if status in {"integrating", "candidate", "validated", "cas-applied", "accepted", "released"} and normalized["ticket"] is None:
             raise ProjectStateError("integration intent lacks a prerelease ticket")
-        if status in {"candidate", "validated", "cas-applied", "accepted", "released"} and raw["candidate_commit"] is None:
+        if status in {"candidate", "validated", "cas-applied", "accepted", "released"} and normalized["candidate_commit"] is None:
             raise ProjectStateError("integration intent lacks a candidate commit")
-        if status in {"accepted", "released"} and raw["acceptance_id"] is None:
+        if status in {"accepted", "released"} and normalized["acceptance_id"] is None:
             raise ProjectStateError("integration intent lacks acceptance")
-        if status == "released" and raw["release_generation"] is None:
+        if status == "released" and normalized["release_generation"] is None:
             raise ProjectStateError("integration intent lacks release evidence")
         if status in {"blocked", "stale"} and diagnostic is None:
             raise ProjectStateError("failed integration intent lacks a diagnostic")
         if status not in {"blocked", "stale"} and diagnostic is not None:
             raise ProjectStateError("successful integration intent has a diagnostic")
-        if version_finalization is not None and raw["ticket"] is None:
+        if version_finalization is not None and normalized["ticket"] is None:
             raise ProjectStateError(
                 "version finalization lacks an integration-order ticket"
             )
-        if raw["acceptance_id"] is not None and not any(
-            item.get("acceptance_id") == raw["acceptance_id"]
+        if normalized["acceptance_id"] is not None and not any(
+            item.get("acceptance_id") == normalized["acceptance_id"]
             and item.get("lane_id") == result["lane_id"]
-            and item.get("accepted_commit") == raw["candidate_commit"]
+            and item.get("accepted_commit") == normalized["candidate_commit"]
             for item in acceptances
         ):
             raise ProjectStateError("integration intent acceptance is not resident")
         stable = {
-            key: raw[key]
+            key: normalized[key]
             for key in ("schema", "enqueue_generation", "result", "admitted_tip")
         }
-        if raw["intent_id"] != hashlib.sha256(_canonical(stable)).hexdigest():
+        legacy_digest = hashlib.sha256(_canonical(stable)).hexdigest()
+        stable["queue_class"] = normalized["queue_class"]
+        current_digest = hashlib.sha256(_canonical(stable)).hexdigest()
+        accepted_digests = {current_digest}
+        if legacy or normalized["queue_class"] == "ordinary":
+            accepted_digests.add(legacy_digest)
+        if normalized["intent_id"] not in accepted_digests:
             raise ProjectStateError("integration intent digest is invalid")
         parsed.append(
             {
-                **raw,
+                **normalized,
                 "result": result,
                 "version_finalization": version_finalization,
             }
@@ -3099,6 +3121,228 @@ def _validate_integration_queue(
     ):
         raise ProjectStateError("lane has more than one live integration intent")
     return parsed
+
+
+def _runtime_namespace(
+    anchor_id: str,
+    job_id: str,
+    ticket: int,
+    kind: str | None = None,
+) -> str:
+    """Derive an opaque, deterministic namespace without leaking a job label."""
+
+    binding: dict[str, Any] = {
+        "anchor": anchor_id,
+        "job": job_id,
+        "ticket": ticket,
+    }
+    if kind is not None:
+        binding["kind"] = kind
+    digest = hashlib.sha256(_canonical(binding)).hexdigest()[:20]
+    return f"ob-{kind}-{digest}" if kind is not None else f"ob-{digest}"
+
+
+def _runtime_namespaces(anchor_id: str, job_id: str, ticket: int) -> dict[str, str]:
+    return {
+        kind: _runtime_namespace(anchor_id, job_id, ticket, kind)
+        for kind in _RUNTIME_NAMESPACE_KINDS
+    }
+
+
+def _validate_runtime(value: Any, *, anchor_id: str) -> dict[str, Any]:
+    """Validate the bounded runtime ledger, including completed ticket history."""
+
+    required = {"schema", "capacity", "next_ticket", "jobs", "completed"}
+    legacy_required = required - {"completed"}
+    if (
+        not isinstance(value, dict)
+        or (set(value) != required and set(value) != legacy_required)
+        or value.get("schema") != "project-runtime-v1"
+    ):
+        raise ProjectStateError("runtime state is invalid")
+    capacity = value.get("capacity")
+    next_ticket = value.get("next_ticket")
+    jobs = value.get("jobs")
+    legacy = set(value) == legacy_required
+    if (
+        not isinstance(capacity, int) or isinstance(capacity, bool)
+        or not 1 <= capacity <= 10
+        or not isinstance(next_ticket, int) or isinstance(next_ticket, bool)
+        or next_ticket < 1 or not isinstance(jobs, list)
+        or (not legacy and not isinstance(value.get("completed"), list))
+    ):
+        raise ProjectStateError("runtime capacity is invalid")
+    raw_jobs = jobs if legacy else [*jobs, *value["completed"]]
+    parsed: list[dict[str, Any]] = []
+    for raw in raw_jobs:
+        legacy_job = isinstance(raw, dict) and set(raw) == {
+            "job_id", "ticket", "status", "namespace", "port"
+        }
+        pre_lane_job = isinstance(raw, dict) and set(raw) == {
+            "job_id", "ticket", "status", "namespace", "namespaces", "port"
+        }
+        expected_fields = {
+            "job_id", "lane_id", "ticket", "status", "namespace",
+            "namespaces", "port",
+        }
+        claimed_fields = expected_fields | {"owner_digest"}
+        if (
+            not isinstance(raw, dict)
+            or (
+                not legacy_job
+                and not pre_lane_job
+                and frozenset(raw)
+                not in {frozenset(expected_fields), frozenset(claimed_fields)}
+            )
+        ):
+            raise ProjectStateError("runtime job is invalid")
+        job_id = raw.get("job_id")
+        lane_id = raw.get("lane_id", job_id)
+        ticket = raw.get("ticket")
+        status = raw.get("status")
+        port = raw.get("port")
+        owner_digest = raw.get("owner_digest")
+        if (
+            not isinstance(job_id, str)
+            or not _RUNTIME_JOB_ID.fullmatch(job_id)
+            or not isinstance(lane_id, str)
+            or not _LANE_ID.fullmatch(lane_id)
+            or not isinstance(ticket, int) or isinstance(ticket, bool)
+            or ticket < 1 or ticket >= next_ticket
+            or status not in (
+                {"running", "waiting-for-capacity"}
+                if legacy_job
+                else {"running", "waiting-for-capacity", "complete"}
+            )
+            or (port is not None and (
+                not isinstance(port, int) or isinstance(port, bool)
+                or not 1 <= port <= 65535
+            ))
+            or (
+                owner_digest is not None
+                and re.fullmatch(r"[0-9a-f]{64}", str(owner_digest)) is None
+            )
+        ):
+            raise ProjectStateError("runtime job is invalid")
+        namespace = _runtime_namespace(anchor_id, job_id, ticket)
+        namespaces = _runtime_namespaces(anchor_id, job_id, ticket)
+        if (
+            not _RUNTIME_NAMESPACE.fullmatch(namespace)
+            or any(
+                not _RUNTIME_NAMESPACE.fullmatch(value)
+                for value in namespaces.values()
+            )
+            or raw.get("namespace") != namespace
+            or (
+                not legacy_job
+                and raw.get("namespaces") != namespaces
+            )
+        ):
+            raise ProjectStateError("runtime namespace binding is invalid")
+        parsed.append(
+            {
+                "job_id": job_id,
+                "lane_id": lane_id,
+                "ticket": ticket,
+                "status": status,
+                "namespace": namespace,
+                "namespaces": namespaces,
+                "port": port,
+                "owner_digest": owner_digest,
+            }
+        )
+    if legacy:
+        if parsed != sorted(parsed, key=lambda item: item["ticket"]):
+            raise ProjectStateError("runtime tickets are not ordered")
+    else:
+        active_count = len(jobs)
+        if (
+            parsed[:active_count]
+            != sorted(parsed[:active_count], key=lambda item: item["ticket"])
+            or parsed[active_count:]
+            != sorted(parsed[active_count:], key=lambda item: item["ticket"])
+        ):
+            raise ProjectStateError("runtime tickets are not ordered")
+    ordered = sorted(parsed, key=lambda item: item["ticket"])
+    tickets = [item["ticket"] for item in ordered]
+    if tickets != list(range(1, next_ticket)):
+        raise ProjectStateError("runtime ticket history is invalid")
+    if len({item["job_id"] for item in parsed}) != len(parsed) or len(
+        {item["namespace"] for item in parsed}
+    ) != len(parsed) or len(
+        {
+            namespace
+            for item in parsed
+            for namespace in item["namespaces"].values()
+        }
+    ) != len(parsed) * len(_RUNTIME_NAMESPACE_KINDS):
+        raise ProjectStateError("runtime ownership is not unique")
+    active_lane_ids = [
+        item["lane_id"] for item in ordered if item["status"] != "complete"
+    ]
+    if len(active_lane_ids) != len(set(active_lane_ids)):
+        raise ProjectStateError("runtime lane has more than one active job")
+    running = [item for item in ordered if item["status"] == "running"]
+    if len(running) > capacity or len(
+        [item for item in running if item["port"] is not None]
+    ) != len({item["port"] for item in running if item["port"] is not None}):
+        raise ProjectStateError("runtime capacity ownership is invalid")
+    if not legacy:
+        active = [item for item in ordered if item["status"] != "complete"]
+        completed = [item for item in ordered if item["status"] == "complete"]
+        if (
+            any(item.get("status") == "complete" for item in value["jobs"])
+            or any(
+                item.get("status") != "complete"
+                for item in value["completed"]
+            )
+            or len(value["jobs"]) != len(active)
+            or len(value["completed"]) != len(completed)
+        ):
+            raise ProjectStateError("runtime completion partition is invalid")
+    if len(running) < capacity:
+        occupied_ports = {
+            item["port"] for item in running if item["port"] is not None
+        }
+        if any(
+            item["status"] == "waiting-for-capacity"
+            and (item["port"] is None or item["port"] not in occupied_ports)
+            for item in ordered
+        ):
+            raise ProjectStateError("runtime capacity fairness is invalid")
+    active = [item for item in ordered if item["status"] != "complete"]
+    completed = [item for item in ordered if item["status"] == "complete"]
+    return {
+        "schema": "project-runtime-v1",
+        "capacity": capacity,
+        "next_ticket": next_ticket,
+        "jobs": active,
+        "completed": completed,
+    }
+
+
+def _promote_runtime_jobs(runtime: dict[str, Any]) -> None:
+    """Fill bounded capacity with the oldest port-ready durable waiter."""
+
+    jobs = runtime["jobs"]
+    while sum(item["status"] == "running" for item in jobs) < runtime["capacity"]:
+        occupied_ports = {
+            item["port"]
+            for item in jobs
+            if item["status"] == "running" and item["port"] is not None
+        }
+        waiter = next(
+            (
+                item
+                for item in jobs
+                if item["status"] == "waiting-for-capacity"
+                and (item["port"] is None or item["port"] not in occupied_ports)
+            ),
+            None,
+        )
+        if waiter is None:
+            return
+        waiter["status"] = "running"
 
 
 def _validate_safe_stop_projection(
@@ -4145,6 +4389,18 @@ class ProjectStateStore:
                 "milestones": [],
                 "scopes": [],
                 "integration_acceptances": [],
+                "integration_queue": [],
+                "integration_next_ticket": 1,
+                "integration_checkout": None,
+                "integration_executor": None,
+                "integration_fence": None,
+                "runtime": {
+                    "schema": "project-runtime-v1",
+                    "capacity": 2,
+                    "next_ticket": 1,
+                    "jobs": [],
+                    "completed": [],
+                },
             }
             _write_exclusive_json(state_path, state)
             return self._read_state_strict(anchor_id)
@@ -4160,6 +4416,8 @@ class ProjectStateStore:
             "integration_executor",
             "integration_fence",
         }
+        runtime_required = integration_required | {"runtime"}
+        runtime_preintegration_required = required | {"runtime"}
         pre_executor_required = required | {
             "integration_queue",
             "integration_next_ticket",
@@ -4186,12 +4444,28 @@ class ProjectStateStore:
             state["integration_checkout"] = None
             state["integration_executor"] = None
             state["integration_fence"] = None
+        elif set(state) == runtime_preintegration_required:
+            state = dict(state)
+            state["integration_queue"] = []
+            state["integration_next_ticket"] = 1
+            state["integration_checkout"] = None
+            state["integration_executor"] = None
+            state["integration_fence"] = None
         elif set(state) == pre_executor_required:
             state = dict(state)
             state["integration_checkout"] = None
             state["integration_executor"] = None
             state["integration_fence"] = None
-        if set(state) != integration_required or state.get("schema") != SCHEMA_VERSION or not isinstance(state.get("generation"), int) or state["generation"] < 0 or state.get("epoch") != 0 or state.get("state") not in {"clean", "breach"}:
+        if set(state) == integration_required:
+            state = dict(state)
+            state["runtime"] = {
+                "schema": "project-runtime-v1",
+                "capacity": 2,
+                "next_ticket": 1,
+                "jobs": [],
+                "completed": [],
+            }
+        if set(state) != runtime_required or state.get("schema") != SCHEMA_VERSION or not isinstance(state.get("generation"), int) or state["generation"] < 0 or state.get("epoch") != 0 or state.get("state") not in {"clean", "breach"}:
             raise ProjectStateError("project state schema is invalid")
         if (state["state"] == "clean") != (state["registry"] == "B0") or (state["state"] == "breach") != (isinstance(state["incident_id"], str) and state["registry"] is None):
             raise ProjectStateError("clean/breach state split is invalid")
@@ -4268,6 +4542,9 @@ class ProjectStateStore:
             state["integration_fence"],
             queue=state["integration_queue"],
             generation=state["generation"],
+        )
+        state["runtime"] = _validate_runtime(
+            state["runtime"], anchor_id=anchor_id
         )
         if state["integration_fence"] is not None:
             fence_intent = state["integration_fence"]["intent_id"]
@@ -4546,6 +4823,34 @@ class ProjectStateStore:
             safe_stop_transition=None,
             safe_stop_intent_id=None,
             scope_release_acceptance_id=None,
+        )
+
+    def cancel_unclaimed_runtime_with_lane_state(
+        self,
+        anchor_id: str,
+        *,
+        expected_generation: int,
+        lanes: Sequence[Mapping[str, Any]],
+        scopes: Sequence[Mapping[str, Any]],
+        lane_id: str,
+        job_id: str,
+    ) -> dict[str, Any]:
+        """Atomically terminalize one lane and remove its unclaimed runtime job."""
+
+        return self._replace_lane_state(
+            anchor_id,
+            expected_generation=expected_generation,
+            lanes=lanes,
+            scopes=scopes,
+            protected_transition=None,
+            protected_adoption_receipt=None,
+            safe_stop_transition=None,
+            safe_stop_intent_id=None,
+            scope_release_acceptance_id=None,
+            runtime_cancellation={
+                "lane_id": lane_id,
+                "job_id": job_id,
+            },
         )
 
     def replace_milestone_state(
@@ -5704,6 +6009,7 @@ class ProjectStateStore:
         result_commit: str,
         admitted_tip: str,
         validation_argv: Sequence[str],
+        queue_class: str = "ordinary",
     ) -> dict[str, Any]:
         """Durably admit one exact terminal lane result to the M5 queue."""
 
@@ -5713,6 +6019,7 @@ class ProjectStateStore:
             or not _LANE_ID.fullmatch(lane_id)
             or not _GIT_OBJECT.fullmatch(result_commit)
             or not _GIT_OBJECT.fullmatch(admitted_tip)
+            or queue_class not in _INTEGRATION_QUEUE_CLASSES
         ):
             raise ProjectStateError("integration intent input is invalid")
         argv = _validate_integration_validation_argv(list(validation_argv))
@@ -5896,7 +6203,12 @@ class ProjectStateStore:
                     and item["status"] not in {"released", "blocked", "stale", "no-op"}
                 ]
                 if live:
-                    if len(live) == 1 and live[0]["result"]["result_commit"] == result_commit and live[0]["result"]["validation_argv"] == argv:
+                    if (
+                        len(live) == 1
+                        and live[0]["result"]["result_commit"] == result_commit
+                        and live[0]["result"]["validation_argv"] == argv
+                        and live[0]["queue_class"] == queue_class
+                    ):
                         return dict(live[0])
                     raise ProjectStateError("lane already has a live integration intent")
                 tuple_without_digest = {
@@ -5929,6 +6241,7 @@ class ProjectStateStore:
                     "enqueue_generation": enqueue_generation,
                     "result": result_tuple,
                     "admitted_tip": admitted_tip,
+                    "queue_class": queue_class,
                 }
                 intent = {
                     "schema": "project-integration-intent-v1",
@@ -5943,6 +6256,7 @@ class ProjectStateStore:
                     "release_generation": None,
                     "diagnostic": None,
                     "version_finalization": None,
+                    "queue_class": queue_class,
                 }
                 state["integration_queue"].append(intent)
                 state["integration_queue"].sort(
@@ -6386,7 +6700,16 @@ class ProjectStateStore:
                     ]
                     if not queued:
                         return None
-                    intent = queued[0]
+                    intent = min(
+                        queued,
+                        key=lambda item: (
+                            0
+                            if item["queue_class"] == "dependency-unblocking"
+                            else 1,
+                            item["enqueue_generation"],
+                            item["intent_id"],
+                        ),
+                    )
                 if (
                     version_request is not None
                     and intent["version_finalization"] is None
@@ -7359,6 +7682,7 @@ class ProjectStateStore:
         safe_stop_transition: str | None,
         safe_stop_intent_id: str | None,
         scope_release_acceptance_id: str | None,
+        runtime_cancellation: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         if protected_transition not in {None, "intent", "rollback", "adopt"}:
             raise ProjectStateError("protected transition is invalid")
@@ -7374,6 +7698,20 @@ class ProjectStateStore:
             raise ProjectStateError("safe-stop intent binding is invalid")
         if scope_release_acceptance_id is not None and not _is_hex_identifier(scope_release_acceptance_id):
             raise ProjectStateError("integration acceptance binding is invalid")
+        if (
+            runtime_cancellation is not None
+            and (
+                not isinstance(runtime_cancellation, Mapping)
+                or set(runtime_cancellation) != {"lane_id", "job_id"}
+                or not isinstance(runtime_cancellation.get("lane_id"), str)
+                or not _LANE_ID.fullmatch(runtime_cancellation["lane_id"])
+                or not isinstance(runtime_cancellation.get("job_id"), str)
+                or not _RUNTIME_JOB_ID.fullmatch(
+                    runtime_cancellation["job_id"]
+                )
+            )
+        ):
+            raise ProjectStateError("runtime cancellation binding is invalid")
         if not isinstance(expected_generation, int) or expected_generation < 0:
             raise ProjectStateError("expected project generation is invalid")
         validated_lanes = [_validate_lane_projection(value) for value in lanes]
@@ -7424,6 +7762,20 @@ class ProjectStateStore:
                     validated_lanes,
                     stale_acceptance_id=scope_release_acceptance_id,
                 )
+                claimed_runtime_lanes = {
+                    str(job["lane_id"])
+                    for job in state["runtime"]["jobs"]
+                    if job.get("owner_digest") is not None
+                }
+                if any(
+                    lane["lane_id"] in claimed_runtime_lanes
+                    and lane.get("state") in {"cancelled", "closed"}
+                    and lane.get("writer") is None
+                    for lane in validated_lanes
+                ):
+                    raise ProjectStateError(
+                        "active claimed runtime job blocks ordinary terminal transition"
+                    )
                 _validate_safe_stop_transition(
                     state["lanes"],
                     validated_lanes,
@@ -7442,6 +7794,69 @@ class ProjectStateStore:
                     for lane in validated_lanes
                 ):
                     raise ProjectStateError("project lane session identity drifted")
+                if runtime_cancellation is not None:
+                    lane_id = str(runtime_cancellation["lane_id"])
+                    job_id = str(runtime_cancellation["job_id"])
+                    old_lane = next(
+                        (
+                            item
+                            for item in state["lanes"]
+                            if item["lane_id"] == lane_id
+                        ),
+                        None,
+                    )
+                    new_lane = next(
+                        (
+                            item
+                            for item in validated_lanes
+                            if item["lane_id"] == lane_id
+                        ),
+                        None,
+                    )
+                    if (
+                        not isinstance(old_lane, Mapping)
+                        or not isinstance(new_lane, Mapping)
+                        or new_lane.get("state")
+                        not in {"cancelled", "closed"}
+                        or new_lane.get("writer") is not None
+                    ):
+                        raise ProjectStateError(
+                            "runtime cancellation lacks an unactivated terminal lane"
+                        )
+                    runtime = dict(state["runtime"])
+                    jobs = [dict(job) for job in runtime["jobs"]]
+                    completed = [
+                        dict(job) for job in runtime["completed"]
+                    ]
+                    target = next(
+                        (
+                            job
+                            for job in jobs
+                            if job["job_id"] == job_id
+                            and job["lane_id"] == lane_id
+                        ),
+                        None,
+                    )
+                    if (
+                        target is None
+                        or target.get("owner_digest") is not None
+                        or target.get("status")
+                        not in {"waiting-for-capacity", "running"}
+                    ):
+                        raise ProjectStateError(
+                            "runtime cancellation target is not unclaimed"
+                        )
+                    jobs.remove(target)
+                    target["status"] = "complete"
+                    completed.append(target)
+                    completed.sort(key=lambda item: item["ticket"])
+                    runtime["jobs"] = jobs
+                    runtime["completed"] = completed
+                    _promote_runtime_jobs(runtime)
+                    state["runtime"] = _validate_runtime(
+                        runtime,
+                        anchor_id=anchor_id,
+                    )
                 state["generation"] += 1
                 state["lanes"] = validated_lanes
                 state["scopes"] = validated_scopes
@@ -7486,6 +7901,191 @@ class ProjectStateStore:
         except ProjectStateError:
             return {"status": "indeterminate"}
         return {"status": "present", "anchor": {"anchor_id": anchor_id, "lock_id": manifest["lock_id"]}}
+
+    def configure_runtime_capacity(
+        self, anchor_id: str, *, expected_generation: int, capacity: int
+    ) -> dict[str, Any]:
+        if not isinstance(capacity, int) or isinstance(capacity, bool) or not 1 <= capacity <= 10:
+            raise ProjectStateError("runtime capacity must be from 1 through 10")
+        with _locked(self.lock_path):
+            self._manifest(anchor_id)
+            with _locked(self._anchor_state_lock_path(anchor_id)):
+                state = self._read_state_strict(anchor_id)
+                if state["generation"] != expected_generation:
+                    raise ProjectStateError("project generation changed")
+                runtime = dict(state["runtime"])
+                if runtime["capacity"] == capacity:
+                    return runtime
+                if sum(job["status"] == "running" for job in runtime["jobs"]) > capacity:
+                    raise ProjectStateError("runtime capacity cannot evict active jobs")
+                runtime["capacity"] = capacity
+                _promote_runtime_jobs(runtime)
+                state["runtime"] = _validate_runtime(
+                    runtime, anchor_id=anchor_id
+                )
+                state["generation"] += 1
+                _replace_json(self._state_path(anchor_id), state)
+                return dict(state["runtime"])
+
+    def request_runtime_slot(
+        self,
+        anchor_id: str,
+        *,
+        expected_generation: int,
+        job_id: str,
+        lane_id: str | None = None,
+        port: int | None = None,
+        owner_digest: str | None = None,
+    ) -> dict[str, Any]:
+        if not isinstance(job_id, str) or not _RUNTIME_JOB_ID.fullmatch(job_id):
+            raise ProjectStateError("runtime job identifier is invalid")
+        lane_id = job_id if lane_id is None else lane_id
+        if not isinstance(lane_id, str) or not _LANE_ID.fullmatch(lane_id):
+            raise ProjectStateError("runtime lane identifier is invalid")
+        if port is not None and (not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535):
+            raise ProjectStateError("runtime port is invalid")
+        if owner_digest is not None and re.fullmatch(
+            r"[0-9a-f]{64}",
+            owner_digest,
+        ) is None:
+            raise ProjectStateError("runtime owner digest is invalid")
+        with _locked(self.lock_path):
+            self._manifest(anchor_id)
+            with _locked(self._anchor_state_lock_path(anchor_id)):
+                state = self._read_state_strict(anchor_id)
+                if state["generation"] != expected_generation:
+                    raise ProjectStateError("project generation changed")
+                runtime = dict(state["runtime"])
+                jobs = [dict(job) for job in runtime["jobs"]]
+                completed = [dict(job) for job in runtime["completed"]]
+                existing = next(
+                    (job for job in [*jobs, *completed] if job["job_id"] == job_id),
+                    None,
+                )
+                if existing is not None:
+                    if (
+                        existing["lane_id"] != lane_id
+                        or existing["port"] != port
+                    ):
+                        raise ProjectStateError("runtime job replay binding changed")
+                    if (
+                        owner_digest is not None
+                        and existing["status"] == "running"
+                    ):
+                        current_owner = existing.get("owner_digest")
+                        if current_owner is not None:
+                            raise ProjectStateError(
+                                "runtime job is owned by another dispatch"
+                            )
+                        if current_owner is None:
+                            target = next(
+                                job
+                                for job in jobs
+                                if job["job_id"] == job_id
+                            )
+                            target["owner_digest"] = owner_digest
+                            runtime["jobs"] = jobs
+                            runtime["completed"] = completed
+                            state["runtime"] = _validate_runtime(
+                                runtime,
+                                anchor_id=anchor_id,
+                            )
+                            state["generation"] += 1
+                            _replace_json(self._state_path(anchor_id), state)
+                            result = dict(target)
+                            result["_claim_acquired"] = True
+                            return result
+                    result = dict(existing)
+                    result["_claim_acquired"] = False
+                    return result
+                ticket = runtime["next_ticket"]
+                job = {
+                    "job_id": job_id,
+                    "lane_id": lane_id,
+                    "ticket": ticket,
+                    "status": "waiting-for-capacity",
+                    "namespace": _runtime_namespace(anchor_id, job_id, ticket),
+                    "namespaces": _runtime_namespaces(anchor_id, job_id, ticket),
+                    "port": port,
+                    "owner_digest": None,
+                }
+                jobs.append(job)
+                runtime["next_ticket"] = ticket + 1
+                runtime["jobs"] = jobs
+                runtime["completed"] = completed
+                _promote_runtime_jobs(runtime)
+                if job["status"] == "running":
+                    job["owner_digest"] = owner_digest
+                state["runtime"] = _validate_runtime(
+                    runtime, anchor_id=anchor_id
+                )
+                state["generation"] += 1
+                _replace_json(self._state_path(anchor_id), state)
+                result = dict(job)
+                result["_claim_acquired"] = (
+                    owner_digest is not None
+                    and job["status"] == "running"
+                )
+                return result
+
+    def release_runtime_slot(
+        self,
+        anchor_id: str,
+        *,
+        expected_generation: int,
+        job_id: str,
+        owner_digest: str | None = None,
+    ) -> dict[str, Any]:
+        if owner_digest is not None and re.fullmatch(
+            r"[0-9a-f]{64}",
+            owner_digest,
+        ) is None:
+            raise ProjectStateError("runtime owner digest is invalid")
+        with _locked(self.lock_path):
+            self._manifest(anchor_id)
+            with _locked(self._anchor_state_lock_path(anchor_id)):
+                state = self._read_state_strict(anchor_id)
+                if state["generation"] != expected_generation:
+                    raise ProjectStateError("project generation changed")
+                runtime = dict(state["runtime"])
+                jobs = [dict(job) for job in runtime["jobs"]]
+                completed = [dict(job) for job in runtime["completed"]]
+                target = next((job for job in jobs if job["job_id"] == job_id), None)
+                already_completed = next(
+                    (job for job in completed if job["job_id"] == job_id), None
+                )
+                if target is None:
+                    if already_completed is not None:
+                        if (
+                            already_completed.get("owner_digest") is not None
+                            and already_completed.get("owner_digest")
+                            != owner_digest
+                        ):
+                            raise ProjectStateError(
+                                "runtime job is owned by another dispatch"
+                            )
+                        return dict(already_completed)
+                    raise ProjectStateError("runtime job is absent")
+                if (
+                    target.get("owner_digest") is not None
+                    and target.get("owner_digest") != owner_digest
+                ):
+                    raise ProjectStateError(
+                        "runtime job is owned by another dispatch"
+                    )
+                jobs.remove(target)
+                target["status"] = "complete"
+                completed.append(target)
+                completed.sort(key=lambda item: item["ticket"])
+                runtime["jobs"] = jobs
+                runtime["completed"] = completed
+                _promote_runtime_jobs(runtime)
+                state["runtime"] = _validate_runtime(
+                    runtime, anchor_id=anchor_id
+                )
+                state["generation"] += 1
+                _replace_json(self._state_path(anchor_id), state)
+                return dict(target)
 
     def read_state(self, anchor_id: str | None = None) -> dict[str, Any]:
         anchor = self.read_anchor(anchor_id)
