@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import concurrent.futures
+import hashlib
+import hmac
 import importlib.util
 import inspect
 import io
@@ -7529,7 +7531,7 @@ class CodexInvocationTests(unittest.TestCase):
             owner = agent_runner.RecoveryRegistry(repo, state_root=state_root)
             owner.initialize()
             agent_runner._prompt_snapshot_key(owner)
-            prompt_bytes = b"fault-bound prompt\n"
+            orphaned_snapshot_ids: set[str] = set()
             for fault_stage in (
                 "before-write",
                 "after-file-fsync",
@@ -7537,6 +7539,7 @@ class CodexInvocationTests(unittest.TestCase):
                 "before-metadata-barrier",
                 "after-metadata-barrier",
             ):
+                prompt_bytes = f"fault-bound prompt {fault_stage}\n".encode("utf-8")
                 faulting_owner = agent_runner.RecoveryRegistry(
                     repo, state_root=state_root, fault=fault_stage
                 )
@@ -7547,6 +7550,7 @@ class CodexInvocationTests(unittest.TestCase):
                         faulting_owner, prompt_bytes
                     )
                 binding = agent_runner.stage_owner_prompt_snapshot(owner, prompt_bytes)
+                orphaned_snapshot_ids.add(binding["prompt_snapshot_id"])
                 self.assertEqual(
                     agent_runner.read_owner_prompt_snapshot(
                         owner,
@@ -7555,7 +7559,9 @@ class CodexInvocationTests(unittest.TestCase):
                     ),
                     prompt_bytes.decode("utf-8"),
                 )
-            binding = agent_runner.stage_owner_prompt_snapshot(owner, prompt_bytes)
+            binding = agent_runner.stage_owner_prompt_snapshot(
+                owner, b"fault-bound final prompt\n"
+            )
 
             checkpoint = owner.capture_checkpoint(
                 source_id="fault-source",
@@ -7623,7 +7629,13 @@ class CodexInvocationTests(unittest.TestCase):
                 agent_runner.garbage_collect_owner_prompt_snapshots(
                     agent_runner.RecoveryRegistry(repo, state_root=state_root)
                 ),
-                set(),
+                orphaned_snapshot_ids,
+            )
+            self.assertTrue(
+                (
+                    agent_runner._prompt_snapshot_paths(owner)[1]
+                    / f"{binding['prompt_snapshot_id']}.blob"
+                ).is_file()
             )
 
     def test_api_credentials_are_removed_for_subscription_auth(self) -> None:
@@ -9425,6 +9437,284 @@ class RunEvidenceTests(unittest.TestCase):
 
             with self.assertRaisesRegex(agent_runner.RunnerError, "current-user-only DACL"):
                 agent_runner.ensure_private_run_dir(run_dir)
+
+
+class M7b1PromptSnapshotBoundaryTests(unittest.TestCase):
+    def test_managed_prompt_stage_rejects_missing_context_before_key_or_lock(self) -> None:
+        root = ROOT / f".m7b1-managed-prompt-{next(tempfile._get_candidate_names())}"
+        root.mkdir()
+        try:
+            repo = root / "repo"
+            repo.mkdir()
+            state_root = root / "state"
+            owner = agent_runner.RecoveryRegistry(
+                repo,
+                state_root=state_root,
+                managed_transition_required=True,
+            )
+            with self.assertRaisesRegex(
+                agent_runner.RunnerError,
+                "guarded transition context",
+            ):
+                agent_runner.stage_owner_prompt_snapshot(owner, b"prompt\n")
+            self.assertFalse(state_root.exists())
+        finally:
+            shutil.rmtree(root)
+
+    def test_prompt_reads_and_reference_collection_are_sink_free_when_absent(self) -> None:
+        root = ROOT / f".m7b1-prompt-{next(tempfile._get_candidate_names())}"
+        root.mkdir()
+        try:
+            repo = root / "repo"
+            repo.mkdir()
+            owner = agent_runner.RecoveryRegistry(
+                repo,
+                state_root=root / "missing-state",
+            )
+            state_root = root / "missing-state"
+            reads = (
+                lambda: agent_runner.read_owner_prompt_snapshot(
+                    owner,
+                    "1" * 64,
+                    "2" * 64,
+                ),
+                lambda: agent_runner.collect_owner_prompt_snapshot_references(owner),
+            )
+            for read in reads:
+                with self.subTest(read=read), mock.patch.object(
+                    agent_runner, "ensure_private_run_dir"
+                ) as mkdir_sink, mock.patch.object(
+                    agent_runner, "durable_write_private_bytes"
+                ) as write_sink, mock.patch.object(
+                    agent_runner.os, "chmod"
+                ) as chmod_sink, mock.patch.object(
+                    agent_runner.os, "fsync"
+                ) as fsync_sink, mock.patch.object(
+                    agent_runner.subprocess, "run"
+                ) as process_sink, mock.patch.object(
+                    Path, "unlink"
+                ) as unlink_sink:
+                    try:
+                        read()
+                    except (agent_runner.RunnerError, agent_runner.RecoveryStateError):
+                        pass
+                    self.assertFalse(state_root.exists())
+                    for sink in (
+                        mkdir_sink,
+                        write_sink,
+                        chmod_sink,
+                        fsync_sink,
+                        process_sink,
+                        unlink_sink,
+                    ):
+                        sink.assert_not_called()
+        finally:
+            shutil.rmtree(root)
+
+    def test_prompt_stage_aliases_share_one_two_ordinal_parent_context(self) -> None:
+        class Parent:
+            def __init__(self, transition_id, receipt, plan):
+                self.transition_id = transition_id
+                self.receipt = dict(receipt)
+                self.receipt["transition_id"] = transition_id
+                self.receipt["status"] = "issued"
+                self.plan = list(plan)
+                self.cursor = 0
+
+            def _reload(self):
+                return dict(self.receipt)
+
+            def run_sink(self, sink, action, *, visible=None):
+                if self.receipt["status"] == "complete":
+                    raise RuntimeError("transition receipt was already used")
+                if self.plan[self.cursor] != sink:
+                    raise RuntimeError("ordered sink was skipped or reordered")
+                self.receipt["status"] = "active"
+                result = action()
+                self.cursor += 1
+                return result
+
+            def complete(self):
+                if self.cursor != len(self.plan):
+                    raise RuntimeError("transition sink plan is incomplete")
+                self.receipt["status"] = "complete"
+
+        root = ROOT / f".m7b1-prompt-stage-{next(tempfile._get_candidate_names())}"
+        root.mkdir()
+        try:
+            repo = root / "repo"
+            repo.mkdir()
+            recovery_module = sys.modules["recovery_state"]
+            with mock.patch.object(
+                recovery_module, "_protect_windows_directory"
+            ), mock.patch.object(
+                recovery_module, "_windows_directory_is_private", return_value=True
+            ), mock.patch.object(
+                agent_runner, "windows_directory_is_private", return_value=True
+            ), mock.patch.object(
+                agent_runner,
+                "create_windows_private_directory",
+                side_effect=lambda path, _sid: path.mkdir(),
+            ):
+                owner = agent_runner.RecoveryRegistry(
+                    repo,
+                    state_root=root / "state",
+                )
+                key = b"k" * 32
+                with owner._lock(), mock.patch.object(
+                    agent_runner.secrets,
+                    "token_bytes",
+                    return_value=key,
+                ):
+                    self.assertEqual(agent_runner._prompt_snapshot_key(owner), key)
+                prompt = b"single cursor prompt\n"
+                prompt_sha256 = hashlib.sha256(prompt).hexdigest()
+                snapshot_id = hmac.new(
+                    key,
+                    agent_runner._PROMPT_SNAPSHOT_DOMAIN
+                    + bytes.fromhex(prompt_sha256),
+                    hashlib.sha256,
+                ).hexdigest()
+                attempt = "attempt-1"
+                receipt = {
+                    "project_id": "project-1",
+                    "epoch": 4,
+                    "attempt_id": attempt,
+                }
+                plan = [
+                    f"prompt-key:{owner.workspace_key}",
+                    f"prompt-blob:{owner.workspace_key}:{snapshot_id}",
+                ]
+                parent = Parent("O4.prompt-snapshot.stage", receipt, plan)
+                context = agent_runner.PromptSnapshotTransitionContext(
+                    parent,
+                    transition_id="O4.prompt-snapshot.stage",
+                    project_id="project-1",
+                    workspace_key=owner.workspace_key,
+                    epoch=4,
+                    attempt_id=attempt,
+                    authority_receipt={
+                        "receipt_id": "receipt-1",
+                        "attempt_id": attempt,
+                        "status": "issued",
+                        "active_incident": False,
+                        "channels": {
+                            name: {"verdict": "clean"}
+                            for name in ("C1", "C2", "C3", "C4", "C5")
+                        },
+                    },
+                )
+                binding = agent_runner.stage_owner_prompt_snapshot(
+                    owner,
+                    prompt,
+                    transition_context=context,
+                )
+                self.assertEqual(binding["prompt_snapshot_id"], snapshot_id)
+                self.assertEqual(parent.cursor, 2)
+                self.assertEqual(parent.receipt["status"], "complete")
+                bytes_before = (
+                    agent_runner._prompt_snapshot_paths(owner)[1]
+                    / f"{snapshot_id}.blob"
+                ).read_bytes()
+                with self.assertRaisesRegex(
+                    agent_runner.RunnerError,
+                    "binding changed",
+                ):
+                    agent_runner.stage_owner_prompt_snapshot(
+                        owner,
+                        prompt,
+                        transition_context=context,
+                    )
+                self.assertEqual(
+                    (
+                        agent_runner._prompt_snapshot_paths(owner)[1]
+                        / f"{snapshot_id}.blob"
+                    ).read_bytes(),
+                    bytes_before,
+                )
+        finally:
+            shutil.rmtree(root)
+
+
+class M7b1ManagedOperationFenceTests(unittest.TestCase):
+    @staticmethod
+    def authority(
+        transition_id: str,
+        *,
+        attempt_id: str = "attempt-1",
+        active_incident: bool = False,
+    ) -> dict[str, object]:
+        return {
+            "receipt_id": "receipt-1",
+            "project_id": "project-1",
+            "epoch": 7,
+            "registry_generation": 11,
+            "attempt_id": attempt_id,
+            "transition_id": transition_id,
+            "status": "issued",
+            "active_incident": active_incident,
+            "channels": {
+                name: {
+                    "channel_id": name,
+                    "verdict": "clean",
+                    "complete": True,
+                    "evidence_digest": str(index + 1) * 64,
+                }
+                for index, name in enumerate(("C1", "C2", "C3", "C4", "C5"))
+            },
+        }
+
+    def test_o6_commit_and_o7_publication_require_separate_clean_receipts(self) -> None:
+        effects: list[str] = []
+        commit = agent_runner.ManagedProjectOperationContext(
+            self.authority("O6.commit.release.create")
+        )
+        commit.run(
+            "O6.commit.release.create",
+            lambda: effects.append("commit"),
+        )
+        self.assertEqual(effects, ["commit"])
+        with self.assertRaisesRegex(agent_runner.RunnerError, "already consumed"):
+            commit.run(
+                "O7.git.push",
+                lambda: effects.append("push"),
+            )
+
+        publication = agent_runner.ManagedProjectOperationContext(
+            self.authority(
+                "O7.remote-smoke.start",
+                attempt_id="attempt-2",
+            )
+        )
+        publication.run(
+            "O7.remote-smoke.start",
+            lambda: effects.append("remote-smoke"),
+        )
+        self.assertEqual(effects, ["commit", "remote-smoke"])
+
+    def test_active_incident_blocks_commit_publication_and_remote_smoke_without_effect(self) -> None:
+        effects: list[str] = []
+        for transition_id in (
+            "O6.commit.release.create",
+            "O7.git.push",
+            "O7.remote-smoke.start",
+        ):
+            with self.subTest(transition_id=transition_id):
+                with self.assertRaisesRegex(
+                    agent_runner.RunnerError,
+                    "active incident",
+                ):
+                    agent_runner.ManagedProjectOperationContext(
+                        self.authority(
+                            transition_id,
+                            attempt_id=f"attempt-{transition_id}",
+                            active_incident=True,
+                        )
+                    ).run(
+                        transition_id,
+                        lambda: effects.append(transition_id),
+                    )
+        self.assertEqual(effects, [])
 
 
 if __name__ == "__main__":

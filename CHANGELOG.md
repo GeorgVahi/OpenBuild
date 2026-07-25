@@ -4,6 +4,21 @@ OpenBuild follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-07-25
+
+### Added
+
+- Added the M7 pre-repository migration owner: every explicit Build mode now verifies or initializes one owner-private I0 coordinator before repository discovery, continues the requested mode on success, and returns `setup-required` without silent repair for insecure or tampered state.
+- Added permanent-key bootstrap capabilities, immutable BA0 anchor publication and record lifecycle, clean B0 versus breach BS outcomes, guarded mutation/observation contexts, reader/writer-floor migration, protected legacy work, and replay-safe retirement/compaction coverage.
+- Added English/Russian parallel-lane diagrams and operator guidance for “parallel tasks, one writer per lane, one integrator,” legacy drain/rollback, conditional mixed-version safety, troubleshooting, and separate local/publication fences.
+
+### Changed
+
+- Connected project migration transition aliases to recovery ownership and the runner bridge while retaining one contained writer per lane and one project-wide integrator.
+- Made package validation statically derive exact registered `O1`–`O8` transition IDs from the closed migration registry, accept only proven structural references, and continue rejecting bare, lowercase, assignment, model-context, and unknown fixed-model controls.
+- Added the migration owner and its tests to the required package surface, and synchronized the manifest, CHANGELOG, both README install pins, Build contract, contributor guidance, and M7 specification record for `2.4.0`.
+- Preserved the packaged defaults, `codex-exec-explicit-model`, project → user → packaged precedence, and the ban on unknown-model agent routes; M8 publishes this immutable candidate as stable `2.4.0` and then verifies the public tag, remote install, automatic setup, and parallel-lane smoke.
+
 ### 2.4.0-alpha.8
 
 #### Added

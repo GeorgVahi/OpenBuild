@@ -24,7 +24,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Mapping, NamedTuple
+from typing import Any, Callable, Mapping, NamedTuple
 
 if sys.version_info < (3, 11):
     raise SystemExit("OpenBuild agent_runner.py requires Python 3.11 or newer")
@@ -49,8 +49,14 @@ from discovery_contract import (
     validate_discovery_result,
 )
 from project_lanes import ProjectLaneCoordinator, ProjectLaneError
+from project_migration import TRANSITION_IDS
 from project_runtime import ProjectRuntimeCoordinator, ProjectRuntimeError
-from project_state import ProjectStateError, ProjectStateStore
+from project_state import (
+    ProjectStateError,
+    ProjectStateStore,
+    _absolute_no_follow,
+    _assert_no_link_or_reparse_ancestors,
+)
 
 
 SUPPORTED_AGENTS = {
@@ -1163,6 +1169,13 @@ def recovery_registry_for_request(
     )
 
 
+def _project_lane_recovery_root(value: object) -> Path:
+    """Accept an absent registry root without resolving through an ancestor."""
+    root = _absolute_no_follow(Path(str(value)))
+    _assert_no_link_or_reparse_ancestors(root)
+    return root
+
+
 def _project_lane_coordinator(
     project_lane: Mapping[str, Any],
 ) -> ProjectLaneCoordinator:
@@ -1192,9 +1205,7 @@ def _project_lane_coordinator(
         coordinator_root = Path(
             str(project_lane["coordinator_root"])
         ).expanduser().resolve(strict=True)
-        recovery_root = Path(
-            str(project_lane["recovery_root"])
-        ).expanduser().resolve(strict=True)
+        recovery_root = _project_lane_recovery_root(project_lane["recovery_root"])
         lane_root = Path(str(project_lane["lane_root"])).expanduser().resolve(
             strict=True
         )
@@ -1253,9 +1264,7 @@ def resolve_project_lane_start(
             ),
             "anchor_id": str(values["project_anchor_id"]).strip(),
             "recovery_root": str(
-                Path(str(values["project_recovery_root"]))
-                .expanduser()
-                .resolve(strict=True)
+                _project_lane_recovery_root(values["project_recovery_root"])
             ),
             "lane_root": str(
                 Path(str(values["project_lane_root"]))
@@ -2187,6 +2196,171 @@ _PROMPT_SNAPSHOT_DOMAIN = b"openbuild-prompt-snapshot-v1\0"
 MAX_PROMPT_BYTES = 1024 * 1024
 
 
+class PromptSnapshotTransitionContext:
+    """One O4/O8 parent receipt shared by prompt entry-point aliases."""
+
+    def __init__(
+        self,
+        parent: Any,
+        *,
+        transition_id: str,
+        project_id: str,
+        workspace_key: str,
+        epoch: int,
+        attempt_id: str,
+        authority_receipt: Mapping[str, Any],
+    ) -> None:
+        if transition_id not in {
+            "O4.prompt-snapshot.stage",
+            "O8.prompt-snapshot.gc",
+        } or getattr(parent, "transition_id", None) != transition_id:
+            raise RunnerError("prompt transition context has a substituted ID")
+        if (
+            not isinstance(project_id, str)
+            or not project_id
+            or not re.fullmatch(r"[0-9a-f]{64}", workspace_key)
+            or type(epoch) is not int
+            or epoch < 0
+            or not isinstance(attempt_id, str)
+            or not attempt_id
+            or not isinstance(authority_receipt, Mapping)
+            or set(authority_receipt)
+            != {"receipt_id", "attempt_id", "status", "active_incident", "channels"}
+            or authority_receipt.get("attempt_id") != attempt_id
+            or authority_receipt.get("status") != "issued"
+            or authority_receipt.get("active_incident") is not False
+            or not isinstance(authority_receipt.get("channels"), Mapping)
+            or set(authority_receipt["channels"]) != {"C1", "C2", "C3", "C4", "C5"}
+            or any(
+                not isinstance(channel, Mapping)
+                or channel.get("verdict") != "clean"
+                for channel in authority_receipt["channels"].values()
+            )
+        ):
+            raise RunnerError("prompt transition lacks a fresh typed C1-C5 receipt")
+        self.parent = parent
+        self.transition_id = transition_id
+        self.project_id = project_id
+        self.workspace_key = workspace_key
+        self.epoch = epoch
+        self.attempt_id = attempt_id
+
+    def validate(self, registry: RecoveryRegistry) -> None:
+        try:
+            receipt = self.parent._reload()
+        except Exception as exc:
+            raise RunnerError("prompt transition parent receipt is invalid") from exc
+        if (
+            receipt.get("transition_id") != self.transition_id
+            or receipt.get("project_id") != self.project_id
+            or receipt.get("epoch") != self.epoch
+            or receipt.get("attempt_id") != self.attempt_id
+            or receipt.get("status") not in {"issued", "active"}
+            or registry.workspace_key != self.workspace_key
+        ):
+            raise RunnerError("prompt transition binding changed or crossed projects")
+
+    def run_sink(
+        self,
+        sink: str,
+        action: Callable[[], Any],
+        *,
+        visible: Callable[[], bool] | None = None,
+    ) -> Any:
+        try:
+            return self.parent.run_sink(sink, action, visible=visible)
+        except Exception as exc:
+            raise RunnerError("guarded prompt transition failed") from exc
+
+    def complete(self) -> None:
+        try:
+            self.parent.complete()
+        except Exception as exc:
+            raise RunnerError("prompt transition cursor is incomplete") from exc
+
+
+class ManagedProjectOperationContext:
+    """One-use ordinary O1-O8 gate bound to a fresh C1-C5 receipt."""
+
+    _RECEIPT_KEYS = {
+        "receipt_id",
+        "project_id",
+        "epoch",
+        "registry_generation",
+        "attempt_id",
+        "transition_id",
+        "status",
+        "active_incident",
+        "channels",
+    }
+    _CHANNEL_KEYS = {
+        "channel_id",
+        "verdict",
+        "complete",
+        "evidence_digest",
+    }
+
+    def __init__(self, authority_receipt: Mapping[str, Any]) -> None:
+        if (
+            not isinstance(authority_receipt, Mapping)
+            or set(authority_receipt) != self._RECEIPT_KEYS
+        ):
+            raise RunnerError("managed operation authority receipt is inexact")
+        receipt = dict(authority_receipt)
+        transition_id = receipt.get("transition_id")
+        if (
+            not isinstance(transition_id, str)
+            or transition_id not in TRANSITION_IDS
+            or not re.fullmatch(r"O[1-8]\..+", transition_id)
+        ):
+            raise RunnerError("managed operation transition ID is unknown")
+        for name in ("receipt_id", "project_id", "attempt_id"):
+            if not isinstance(receipt.get(name), str) or not receipt[name]:
+                raise RunnerError(f"managed operation {name} is invalid")
+        if (
+            type(receipt.get("epoch")) is not int
+            or receipt["epoch"] < 0
+            or type(receipt.get("registry_generation")) is not int
+            or receipt["registry_generation"] < 0
+            or receipt.get("status") != "issued"
+            or type(receipt.get("active_incident")) is not bool
+        ):
+            raise RunnerError("managed operation authority binding is invalid")
+        channels = receipt.get("channels")
+        if not isinstance(channels, Mapping) or set(channels) != {
+            "C1",
+            "C2",
+            "C3",
+            "C4",
+            "C5",
+        }:
+            raise RunnerError("managed operation lacks exact C1-C5 evidence")
+        for channel_id, channel in channels.items():
+            if (
+                not isinstance(channel, Mapping)
+                or set(channel) != self._CHANNEL_KEYS
+                or channel.get("channel_id") != channel_id
+                or channel.get("verdict") != "clean"
+                or channel.get("complete") is not True
+                or not isinstance(channel.get("evidence_digest"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", channel["evidence_digest"])
+            ):
+                raise RunnerError("managed operation C1-C5 evidence is not clean")
+        self.receipt = receipt
+        self.transition_id = transition_id
+        self._consumed = False
+
+    def run(self, transition_id: str, action: Callable[[], Any]) -> Any:
+        if self._consumed:
+            raise RunnerError("managed operation authority receipt was already consumed")
+        if transition_id != self.transition_id:
+            raise RunnerError("managed operation transition receipt was substituted")
+        if self.receipt["active_incident"]:
+            raise RunnerError("active incident blocks ordinary managed operation")
+        self._consumed = True
+        return action()
+
+
 def _is_component_descendant(path: Path, parent: Path) -> bool:
     """Component-aware containment; never use a string-prefix check."""
     try:
@@ -2201,25 +2375,79 @@ def _prompt_snapshot_paths(registry: RecoveryRegistry) -> tuple[Path, Path, Path
     return directory / "prompt-snapshot.key", directory / "prompt-snapshots", directory / "prompt-snapshots.lock"
 
 
-def _prompt_snapshot_key(registry: RecoveryRegistry) -> bytes:
+def _read_existing_private_prompt_bytes(path: Path, *, maximum: int) -> bytes:
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise RunnerError("owner prompt snapshot infrastructure is absent") from exc
+    reparse = int(getattr(before, "st_file_attributes", 0)) & int(
+        getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    )
+    if reparse or stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise RunnerError("owner prompt snapshot object is not a stable regular file")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise RunnerError("owner prompt snapshot object is unavailable") from exc
+    try:
+        opened = os.fstat(descriptor)
+        identity = lambda item: (
+            int(item.st_dev),
+            int(item.st_ino),
+            stat.S_IFMT(int(item.st_mode)),
+            int(item.st_size),
+            int(item.st_mtime_ns),
+        )
+        if identity(before) != identity(opened) or opened.st_size > maximum:
+            raise RunnerError("owner prompt snapshot identity drifted")
+        chunks: list[bytes] = []
+        size = 0
+        while True:
+            block = os.read(descriptor, min(64 * 1024, maximum + 1 - size))
+            if not block:
+                break
+            chunks.append(block)
+            size += len(block)
+            if size > maximum:
+                raise RunnerError("owner prompt snapshot exceeds its bound")
+        after_open = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    try:
+        after = path.lstat()
+    except OSError as exc:
+        raise RunnerError("owner prompt snapshot disappeared") from exc
+    if identity(before) != identity(after_open) or identity(after_open) != identity(after):
+        raise RunnerError("owner prompt snapshot identity drifted")
+    return b"".join(chunks)
+
+
+def _prompt_snapshot_key(
+    registry: RecoveryRegistry,
+    *,
+    create: bool = True,
+) -> bytes:
     key_path, _blobs, _lock = _prompt_snapshot_paths(registry)
-    ensure_private_run_dir(registry.directory)
-    if key_path.exists():
+    if key_path.is_file():
         try:
             if os.name != "nt":
-                metadata = key_path.stat()
+                metadata = key_path.lstat()
                 if (
                     not stat.S_ISREG(metadata.st_mode)
                     or (hasattr(os, "geteuid") and metadata.st_uid != os.geteuid())
                     or metadata.st_mode & 0o077
                 ):
                     raise RunnerError("owner prompt snapshot key is not private")
-            key = key_path.read_bytes()
+            key = _read_existing_private_prompt_bytes(key_path, maximum=32)
         except OSError as exc:
             raise RunnerError("owner prompt snapshot key is unavailable") from exc
         if len(key) != 32:
             raise RunnerError("owner prompt snapshot key is malformed")
         return key
+    if not create:
+        raise RunnerError("owner prompt snapshot key is absent")
+    ensure_private_run_dir(registry.directory)
     key = secrets.token_bytes(32)
     durable_write_private_bytes(key_path, key)
     return key
@@ -2497,6 +2725,8 @@ def acquire_owner_prompt_snapshot(
     repo: Path,
     prompt_source: Path,
     registry: RecoveryRegistry,
+    *,
+    transition_context: PromptSnapshotTransitionContext | None = None,
 ) -> dict[str, str]:
     """Import one stable, private external prompt before any lifecycle mutation."""
     repo = repo.expanduser().resolve(strict=True)
@@ -2504,12 +2734,58 @@ def acquire_owner_prompt_snapshot(
     if not source.is_file():
         raise RunnerError("prompt-identity-unstable; use owner-private staging API")
     source_prompt = _read_stable_external_prompt(repo, source)
-    return stage_owner_prompt_snapshot(registry, source_prompt)
+    return stage_owner_prompt_snapshot(
+        registry,
+        source_prompt,
+        transition_context=transition_context,
+    )
+
+
+def _prompt_blob_is_visible(
+    target: Path,
+    *,
+    prompt_sha256: str,
+) -> bool:
+    try:
+        return (
+            sha256_bytes(
+                _read_existing_private_prompt_bytes(
+                    target,
+                    maximum=MAX_PROMPT_BYTES,
+                )
+            )
+            == prompt_sha256
+        )
+    except RunnerError:
+        return False
+
+
+def _write_or_reuse_prompt_blob(
+    registry: RecoveryRegistry,
+    *,
+    target: Path,
+    source_prompt: bytes,
+    prompt_sha256: str,
+) -> None:
+    if target.exists():
+        if not _prompt_blob_is_visible(target, prompt_sha256=prompt_sha256):
+            raise RunnerError("owner prompt snapshot identity drifted")
+        return
+    try:
+        durable_write_private_bytes(
+            target,
+            source_prompt,
+            fault=getattr(registry, "fault", None),
+        )
+    except (OSError, RecoveryStateError) as exc:
+        raise RunnerError(f"durable prompt snapshot failed closed: {exc}") from exc
 
 
 def stage_owner_prompt_snapshot(
     registry: RecoveryRegistry,
     source_prompt: bytes,
+    *,
+    transition_context: PromptSnapshotTransitionContext | None = None,
 ) -> dict[str, str]:
     """Persist bounded UTF-8 bytes without putting prompt content on argv."""
     if not isinstance(source_prompt, bytes) or len(source_prompt) > MAX_PROMPT_BYTES:
@@ -2518,27 +2794,83 @@ def stage_owner_prompt_snapshot(
         source_prompt.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise RunnerError("prompt is not bounded UTF-8") from exc
+    if (
+        transition_context is None
+        and getattr(registry, "managed_transition_required", False)
+    ):
+        raise RunnerError(
+            "managed prompt staging requires a guarded transition context"
+        )
     prompt_sha256 = sha256_bytes(source_prompt)
+    if transition_context is not None:
+        if (
+            not isinstance(transition_context, PromptSnapshotTransitionContext)
+            or transition_context.transition_id != "O4.prompt-snapshot.stage"
+        ):
+            raise RunnerError("prompt stage transition context was substituted")
+        transition_context.validate(registry)
+        key_path, blobs, _lock_path = _prompt_snapshot_paths(registry)
+        key_sink = f"prompt-key:{registry.workspace_key}"
+
+        def create_or_read_key() -> bytes:
+            with registry._lock():
+                return _prompt_snapshot_key(registry, create=True)
+
+        key = transition_context.run_sink(
+            key_sink,
+            create_or_read_key,
+            visible=lambda: key_path.is_file()
+            and len(_read_existing_private_prompt_bytes(key_path, maximum=32)) == 32,
+        )
+        if isinstance(key, Mapping) and key.get("status") == "replayed-visible":
+            key = _read_existing_private_prompt_bytes(key_path, maximum=32)
+        if not isinstance(key, bytes) or len(key) != 32:
+            raise RunnerError("prompt snapshot key replay is invalid")
+        prompt_snapshot_id = hmac.new(
+            key,
+            _PROMPT_SNAPSHOT_DOMAIN + bytes.fromhex(prompt_sha256),
+            hashlib.sha256,
+        ).hexdigest()
+        target = blobs / f"{prompt_snapshot_id}.blob"
+        blob_sink = f"prompt-blob:{registry.workspace_key}:{prompt_snapshot_id}"
+
+        def write_blob() -> None:
+            with registry._lock():
+                ensure_private_run_dir(blobs)
+                _write_or_reuse_prompt_blob(
+                    registry,
+                    target=target,
+                    source_prompt=source_prompt,
+                    prompt_sha256=prompt_sha256,
+                )
+
+        transition_context.run_sink(
+            blob_sink,
+            write_blob,
+            visible=lambda: _prompt_blob_is_visible(
+                target,
+                prompt_sha256=prompt_sha256,
+            ),
+        )
+        transition_context.complete()
+        return {
+            "prompt_snapshot_id": prompt_snapshot_id,
+            "prompt_sha256": prompt_sha256,
+        }
     with registry._lock():
-        key = _prompt_snapshot_key(registry)
+        key = _prompt_snapshot_key(registry, create=True)
         _key_path, blobs, _lock_path = _prompt_snapshot_paths(registry)
         ensure_private_run_dir(blobs)
         prompt_snapshot_id = hmac.new(
             key, _PROMPT_SNAPSHOT_DOMAIN + bytes.fromhex(prompt_sha256), hashlib.sha256
         ).hexdigest()
         target = blobs / f"{prompt_snapshot_id}.blob"
-        if target.exists():
-            existing = target.read_bytes()
-            if sha256_bytes(existing) != prompt_sha256:
-                raise RunnerError("owner prompt snapshot identity drifted")
-        try:
-            durable_write_private_bytes(
-                target,
-                source_prompt,
-                fault=getattr(registry, "fault", None),
-            )
-        except (OSError, RecoveryStateError) as exc:
-            raise RunnerError(f"durable prompt snapshot failed closed: {exc}") from exc
+        _write_or_reuse_prompt_blob(
+            registry,
+            target=target,
+            source_prompt=source_prompt,
+            prompt_sha256=prompt_sha256,
+        )
         return {"prompt_snapshot_id": prompt_snapshot_id, "prompt_sha256": prompt_sha256}
 
 
@@ -2547,7 +2879,11 @@ def stage_prompt_run(args: argparse.Namespace) -> int:
     if not repo.is_dir():
         raise RunnerError(f"repository/workspace directory does not exist: {repo}")
     source_prompt = sys.stdin.buffer.read(MAX_PROMPT_BYTES + 1)
-    binding = stage_owner_prompt_snapshot(RecoveryRegistry(repo), source_prompt)
+    binding = stage_owner_prompt_snapshot(
+        RecoveryRegistry(repo),
+        source_prompt,
+        transition_context=getattr(args, "transition_context", None),
+    )
     print(json.dumps(binding, ensure_ascii=False, sort_keys=True))
     return 0
 
@@ -2561,8 +2897,8 @@ def read_owner_prompt_snapshot(
         r"[0-9a-f]{64}", prompt_sha256
     ):
         raise RunnerError("owner prompt snapshot binding is malformed")
-    with registry._lock():
-        key = _prompt_snapshot_key(registry)
+    with registry._read_lock(require_registry=False):
+        key = _prompt_snapshot_key(registry, create=False)
         expected_id = hmac.new(
             key, _PROMPT_SNAPSHOT_DOMAIN + bytes.fromhex(prompt_sha256), hashlib.sha256
         ).hexdigest()
@@ -2570,8 +2906,11 @@ def read_owner_prompt_snapshot(
             raise RunnerError("owner prompt snapshot binding drifted")
         _key_path, blobs, _lock_path = _prompt_snapshot_paths(registry)
         try:
-            prompt = (blobs / f"{prompt_snapshot_id}.blob").read_bytes()
-        except OSError as exc:
+            prompt = _read_existing_private_prompt_bytes(
+                blobs / f"{prompt_snapshot_id}.blob",
+                maximum=MAX_PROMPT_BYTES,
+            )
+        except (OSError, RunnerError) as exc:
             raise RunnerError("owner prompt snapshot is missing") from exc
     if sha256_bytes(prompt) != prompt_sha256:
         raise RunnerError("owner prompt snapshot digest drifted")
@@ -2583,7 +2922,7 @@ def read_owner_prompt_snapshot(
 
 def collect_owner_prompt_snapshot_references(registry: RecoveryRegistry) -> dict[str, set[str]]:
     """Classify private blobs without traversing run directories or public state."""
-    with registry._lock():
+    with registry._read_lock(require_registry=False):
         return _collect_owner_prompt_snapshot_references_locked(registry)
 
 
@@ -2639,7 +2978,9 @@ def _collect_owner_prompt_snapshot_references_locked(
     return states
 
 
-def garbage_collect_owner_prompt_snapshots(registry: RecoveryRegistry) -> set[str]:
+def _garbage_collect_owner_prompt_snapshots_unguarded(
+    registry: RecoveryRegistry,
+) -> set[str]:
     """Under the owner lock, remove only orphan/released blobs; run trees are excluded."""
     deleted: set[str] = set()
     with registry._lock():
@@ -2655,6 +2996,29 @@ def garbage_collect_owner_prompt_snapshots(registry: RecoveryRegistry) -> set[st
                 target.unlink()
                 deleted.add(snapshot_id)
     return deleted
+
+
+def garbage_collect_owner_prompt_snapshots(
+    registry: RecoveryRegistry,
+    *,
+    transition_context: PromptSnapshotTransitionContext | None = None,
+) -> set[str]:
+    if transition_context is None:
+        return _garbage_collect_owner_prompt_snapshots_unguarded(registry)
+    if (
+        not isinstance(transition_context, PromptSnapshotTransitionContext)
+        or transition_context.transition_id != "O8.prompt-snapshot.gc"
+    ):
+        raise RunnerError("prompt GC transition context was substituted")
+    transition_context.validate(registry)
+    result = transition_context.run_sink(
+        f"prompt-gc:{registry.workspace_key}",
+        lambda: _garbage_collect_owner_prompt_snapshots_unguarded(registry),
+    )
+    transition_context.complete()
+    if not isinstance(result, set):
+        raise RunnerError("prompt GC replay result is invalid")
+    return result
 
 
 def read_event_evidence(path: Path) -> dict[str, Any]:

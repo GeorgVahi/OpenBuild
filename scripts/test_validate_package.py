@@ -18,6 +18,7 @@ from validate_package import (
     PACKAGED_SEARCH_INSTRUCTIONS,
     PACKAGED_SEARCH_MODEL,
     PROJECT_LANES,
+    PROJECT_MIGRATION,
     PROJECT_SCOPES,
     PROJECT_STATE,
     REQUIRED,
@@ -32,7 +33,9 @@ from validate_package import (
     migration_supported_mappings,
     mask_packaged_model_references,
     mask_registered_transition_references,
+    parse_project_migration_transition_registry,
     parse_project_transition_registry,
+    registered_ordinary_transition_ids,
     validate_auto_routing_contract,
     validate_agent_usage_report_contract,
     validate_blindspot_contract,
@@ -156,6 +159,25 @@ class ProjectLaneRunnerPackageTests(unittest.TestCase):
 
 
 class TransitionTokenValidatorTests(unittest.TestCase):
+    def test_migration_registry_is_derived_statically_and_exactly(self) -> None:
+        self.assertIn(PROJECT_MIGRATION, REQUIRED)
+        entries = parse_project_migration_transition_registry(
+            PROJECT_MIGRATION.read_text(encoding="utf-8")
+        )
+        ordinary = registered_ordinary_transition_ids(entries)
+        self.assertIn("O1.session.attach", ordinary)
+        self.assertIn("O8.worktree.cleanup", ordinary)
+        self.assertNotIn("S1.incident.materialize", ordinary)
+
+    def test_migration_registry_rejects_non_literal_construction(self) -> None:
+        source = PROJECT_MIGRATION.read_text(encoding="utf-8").replace(
+            '_record("O1.epoch.activate", "ordinary")',
+            '_record(dynamic_transition_id, "ordinary")',
+            1,
+        )
+        with self.assertRaisesRegex(ValueError, "closed literal data"):
+            parse_project_migration_transition_registry(source)
+
     def test_project_state_is_required_and_registry_is_static_data(self) -> None:
         self.assertIn(PROJECT_STATE, REQUIRED)
         entries = parse_project_transition_registry(PROJECT_STATE.read_text(encoding="utf-8"))

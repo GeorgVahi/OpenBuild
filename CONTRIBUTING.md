@@ -11,6 +11,16 @@ OpenBuild accepts focused changes against `main`. Keep the public plugin self-co
 5. Run the contributor checks below; maintainers perform the additional Codex-specific checks before merge or release.
 6. Use a fresh read-only reviewer for non-trivial changes and fix confirmed findings before committing.
 
+## Parallel lanes and migration contract
+
+The project execution model is “parallel tasks, one writer per lane, one integrator.” Keep each task lane in its registered worktree and hard scope, never add a second writer to a lane, and leave commits, integration, version tickets, tags, and publication to the root owner. Runtime namespaces for ports, test databases, Docker Compose, temporary files, and build output must remain lane-specific.
+
+Every explicit Build mode must run `scripts/project_migration.py <mode>` before its first repository read. Missing I0 setup is automatic; insecure, tampered, linked, or ambiguous setup returns `setup-required` and must not be silently repaired. The standard plugin install commands have no lifecycle hook and documentation must not add a separate mandatory setup step.
+
+Migration from a legacy client requires a one-time drain/update and disabling archived ordinary entry points. Treat an active legacy or unregistered worktree as protected external work until vacancy is proven. The guarantee is conditional because an archived binary cannot be excluded atomically: late legacy activity or incomplete evidence must preserve work, create a global-integrity incident, and block integration, commits, and publication until exact reconciliation. Retire or roll back a registry only after it is vacant; never lower reader/writer floors around active state.
+
+Changes to project coordination must preserve the permanent coordinator key and immutable anchor-lock identity, clean B0 versus breach BS separation, generation/attempt-bound transition receipts, sink-free read contexts, and separate `O6` local commit versus `O7` external publication fences. Update both READMEs, diagrams, migration/troubleshooting guidance, package fixtures, and version-matched release notes together.
+
 ## Versioning policy
 
 OpenBuild follows [Semantic Versioning](https://semver.org/). The authoritative version source is `plugins/openbuild/.codex-plugin/plugin.json`.

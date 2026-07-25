@@ -24,6 +24,7 @@ RECOVERY_STATE = SKILL / "scripts" / "recovery_state.py"
 MODEL_MAP_RESOLVER = SKILL / "scripts" / "model_map.py"
 DISCOVERY_CONTRACT = SKILL / "scripts" / "discovery_contract.py"
 PROJECT_STATE = SKILL / "scripts" / "project_state.py"
+PROJECT_MIGRATION = SKILL / "scripts" / "project_migration.py"
 PROJECT_LANES = SKILL / "scripts" / "project_lanes.py"
 PROJECT_SCOPES = SKILL / "scripts" / "project_scopes.py"
 PACKAGED_MODEL_MAP = SKILL / "profiles" / "openbuild_model_map.toml"
@@ -99,6 +100,7 @@ REQUIRED = [
     MODEL_MAP_RESOLVER,
     DISCOVERY_CONTRACT,
     PROJECT_STATE,
+    PROJECT_MIGRATION,
     PROJECT_LANES,
     PROJECT_SCOPES,
     PACKAGED_MODEL_MAP,
@@ -111,6 +113,7 @@ REQUIRED = [
     ROOT / "scripts" / "test_model_map.py",
     ROOT / "scripts" / "test_discovery_contract.py",
     ROOT / "scripts" / "test_project_lanes.py",
+    ROOT / "scripts" / "test_project_migration.py",
 ]
 
 TEXT_SUFFIXES = {".md", ".json", ".yaml", ".yml", ".toml", ".py"}
@@ -4524,6 +4527,158 @@ def public_text_files() -> list[Path]:
     return result
 
 
+def parse_project_migration_transition_registry(source: str) -> list[dict[str, object]]:
+    """Statically evaluate the closed migration transition-table construction.
+
+    This deliberately understands only the small, data-only AST vocabulary used
+    by ``project_migration.py``.  It never imports the migration owner or
+    evaluates arbitrary Python; a new construction form is a validation error.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as exc:
+        raise ValueError("project migration transition registry is not parseable") from exc
+
+    environment: dict[str, object] = {}
+
+    def value(node: ast.AST) -> object:
+        if isinstance(node, ast.Constant) and isinstance(node.value, (str, bool, int)):
+            return node.value
+        if isinstance(node, (ast.List, ast.Tuple)):
+            return [value(item) for item in node.elts]
+        if isinstance(node, ast.Dict):
+            return {str(value(key)): value(item) for key, item in zip(node.keys, node.values) if key is not None}
+        if isinstance(node, ast.Name) and node.id in environment:
+            return environment[node.id]
+        if isinstance(node, ast.JoinedStr):
+            parts: list[str] = []
+            for item in node.values:
+                if isinstance(item, ast.Constant) and isinstance(item.value, str):
+                    parts.append(item.value)
+                elif isinstance(item, ast.FormattedValue):
+                    rendered = value(item.value)
+                    if item.conversion not in (-1, 115) or item.format_spec is not None:
+                        raise ValueError("project migration transition registry uses unsupported formatting")
+                    parts.append(str(rendered))
+                else:
+                    raise ValueError("project migration transition registry has a non-literal f-string")
+            return "".join(parts)
+        if isinstance(node, ast.ListComp):
+            if len(node.generators) != 1 or node.generators[0].ifs or node.generators[0].is_async:
+                raise ValueError("project migration transition registry has an unsupported comprehension")
+            generator = node.generators[0]
+            if not isinstance(generator.target, ast.Name):
+                raise ValueError("project migration transition registry has an unsupported comprehension target")
+            items = value(generator.iter)
+            if not isinstance(items, list):
+                raise ValueError("project migration transition registry comprehension is not finite data")
+            result = []
+            for item in items:
+                environment[generator.target.id] = item
+                result.append(value(node.elt))
+            return result
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            arguments = [value(argument) for argument in node.args]
+            if (
+                node.func.id == "_record"
+                and len(arguments) == 2
+                and not any(keyword.arg not in {"transition_class", "test_only"} for keyword in node.keywords)
+                and all(isinstance(item, str) for item in arguments)
+            ):
+                return {"id": arguments[0], "family": arguments[1]}
+            if node.func.id == "_expanded" and len(arguments) == 4:
+                prefix, middle, actions, family = arguments
+                if all(isinstance(item, str) for item in (prefix, middle, family)) and isinstance(actions, list) and all(isinstance(item, str) for item in actions):
+                    return [{"id": f"{prefix}.{middle}.{action}", "family": family} for action in actions]
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "items" and not node.args:
+            mapping = value(node.func.value)
+            if isinstance(mapping, dict):
+                return [list(item) for item in mapping.items()]
+        raise ValueError("project migration transition registry is not closed literal data")
+
+    def assign(target: ast.AST, result: object) -> None:
+        if isinstance(target, ast.Name):
+            environment[target.id] = result
+            return
+        if isinstance(target, (ast.Tuple, ast.List)) and isinstance(result, list) and len(target.elts) == len(result):
+            for nested, item in zip(target.elts, result):
+                assign(nested, item)
+            return
+        raise ValueError("project migration transition registry has an unsupported assignment")
+
+    def statements(nodes: list[ast.stmt]) -> None:
+        for node in nodes:
+            if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                names = {target.id for target in targets if isinstance(target, ast.Name)}
+                if "TRANSITION_REGISTRY" in names:
+                    return
+                if not names & {"_TRANSITION_DATA", "_O4_IDS", "_O8_IDS"}:
+                    continue
+                result = value(node.value)
+                for target in targets:
+                    assign(target, result)
+            elif isinstance(node, ast.AugAssign) and isinstance(node.op, ast.Add) and isinstance(node.target, ast.Name):
+                current = environment.get(node.target.id)
+                addition = value(node.value)
+                if not isinstance(current, list) or not isinstance(addition, list):
+                    raise ValueError("project migration transition registry has a non-list extension")
+                environment[node.target.id] = [*current, *addition]
+            elif isinstance(node, ast.For):
+                if not any(
+                    isinstance(item, ast.AugAssign)
+                    and isinstance(item.target, ast.Name)
+                    and item.target.id == "_TRANSITION_DATA"
+                    for item in node.body
+                ):
+                    continue
+                items = value(node.iter)
+                if not isinstance(items, list):
+                    raise ValueError("project migration transition registry loop is not finite data")
+                for item in items:
+                    assign(node.target, item)
+                    statements(node.body)
+
+    statements(tree.body)
+    data = environment.get("_TRANSITION_DATA")
+    if not isinstance(data, list) or not all(isinstance(entry, dict) for entry in data):
+        raise ValueError("project migration transition registry literal is missing")
+    entries = [dict(entry) for entry in data]
+    publication = next(
+        (
+            node.value
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "TRANSITION_REGISTRY" for target in node.targets)
+        ),
+        None,
+    )
+    if not (
+        isinstance(publication, ast.Call)
+        and isinstance(publication.func, ast.Name)
+        and publication.func.id == "tuple"
+        and len(publication.args) == 1
+        and isinstance(publication.args[0], ast.GeneratorExp)
+        and len(publication.args[0].generators) == 1
+        and isinstance(publication.args[0].generators[0].iter, ast.Name)
+        and publication.args[0].generators[0].iter.id == "_TRANSITION_DATA"
+    ):
+        raise ValueError("project migration transition registry publication is missing")
+    return entries
+
+
+def registered_ordinary_transition_ids(entries: list[dict[str, object]]) -> set[str]:
+    """Return the exact ordinary IDs from a validated migration registry."""
+    ordinary = {
+        entry["id"]
+        for entry in entries
+        if entry.get("family") == "ordinary" and isinstance(entry.get("id"), str)
+    }
+    if not ordinary or any(not re.fullmatch(r"O[1-8](?:\.[A-Za-z0-9-]+)+", item) for item in ordinary):
+        raise ValueError("project migration ordinary transition IDs are not exact")
+    return ordinary
+
+
 def parse_project_transition_registry(source: str) -> list[dict[str, object]]:
     """Read the literal R-031 registry without importing its state owner."""
     try:
@@ -4613,13 +4768,14 @@ def mask_registered_transition_references(
     registered_full_ids: set[str],
     *,
     registry_table: bool = False,
+    registry_construction: bool = False,
 ) -> str:
-    """Mask only structural transition notation before the fixed-model scan.
+    """Mask only exact registered IDs before the fixed-model scan.
 
     In particular, a model assignment is never exempt, even if it happens to
-    contain a registered transition string.  Ordinary identifiers are exempt
-    only in code spans, transition-table cells, the documented closed ordinary
-    range, or the literal registry ``short_id`` column.
+    contain a registered transition string. Bare and assignment-context short
+    tokens remain visible; code/table notation and the proven registry builder
+    are the only closed-class short-token exceptions.
     """
     lines: list[str] = []
     for line in text.splitlines(keepends=True):
@@ -4637,6 +4793,11 @@ def mask_registered_transition_references(
             masked,
         )
         masked = re.sub(
+            rf"{_ORDINARY_TRANSITION_TOKEN}/{_ORDINARY_TRANSITION_TOKEN}",
+            "ordinary-transition-classes",
+            masked,
+        )
+        masked = re.sub(
             rf"\b{re.escape(_ORDINARY_TRANSITION_PREFIX)}[1]\s*[-–—]\s*"
             rf"{re.escape(_ORDINARY_TRANSITION_PREFIX)}[8]\b",
             "ordinary-transition-range",
@@ -4647,6 +4808,12 @@ def mask_registered_transition_references(
                 r"((?:[\"']short_id[\"'])\s*:\s*[\"'])"
                 + re.escape(_ORDINARY_TRANSITION_PREFIX)
                 + r"[1-8]([\"'])",
+                r"\1ordinary-transition\2",
+                masked,
+            )
+        if registry_construction:
+            masked = re.sub(
+                rf"([\"']){_ORDINARY_TRANSITION_TOKEN}([\"'])",
                 r"\1ordinary-transition\2",
                 masked,
             )
@@ -5555,6 +5722,10 @@ def main() -> int:
         "model_map.py resolve --use-case implementation",
         "--soft-timeout-exit-zero",
         "then `90`, then `120`",
+        "scripts/project_migration.py <mode>",
+        "before the first repository path",
+        "`setup-required`",
+        "Continue the originally requested mode",
     ]
     for token in required_skill_tokens:
         if token not in skill_text:
@@ -5780,6 +5951,10 @@ def main() -> int:
         "$openbuild:build",
         "codex exec",
         "CONTRIBUTING.md",
+        "parallel tasks, one writer per lane, one integrator",
+        "`setup-required`",
+        "`O6`",
+        "`O7`",
     ]
     for token in required_docs_tokens:
         if token not in readme:
@@ -5791,6 +5966,10 @@ def main() -> int:
         ("## Requirements", "## Требования"),
         ("## Install or update", "## Установка или обновление"),
         ("## Usage", "## Использование"),
+        (
+            "## Parallel task lanes and automatic setup",
+            "## Параллельные task lanes и автоматический setup",
+        ),
         ("## Exact model-routed agents", "## Агенты с точным выбором модели"),
         ("## Progressive review", "## Progressive review"),
         ("## Repository and Git behavior", "## Репозиторий и Git"),
@@ -5865,6 +6044,10 @@ def main() -> int:
         "prerelease counter",
         "Every OpenBuild commit",
         "immutable",
+        "parallel tasks, one writer per lane, one integrator",
+        "setup-required",
+        "`O6`",
+        "`O7`",
     ]:
         if token not in contributing:
             fail(errors, f"CONTRIBUTING.md: missing versioning contract {token}")
@@ -5901,11 +6084,21 @@ def main() -> int:
         fail(errors, f"project_state.py: {exc}")
         transition_entries = []
     errors.extend(validate_project_transition_registry(transition_entries))
-    registered_transition_ids = {
+    migration_text = read_text(PROJECT_MIGRATION, errors)
+    try:
+        registered_transition_ids = registered_ordinary_transition_ids(
+            parse_project_migration_transition_registry(migration_text)
+        )
+    except ValueError as exc:
+        fail(errors, f"project_migration.py: {exc}")
+        registered_transition_ids = set()
+    # The predecessor registry remains a static package contract while the
+    # migration owner is introduced; its exact IDs are not model identifiers.
+    registered_transition_ids.update(
         entry["id"]
         for entry in transition_entries
         if isinstance(entry.get("id"), str)
-    }
+    )
     active_model_assignment = re.compile(
         r'''(?im)^\s*["']?(?:model|model_id)["']?\s*[:=]\s*["'](?![<{])([^"']+)["']'''
     )
@@ -5920,6 +6113,7 @@ def main() -> int:
             model_scan_text,
             registered_transition_ids,
             registry_table=path == PROJECT_STATE,
+            registry_construction=path == PROJECT_MIGRATION,
         )
         if fixed_model.search(model_scan_text):
             fail(errors, f"{relative}: fixed model slug is not allowed")

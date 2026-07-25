@@ -8,6 +8,7 @@ returned opaque checkpoint/grant records into Build traces.
 from __future__ import annotations
 
 import copy
+import functools
 import hashlib
 import hmac
 import json
@@ -21,7 +22,23 @@ import time
 import unicodedata
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator, Mapping, Sequence
+from typing import Any, Callable, Iterator, Mapping, Sequence
+
+
+_SCRIPT_DIRECTORY = str(Path(__file__).resolve().parent)
+if _SCRIPT_DIRECTORY not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIRECTORY)
+
+_TRANSITION_ALIASES_CACHE: Mapping[str, tuple[str, ...]] | None = None
+
+
+def _transition_aliases() -> Mapping[str, tuple[str, ...]]:
+    global _TRANSITION_ALIASES_CACHE
+    if _TRANSITION_ALIASES_CACHE is None:
+        from project_migration import TRANSITION_ALIASES
+
+        _TRANSITION_ALIASES_CACHE = TRANSITION_ALIASES
+    return _TRANSITION_ALIASES_CACHE
 
 
 REGISTRY_SCHEMA = 1
@@ -68,6 +85,233 @@ _DOMAIN_POST_COMMIT_AUTHORIZATION = b"openbuild-post-commit-root-completion-auth
 
 class RecoveryStateError(RuntimeError):
     """A recovery invariant failed; callers must not activate a writer."""
+
+
+class RecoveryTransitionContext:
+    """Exact recovery binding around one M7a guarded transition context."""
+
+    _ORDINARY_KEYS = {
+        "project_id",
+        "common_dir_identity",
+        "epoch",
+        "authority_receipt",
+        "target_registry_key",
+        "target_registry_generation",
+        "attempt_id",
+    }
+    _INCIDENT_KEYS = {
+        "project_id",
+        "common_dir_identity",
+        "epoch",
+        "incident_id",
+        "incident_generation",
+        "target_registry_key",
+        "target_registry_generation",
+        "attempt_id",
+    }
+    _BOOTSTRAP_KEYS = {
+        "project_id",
+        "common_dir_identity",
+        "prospective_epoch",
+        "bs_generation",
+        "bs_attempt",
+        "incident_id",
+        "target_registry_key",
+        "target_registry_generation",
+        "lease_id",
+        "run_id",
+        "source_state_id",
+        "grant_id",
+        "e_row",
+        "target_result_generation",
+    }
+
+    def __init__(
+        self,
+        parent: Any,
+        *,
+        entry_point: str,
+        binding: Mapping[str, Any],
+    ) -> None:
+        aliases = _transition_aliases().get(entry_point)
+        transition_id = getattr(parent, "transition_id", None)
+        if aliases is None or transition_id not in aliases:
+            raise RecoveryStateError("recovery transition alias is unknown or substituted")
+        self.parent = parent
+        self.entry_point = entry_point
+        self.transition_id = str(transition_id)
+        self.binding = dict(binding)
+        self._target_generation_validated = False
+        self._validate_shape()
+        _install_transition_alias_guards()
+
+    @staticmethod
+    def sink_name(entry_point: str, workspace_key: str) -> str:
+        if entry_point not in _transition_aliases() or not re.fullmatch(
+            r"[0-9a-f]{64}", workspace_key
+        ):
+            raise RecoveryStateError("recovery transition sink binding is invalid")
+        return f"recovery:{workspace_key}:{entry_point}"
+
+    def _validate_shape(self) -> None:
+        if self.transition_id.startswith("BS"):
+            expected = self._BOOTSTRAP_KEYS
+            if self.binding.get("e_row") not in {"E1", "E2", "E3", "E4"}:
+                raise RecoveryStateError("bootstrap recovery context has no exact E row")
+        elif self.transition_id.startswith("S"):
+            expected = self._INCIDENT_KEYS
+        else:
+            expected = self._ORDINARY_KEYS
+        if set(self.binding) != expected:
+            raise RecoveryStateError("recovery transition context fields are inexact")
+        for name in (
+            "project_id",
+            "target_registry_key",
+            "attempt_id",
+            "incident_id",
+            "bs_attempt",
+        ):
+            if name in self.binding and (
+                not isinstance(self.binding[name], str) or not self.binding[name]
+            ):
+                raise RecoveryStateError(f"recovery transition {name} is invalid")
+        for name in (
+            "epoch",
+            "prospective_epoch",
+            "incident_generation",
+            "bs_generation",
+            "target_registry_generation",
+            "target_result_generation",
+        ):
+            if name in self.binding and (
+                type(self.binding[name]) is not int or self.binding[name] < 0
+            ):
+                raise RecoveryStateError(f"recovery transition {name} is invalid")
+        if self.transition_id.startswith("O"):
+            receipt = self.binding["authority_receipt"]
+            if (
+                not isinstance(receipt, Mapping)
+                or set(receipt)
+                != {"receipt_id", "attempt_id", "status", "active_incident", "channels"}
+                or receipt.get("status") != "issued"
+                or receipt.get("active_incident") is not False
+                or receipt.get("attempt_id") != self.binding["attempt_id"]
+                or not isinstance(receipt.get("channels"), Mapping)
+                or set(receipt["channels"]) != {"C1", "C2", "C3", "C4", "C5"}
+                or any(
+                    not isinstance(channel, Mapping)
+                    or channel.get("verdict") != "clean"
+                    for channel in receipt["channels"].values()
+                )
+            ):
+                raise RecoveryStateError(
+                    "ordinary recovery transition lacks a fresh typed C1-C5 receipt"
+                )
+
+    def validate_registry(self, registry: "RecoveryRegistry") -> dict[str, Any]:
+        try:
+            parent_receipt = self.parent._reload()
+        except Exception as exc:
+            raise RecoveryStateError("recovery transition parent receipt is invalid") from exc
+        if (
+            parent_receipt.get("transition_id") != self.transition_id
+            or parent_receipt.get("project_id") != self.binding["project_id"]
+            or parent_receipt.get("status") not in {"issued", "active"}
+        ):
+            raise RecoveryStateError("recovery transition parent binding changed")
+        epoch = self.binding.get(
+            "prospective_epoch" if self.transition_id.startswith("BS") else "epoch"
+        )
+        if parent_receipt.get("epoch") != epoch:
+            raise RecoveryStateError("recovery transition epoch changed")
+        if registry.workspace_key != self.binding["target_registry_key"]:
+            raise RecoveryStateError("recovery transition crossed target registries")
+        state = registry.state()
+        result_visible = self._result_visible(state)
+        if (
+            state.get("generation") != self.binding["target_registry_generation"]
+            and not (
+                parent_receipt.get("status") == "active"
+                and result_visible
+                and state.get("generation")
+                == self.binding["target_registry_generation"] + 1
+            )
+        ):
+            raise RecoveryStateError("recovery target registry generation changed")
+        if (
+            state.get("git_common_dir_identity")
+            != self.binding["common_dir_identity"]
+        ):
+            raise RecoveryStateError("recovery transition common-directory binding changed")
+        if self.transition_id.startswith("BS"):
+            lease = state.get("lease")
+            if not isinstance(lease, Mapping) and not result_visible:
+                raise RecoveryStateError("bootstrap recovery target lease is absent")
+            if isinstance(lease, Mapping):
+                expected = {
+                    "lease_id": lease.get("lease_id"),
+                    "run_id": _lease_run_id(lease),
+                    "source_state_id": lease.get("source_state_id"),
+                    "grant_id": lease.get("grant_id"),
+                }
+                if any(self.binding[name] != value for name, value in expected.items()):
+                    raise RecoveryStateError("bootstrap recovery target binding changed")
+        self._target_generation_validated = True
+        return state
+
+    def _result_visible(self, state: Mapping[str, Any]) -> bool:
+        lease_id = self.binding.get("lease_id")
+        if not isinstance(lease_id, str) or state.get("lease") is not None:
+            return False
+        history = state.get("history")
+        if not isinstance(history, list):
+            return False
+        expected_events: dict[str, tuple[str, ...]] = {
+            "release_unactivated_reservation": ("unactivated-reservation-released",),
+            "release_legacy_terminal": ("legacy-terminal-released",),
+            "release_contained_terminal": ("contained-terminal-released",),
+        }
+        names = expected_events.get(self.entry_point)
+        if names is None:
+            return False
+        visible = any(
+            isinstance(event, Mapping)
+            and event.get("event") in names
+            and event.get("lease_id") == lease_id
+            for event in history
+        )
+        if self.binding.get("e_row") == "E4":
+            visible = visible and any(
+                isinstance(event, Mapping)
+                and event.get("event") == "containment-loss-reconciled"
+                and event.get("lease_id") == lease_id
+                for event in history
+            )
+        return visible
+
+    def run(
+        self,
+        registry: "RecoveryRegistry",
+        action: Callable[[], Any],
+    ) -> Any:
+        if self.entry_point not in _transition_aliases():
+            raise RecoveryStateError("recovery transition entry point is unknown")
+        self.validate_registry(registry)
+        sink = self.sink_name(self.entry_point, registry.workspace_key)
+        try:
+            result = self.parent.run_sink(
+                sink,
+                action,
+                visible=lambda: self._result_visible(registry.state()),
+            )
+            self.parent.complete()
+            if isinstance(result, Mapping) and result.get("status") == "replayed-visible":
+                return registry.state()
+            return result
+        except RecoveryStateError:
+            raise
+        except Exception as exc:
+            raise RecoveryStateError("guarded recovery transition failed") from exc
 
 
 def _canonical(value: Any) -> bytes:
@@ -2067,11 +2311,85 @@ def _rebarrier(path: Path, expected_digest: str, *, fault: str | None = None) ->
     if fault == "reload-after-barrier":
         raise RecoveryStateError("injected failure after reload barrier")
     try:
-        reread = json.loads(path.read_text(encoding="utf-8"))
+        reread = json.loads(_stable_regular_file_bytes(path).decode("utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise RecoveryStateError("durable state changed during reload barrier") from exc
     if not isinstance(reread, dict) or reread.get("digest") != expected_digest or _digest(reread) != expected_digest:
         raise RecoveryStateError("durable state changed during reload barrier")
+
+
+def _read_rebarrier(
+    path: Path,
+    expected_digest: str,
+    *,
+    fault: str | None = None,
+) -> bytes:
+    """Repeat one stable read without reaching a write durability sink."""
+    if fault == "reload-before-barrier":
+        raise RecoveryStateError("injected failure before reload barrier")
+    raw = _stable_regular_file_bytes(path)
+    if fault == "reload-after-barrier":
+        raise RecoveryStateError("injected failure after reload barrier")
+    try:
+        reread = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RecoveryStateError("durable state changed during reload barrier") from exc
+    if (
+        not isinstance(reread, dict)
+        or reread.get("digest") != expected_digest
+        or _digest(reread) != expected_digest
+    ):
+        raise RecoveryStateError("durable state changed during reload barrier")
+    return raw
+
+
+def _stable_regular_file_bytes(path: Path, *, maximum: int = DEFAULT_MAX_BYTES) -> bytes:
+    """Read one existing regular file through a stable, no-follow descriptor."""
+    try:
+        before = path.lstat()
+    except FileNotFoundError as exc:
+        raise RecoveryStateError("owner-private read infrastructure is absent") from exc
+    except OSError as exc:
+        raise RecoveryStateError("owner-private read infrastructure is unreadable") from exc
+    _reject_snapshot_reparse_point(before)
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise RecoveryStateError("owner-private read target is not a regular file")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise RecoveryStateError("owner-private read infrastructure is unreadable") from exc
+    try:
+        opened = os.fstat(descriptor)
+        if not _snapshot_metadata_matches(before, opened):
+            raise RecoveryStateError("owner-private read identity changed")
+        chunks: list[bytes] = []
+        size = 0
+        while True:
+            chunk = os.read(descriptor, min(1024 * 1024, maximum + 1 - size))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > maximum:
+                raise RecoveryStateError("owner-private read exceeds its bound")
+        after_open = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    try:
+        after = path.lstat()
+    except OSError as exc:
+        raise RecoveryStateError("owner-private read target disappeared") from exc
+    if (
+        not _snapshot_metadata_matches(before, after_open)
+        or not _snapshot_metadata_matches(after_open, after)
+        or int(before.st_size) != int(after_open.st_size)
+        or int(after_open.st_size) != int(after.st_size)
+        or int(before.st_mtime_ns) != int(after_open.st_mtime_ns)
+        or int(after_open.st_mtime_ns) != int(after.st_mtime_ns)
+    ):
+        raise RecoveryStateError("owner-private read changed during the stable barrier")
+    return b"".join(chunks)
 
 
 @contextmanager
@@ -2108,6 +2426,49 @@ def _exclusive_file_lock(path: Path) -> Iterator[None]:
         handle.close()
 
 
+@contextmanager
+def _shared_existing_file_lock(path: Path) -> Iterator[None]:
+    """Take a non-writing lock only when the immutable lock file already exists."""
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError as exc:
+        raise RecoveryStateError("owner-private read lock is absent") from exc
+    except OSError as exc:
+        raise RecoveryStateError("owner-private read lock is unreadable") from exc
+    _reject_snapshot_reparse_point(metadata)
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise RecoveryStateError("owner-private read lock is not a regular file")
+    try:
+        handle = open(path, "rb")
+    except OSError as exc:
+        raise RecoveryStateError("owner-private read lock is unreadable") from exc
+    try:
+        opened = os.fstat(handle.fileno())
+        if not _snapshot_metadata_matches(metadata, opened) or opened.st_size < 1:
+            raise RecoveryStateError("owner-private read lock identity changed")
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_RLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+        yield
+    finally:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+
+
 def _lease_run_id(lease: Mapping[str, Any]) -> str | None:
     plan = lease.get("plan")
     if lease.get("lease_kind") == "recovery-target" and isinstance(plan, Mapping):
@@ -2128,6 +2489,7 @@ class RecoveryRegistry:
         fault: str | None = None,
         max_records: int = DEFAULT_MAX_RECORDS,
         max_bytes: int = DEFAULT_MAX_BYTES,
+        managed_transition_required: bool = False,
     ) -> None:
         self.workspace = workspace.expanduser().resolve(strict=True)
         if not self.workspace.is_dir():
@@ -2152,12 +2514,25 @@ class RecoveryRegistry:
         self.fault = fault
         self.max_records = max_records
         self.max_bytes = max_bytes
+        if type(managed_transition_required) is not bool:
+            raise RecoveryStateError("managed transition policy is invalid")
+        self.managed_transition_required = managed_transition_required
         if max_records <= 0 or max_bytes <= 0:
             raise RecoveryStateError("checkpoint inventory limits must be positive")
+        _install_transition_alias_guards()
 
     @contextmanager
     def _lock(self) -> Iterator[None]:
         with _exclusive_file_lock(self.lock_path):
+            yield
+
+    @contextmanager
+    def _read_lock(self, *, require_registry: bool = True) -> Iterator[None]:
+        if not self.directory.is_dir() or (
+            require_registry and not self.path.is_file()
+        ):
+            raise RecoveryStateError("recovery registry is absent")
+        with _shared_existing_file_lock(self.lock_path):
             yield
 
     def _git(self, *arguments: str, allow_failure: bool = False) -> bytes:
@@ -2188,7 +2563,71 @@ class RecoveryRegistry:
         resolved = path.resolve(strict=True)
         return {"path": str(resolved), "object_identity": _object_identity(resolved)}
 
-    def _empty(self) -> dict[str, Any]:
+    def _git_common_dir_identity_readonly(self) -> dict[str, Any] | None:
+        """Resolve Git administrative identity without spawning Git or mutating state."""
+        dot_git = self.workspace / ".git"
+        try:
+            metadata = dot_git.lstat()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise RecoveryStateError("Git common-directory identity is unreadable") from exc
+        _reject_snapshot_reparse_point(metadata)
+        if stat.S_ISLNK(metadata.st_mode):
+            raise RecoveryStateError("Git common-directory identity uses an unsupported alias")
+        if stat.S_ISDIR(metadata.st_mode):
+            git_directory = dot_git
+        elif stat.S_ISREG(metadata.st_mode):
+            try:
+                marker = _stable_regular_file_bytes(dot_git, maximum=4096).decode(
+                    "utf-8"
+                ).strip()
+            except UnicodeDecodeError as exc:
+                raise RecoveryStateError("Git directory marker is not UTF-8") from exc
+            if not marker.startswith("gitdir: "):
+                raise RecoveryStateError("Git directory marker is malformed")
+            candidate = Path(marker[8:])
+            git_directory = candidate if candidate.is_absolute() else self.workspace / candidate
+        else:
+            raise RecoveryStateError("Git directory marker is unsupported")
+        try:
+            git_directory = git_directory.resolve(strict=True)
+            git_metadata = git_directory.lstat()
+        except OSError as exc:
+            raise RecoveryStateError("Git directory identity is unavailable") from exc
+        _reject_snapshot_reparse_point(git_metadata)
+        if stat.S_ISLNK(git_metadata.st_mode) or not stat.S_ISDIR(git_metadata.st_mode):
+            raise RecoveryStateError("Git directory identity is not a stable directory")
+        common_marker = git_directory / "commondir"
+        if common_marker.exists():
+            try:
+                value = _stable_regular_file_bytes(
+                    common_marker, maximum=4096
+                ).decode("utf-8").strip()
+            except UnicodeDecodeError as exc:
+                raise RecoveryStateError("Git common-directory marker is not UTF-8") from exc
+            if not value:
+                raise RecoveryStateError("Git common-directory marker is empty")
+            candidate = Path(value)
+            common_directory = (
+                candidate if candidate.is_absolute() else git_directory / candidate
+            )
+        else:
+            common_directory = git_directory
+        try:
+            common_directory = common_directory.resolve(strict=True)
+            common_metadata = common_directory.lstat()
+        except OSError as exc:
+            raise RecoveryStateError("Git common-directory identity is unavailable") from exc
+        _reject_snapshot_reparse_point(common_metadata)
+        if stat.S_ISLNK(common_metadata.st_mode) or not stat.S_ISDIR(common_metadata.st_mode):
+            raise RecoveryStateError("Git common-directory identity is not stable")
+        return {
+            "path": str(common_directory),
+            "object_identity": _object_identity(common_directory),
+        }
+
+    def _empty(self, *, readonly: bool = False) -> dict[str, Any]:
         state: dict[str, Any] = {
             "schema_version": REGISTRY_SCHEMA,
             "identity_version": IDENTITY_VERSION,
@@ -2197,7 +2636,11 @@ class RecoveryRegistry:
             "workspace_path": str(self.workspace),
             "root_identity": self.root_identity,
             "collation_tag": self.collation_tag,
-            "git_common_dir_identity": self._git_common_dir_identity(),
+            "git_common_dir_identity": (
+                self._git_common_dir_identity_readonly()
+                if readonly
+                else self._git_common_dir_identity()
+            ),
             "generation": 0,
             "previous_generation_digest": None,
             "epoch": 0,
@@ -2681,21 +3124,55 @@ class RecoveryRegistry:
         if not self.path.exists():
             return self._empty()
         try:
-            state = self._validate_registry(json.loads(self.path.read_text(encoding="utf-8")))
+            state = self._validate_registry(
+                json.loads(
+                    _stable_regular_file_bytes(self.path).decode("utf-8")
+                )
+            )
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise RecoveryStateError("recovery registry is unreadable") from exc
-        current_git = self._git_common_dir_identity()
+        current_git = self._git_common_dir_identity_readonly()
         if state.get("git_common_dir_identity") != current_git:
-            if state.get("quarantine") is None:
-                state["quarantine"] = "git-common-dir-drift"
-                self._commit_registry_locked(state)
-            raise RecoveryStateError("Git common-directory identity drifted; registry is quarantined")
+            if state.get("quarantine") != "git-common-dir-drift":
+                raise RecoveryStateError(
+                    "Git common-directory identity drifted; "
+                    "S1.registry-drift.materialize is required"
+                )
         if state.get("quarantine") is not None and not allow_quarantine:
             raise RecoveryStateError(f"recovery registry is quarantined: {state['quarantine']}")
         if rebarrier:
-            _rebarrier(self.path, state["digest"], fault=self.fault)
-            state = self._validate_registry(json.loads(self.path.read_text(encoding="utf-8")))
+            raw = _read_rebarrier(
+                self.path,
+                state["digest"],
+                fault=self.fault,
+            )
+            state = self._validate_registry(
+                json.loads(raw.decode("utf-8"))
+            )
         return state
+
+    def materialize_registry_drift(self) -> dict[str, Any]:
+        """Persist only the exact S1 registry-drift quarantine mutation."""
+        with self._lock():
+            if not self.path.is_file():
+                raise RecoveryStateError("recovery registry is absent")
+            try:
+                state = self._validate_registry(
+                    json.loads(
+                        _stable_regular_file_bytes(self.path).decode("utf-8")
+                    )
+                )
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise RecoveryStateError("recovery registry is unreadable") from exc
+            current_git = self._git_common_dir_identity_readonly()
+            if state.get("git_common_dir_identity") == current_git:
+                raise RecoveryStateError("registry drift is not currently observed")
+            if state.get("quarantine") not in {None, "git-common-dir-drift"}:
+                raise RecoveryStateError("registry has a different quarantine")
+            if state.get("quarantine") is None:
+                state["quarantine"] = "git-common-dir-drift"
+                return self._commit_registry_locked(state)
+            return state
 
     def _read_registry_for_write_locked(
         self,
@@ -2760,11 +3237,13 @@ class RecoveryRegistry:
             return state
 
     def state(self) -> dict[str, Any]:
-        with self._lock():
+        if not self.directory.is_dir() or not self.path.is_file():
+            return self._empty(readonly=True)
+        with self._read_lock():
             return self._read_registry_locked(allow_quarantine=True)
 
     def state_for_activation(self) -> dict[str, Any]:
-        with self._lock():
+        with self._read_lock():
             state = self._read_registry_locked(rebarrier=True)
             if state.get("retired"):
                 raise RecoveryStateError("recovery registry is retired")
@@ -2775,7 +3254,15 @@ class RecoveryRegistry:
         return state.get("lease") is None and state.get("outbox") is None
 
     def assert_reader_compatible(self, version: str) -> dict[str, Any]:
-        with self._lock():
+        if not self.directory.is_dir() or not self.path.is_file():
+            state = self._empty(readonly=True)
+            if _version_tuple(version) < _version_tuple(READER_FLOOR):
+                raise RecoveryStateError(
+                    f"reader floor {READER_FLOOR} blocks downgrade to {version} "
+                    "before explicit retirement"
+                )
+            return state
+        with self._read_lock():
             state = self._read_registry_locked(rebarrier=self.path.exists(), allow_quarantine=True)
             if _version_tuple(version) < _version_tuple(READER_FLOOR) and not state.get("retired"):
                 raise RecoveryStateError(
@@ -2937,7 +3424,7 @@ class RecoveryRegistry:
         return self.sources_directory / f"{source_state_id}.json"
 
     def public_checkpoint_for_source(self, source_state_id: str) -> dict[str, Any]:
-        with self._lock():
+        with self._read_lock():
             self._read_registry_locked(rebarrier=True)
             source = self._read_source_locked(source_state_id)
             checkpoint = source.get("public_checkpoint")
@@ -2962,7 +3449,7 @@ class RecoveryRegistry:
         source_state_id = checkpoint.get("source_state_id")
         if not isinstance(source_state_id, str):
             raise RecoveryStateError("checkpoint source state ID is missing")
-        with self._lock():
+        with self._read_lock():
             self._read_registry_locked(rebarrier=True)
             source = self._read_source_locked(source_state_id)
             stored = source.get("public_checkpoint")
@@ -3209,14 +3696,20 @@ class RecoveryRegistry:
     def _read_source_locked(self, source_state_id: str, *, rebarrier: bool = True) -> dict[str, Any]:
         path = self.source_path(source_state_id)
         try:
-            state = self._validate_source(json.loads(path.read_text(encoding="utf-8")), source_state_id)
+            state = self._validate_source(
+                json.loads(_stable_regular_file_bytes(path).decode("utf-8")),
+                source_state_id,
+            )
         except FileNotFoundError as exc:
             raise RecoveryStateError("private recovery source state is missing") from exc
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise RecoveryStateError("private recovery source state is unreadable") from exc
         if rebarrier:
-            _rebarrier(path, state["digest"])
-            state = self._validate_source(json.loads(path.read_text(encoding="utf-8")), source_state_id)
+            raw = _read_rebarrier(path, state["digest"])
+            state = self._validate_source(
+                json.loads(raw.decode("utf-8")),
+                source_state_id,
+            )
         return state
 
     def _commit_source_locked(
@@ -3243,7 +3736,7 @@ class RecoveryRegistry:
         return self._validate_source(json.loads(path.read_text(encoding="utf-8")), state["source_state_id"])
 
     def read_private_source(self, source_state_id: str) -> dict[str, Any]:
-        with self._lock():
+        with self._read_lock():
             return self._read_source_locked(source_state_id)
 
     def _parse_index(self, raw: bytes) -> list[dict[str, str]]:
@@ -4827,7 +5320,7 @@ class RecoveryRegistry:
         remediation_scope: Mapping[str, Any],
     ) -> dict[str, Any]:
         """Build one canonical same-account confirmation snapshot without issuing it."""
-        with self._lock():
+        with self._read_lock():
             registry = self._read_registry_locked(rebarrier=True)
             _lease, _source, _manifest, tuple_basis = self._post_commit_action_context_locked(
                 registry,
@@ -5347,7 +5840,7 @@ class RecoveryRegistry:
         _require_hex(root_verification_digest, "post-commit replay root verification")
         _require_hex(authorization_handle, "post-commit replay authorization handle")
         _require_hex(remediation_scope_digest, "post-commit replay remediation scope")
-        with self._lock():
+        with self._read_lock():
             state = self._read_registry_locked(rebarrier=True)
             recorded = [
                 event
@@ -6500,3 +6993,41 @@ class RecoveryRegistry:
             state["lease"] = None
             state["outbox"] = None
             return self._commit_registry_locked(state, rotate_epoch=True)
+
+
+def _install_transition_alias_guards() -> None:
+    """Bind every registered recovery entry point to the M7a alias map."""
+    for entry_point in _transition_aliases():
+        original = getattr(RecoveryRegistry, entry_point, None)
+        if original is None or getattr(original, "_m7b1_transition_guard", False):
+            continue
+
+        @functools.wraps(original)
+        def guarded(
+            self: RecoveryRegistry,
+            *args: Any,
+            __entry_point: str = entry_point,
+            __original: Callable[..., Any] = original,
+            transition_context: RecoveryTransitionContext | None = None,
+            **kwargs: Any,
+        ) -> Any:
+            if transition_context is None and self.managed_transition_required:
+                raise RecoveryStateError(
+                    "managed recovery mutation requires a guarded transition context"
+                )
+            if transition_context is None:
+                return __original(self, *args, **kwargs)
+            if (
+                not isinstance(transition_context, RecoveryTransitionContext)
+                or transition_context.entry_point != __entry_point
+            ):
+                raise RecoveryStateError(
+                    "recovery transition context was substituted or reused"
+                )
+            return transition_context.run(
+                self,
+                lambda: __original(self, *args, **kwargs),
+            )
+
+        guarded._m7b1_transition_guard = True
+        setattr(RecoveryRegistry, entry_point, guarded)

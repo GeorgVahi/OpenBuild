@@ -24,6 +24,14 @@ Do not claim that Build registers `/build` or any other slash command. If a user
 
 Reply and write the specification in the user's language. Keep paths, symbols, commands, and code in their native form.
 
+## Run automatic coordinator setup
+
+After parsing the requested mode, but before the first repository path, Git command, specification lookup, `AGENTS.md` read, or discovery dispatch, run the packaged `scripts/project_migration.py <mode>` entry point from this selected skill. Use `python` on Windows and `python3` on POSIX, require Python 3.11 or newer, and pass `auto` when the invocation omitted an explicit mode. This applies to every Build mode, including `configure-models` and its `setup-models` alias.
+
+The setup entry point is the sole bounded pre-repository bootstrap. A missing owner-private I0 coordinator is initialized automatically with its permanent key, immutable identity lock, and first-use receipt; an existing valid coordinator is verified without rewrite. Continue the originally requested mode only when the JSON result reports `continue: true` with `setup-initialized` or `setup-verified`. Standard plugin installation has no lifecycle hook and must not be described as running this setup; users never need a separate mandatory setup command.
+
+If the command exits with status `2` or returns `setup-required`, stop before any repository read or agent creation and report its reason. Do not silently delete, replace, chmod, or recreate ambiguous state. Direct the operator to restore the coordinator root, identity lock, and key to the same OS account with owner-only permissions from known-good evidence, then rerun the original Build invocation. A missing Python runtime follows the dependency guidance below, but installation does not waive the pre-repository setup gate.
+
 ## Explicit Code Discovery Delegation
 
 OpenBuild implements code discovery only through `scripts/model_map.py` followed by `scripts/agent_runner.py`. Before broad `rg`, route/symbol lookup, owner mapping, or cross-file evidence gathering, resolve the effective discovery route and start its first exact profile as a separate subscription-authenticated Codex process. The packaged default is `openbuild_search_separate` pinned to `gpt-5.3-codex-spark`, low reasoning, and read-only sandbox; an explicitly confirmed project or user map may select a different exact search profile/model while the canonical Explorer instructions and read-only sandbox remain fixed.

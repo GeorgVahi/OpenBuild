@@ -7,6 +7,7 @@ import hashlib
 import json
 import multiprocessing
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -1831,6 +1832,15 @@ class RegistryContractTests(unittest.TestCase):
             moved_git = workspace / ".git-original"
             original_git.rename(moved_git)
             run_git(workspace, "init", "--quiet")
+            before = owner.path.read_bytes()
+            with self.assertRaisesRegex(
+                recovery_state.RecoveryStateError,
+                "S1.registry-drift.materialize",
+            ):
+                owner.state_for_activation()
+            self.assertEqual(owner.path.read_bytes(), before)
+            materialized = owner.materialize_registry_drift()
+            self.assertEqual(materialized["quarantine"], "git-common-dir-drift")
             with self.assertRaisesRegex(recovery_state.RecoveryStateError, "quarantined"):
                 owner.state_for_activation()
             raw = json.loads(owner.path.read_text(encoding="utf-8"))
@@ -4026,6 +4036,477 @@ class RegistryContractTests(unittest.TestCase):
                 completed["lease"]["semantic_disposition"]["checkpoint_invalidation"],
                 "completed",
             )
+
+
+class M7b1ReadBoundaryTests(unittest.TestCase):
+    def test_write_rebarrier_retains_durable_fsync_contract(self) -> None:
+        root = ROOT / f".m7b1-rebarrier-{next(tempfile._get_candidate_names())}"
+        root.mkdir()
+        try:
+            path = root / "state.json"
+            digest = recovery_state._digest({})
+            path.write_text(
+                json.dumps({"digest": digest}),
+                encoding="utf-8",
+            )
+            with mock.patch.object(
+                recovery_state.os,
+                "fsync",
+            ) as fsync_sink, mock.patch.object(
+                recovery_state,
+                "_sync_parent_metadata",
+            ) as parent_sink:
+                recovery_state._rebarrier(path, digest)
+            fsync_sink.assert_called_once()
+            parent_sink.assert_called_once_with(path.parent)
+        finally:
+            shutil.rmtree(root)
+
+    def test_all_named_reads_are_sink_free_when_owner_infrastructure_is_absent(self) -> None:
+        root = ROOT / f".m7b1-read-{next(tempfile._get_candidate_names())}"
+        root.mkdir()
+        try:
+            workspace = root / "workspace"
+            workspace.mkdir()
+            owner = recovery_state.RecoveryRegistry(
+                workspace,
+                state_root=root / "missing-state",
+            )
+            calls = (
+                ("state", lambda: owner.state(), True),
+                ("state_for_activation", lambda: owner.state_for_activation(), False),
+                (
+                    "assert_reader_compatible",
+                    lambda: owner.assert_reader_compatible("2.4.0"),
+                    True,
+                ),
+                (
+                    "public_checkpoint_for_source",
+                    lambda: owner.public_checkpoint_for_source("1" * 64),
+                    False,
+                ),
+                (
+                    "assert_checkpoint_allowed_paths",
+                    lambda: owner.assert_checkpoint_allowed_paths(
+                        {"source_state_id": "1" * 64},
+                        ["allowed"],
+                    ),
+                    False,
+                ),
+                (
+                    "read_private_source",
+                    lambda: owner.read_private_source("1" * 64),
+                    False,
+                ),
+                (
+                    "build_post_commit_root_completion_action_snapshot",
+                    lambda: owner.build_post_commit_root_completion_action_snapshot(
+                        run_id="run-1",
+                        task_commit="1" * 40,
+                        root_verification_digest="2" * 64,
+                        source_checkpoint_digest="3" * 64,
+                        remediation_scope={},
+                    ),
+                    False,
+                ),
+                (
+                    "post_commit_root_completion_replay_binding",
+                    lambda: owner.post_commit_root_completion_replay_binding(
+                        lease_id="lease-1",
+                        run_id="run-1",
+                        task_commit="1" * 40,
+                        root_verification_digest="2" * 64,
+                        authorization_handle="3" * 64,
+                        remediation_scope_digest="4" * 64,
+                    ),
+                    False,
+                ),
+            )
+            for name, read, returns_empty in calls:
+                with self.subTest(entry_point=name), mock.patch.object(
+                    recovery_state, "_ensure_private_directory"
+                ) as mkdir_sink, mock.patch.object(
+                    recovery_state.os, "chmod"
+                ) as chmod_sink, mock.patch.object(
+                    recovery_state.os, "fsync"
+                ) as fsync_sink, mock.patch.object(
+                    recovery_state.subprocess, "run"
+                ) as process_sink, mock.patch.object(
+                    recovery_state, "_durable_replace"
+                ) as write_sink, mock.patch.object(
+                    Path, "unlink"
+                ) as unlink_sink:
+                    if returns_empty:
+                        self.assertEqual(read()["generation"], 0)
+                    else:
+                        with self.assertRaises(recovery_state.RecoveryStateError):
+                            read()
+                    for sink in (
+                        mkdir_sink,
+                        chmod_sink,
+                        fsync_sink,
+                        process_sink,
+                        write_sink,
+                        unlink_sink,
+                    ):
+                        sink.assert_not_called()
+        finally:
+            shutil.rmtree(root)
+
+
+class _M7b1ParentContext:
+    def __init__(
+        self,
+        transition_id: str,
+        *,
+        project_id: str,
+        epoch: int,
+        attempt_id: str,
+        sink: str,
+        fault_after_action: bool = False,
+    ) -> None:
+        self.transition_id = transition_id
+        self.receipt = {
+            "transition_id": transition_id,
+            "project_id": project_id,
+            "epoch": epoch,
+            "attempt_id": attempt_id,
+            "status": "issued",
+        }
+        self.sink = sink
+        self.cursor = 0
+        self.fault_after_action = fault_after_action
+
+    def _reload(self) -> dict[str, object]:
+        return dict(self.receipt)
+
+    def run_sink(self, sink, action, *, visible=None):
+        if sink != self.sink or self.cursor != 0:
+            raise RuntimeError("ordered sink was skipped or reordered")
+        if self.receipt["status"] == "active" and visible is not None and visible():
+            self.cursor = 1
+            return {"status": "replayed-visible", "sink": sink}
+        if self.receipt["status"] != "issued":
+            raise RuntimeError("transition receipt was already used")
+        self.receipt["status"] = "active"
+        result = action()
+        if self.fault_after_action:
+            self.fault_after_action = False
+            raise RuntimeError("fault after target CAS")
+        self.cursor = 1
+        return result
+
+    def complete(self):
+        if self.cursor != 1 or self.receipt["status"] != "active":
+            raise RuntimeError("transition sink plan is incomplete")
+        self.receipt["status"] = "complete"
+        return dict(self.receipt)
+
+
+class M7b1TransitionGuardTests(unittest.TestCase):
+    @staticmethod
+    def authority(attempt_id: str) -> dict[str, object]:
+        return {
+            "receipt_id": "receipt-1",
+            "attempt_id": attempt_id,
+            "status": "issued",
+            "active_incident": False,
+            "channels": {
+                name: {"verdict": "clean"}
+                for name in ("C1", "C2", "C3", "C4", "C5")
+            },
+        }
+
+    def test_bs_e1_alias_is_exact_cross_project_safe_and_fault_replayable(self) -> None:
+        root = ROOT / f".m7b1-transition-{next(tempfile._get_candidate_names())}"
+        root.mkdir()
+        try:
+            workspace = root / "workspace"
+            workspace.mkdir()
+            with mock.patch.object(
+                recovery_state, "_protect_windows_directory"
+            ), mock.patch.object(
+                recovery_state, "_windows_directory_is_private", return_value=True
+            ):
+                owner = recovery_state.RecoveryRegistry(
+                    workspace,
+                    state_root=root / "state",
+                )
+                with mock.patch.object(
+                    owner,
+                    "_git_common_dir_identity",
+                    return_value=None,
+                ):
+                    owner.initialize()
+                owner.reserve_normal(
+                    "lease-1",
+                    allowed_set_digest="",
+                    recovery_capable=False,
+                )
+                before = owner.state()
+                sink = recovery_state.RecoveryTransitionContext.sink_name(
+                    "release_unactivated_reservation",
+                    owner.workspace_key,
+                )
+                parent = _M7b1ParentContext(
+                    "BS3.E1.finalize",
+                    project_id="project-1",
+                    epoch=17,
+                    attempt_id="bs-attempt-1",
+                    sink=sink,
+                    fault_after_action=True,
+                )
+                binding = {
+                    "project_id": "project-1",
+                    "common_dir_identity": before["git_common_dir_identity"],
+                    "prospective_epoch": 17,
+                    "bs_generation": 3,
+                    "bs_attempt": "bs-attempt-1",
+                    "incident_id": "incident-1",
+                    "target_registry_key": owner.workspace_key,
+                    "target_registry_generation": before["generation"],
+                    "lease_id": "lease-1",
+                    "run_id": None,
+                    "source_state_id": None,
+                    "grant_id": None,
+                    "e_row": "E1",
+                    "target_result_generation": 0,
+                }
+                context = recovery_state.RecoveryTransitionContext(
+                    parent,
+                    entry_point="release_unactivated_reservation",
+                    binding=binding,
+                )
+                with self.assertRaisesRegex(
+                    recovery_state.RecoveryStateError,
+                    "guarded recovery transition failed",
+                ):
+                    owner.release_unactivated_reservation(
+                        "lease-1",
+                        transition_context=context,
+                    )
+                visible = owner.state()
+                self.assertIsNone(visible["lease"])
+                replay = owner.release_unactivated_reservation(
+                    "lease-1",
+                    transition_context=context,
+                )
+                self.assertEqual(replay["digest"], visible["digest"])
+                self.assertEqual(parent.receipt["status"], "complete")
+
+                cross_parent = _M7b1ParentContext(
+                    "BS3.E1.finalize",
+                    project_id="other-project",
+                    epoch=17,
+                    attempt_id="bs-attempt-2",
+                    sink=sink,
+                )
+                cross_binding = dict(binding)
+                cross_binding["bs_attempt"] = "bs-attempt-2"
+                cross_context = recovery_state.RecoveryTransitionContext(
+                    cross_parent,
+                    entry_point="release_unactivated_reservation",
+                    binding=cross_binding,
+                )
+                bytes_before = owner.path.read_bytes()
+                with self.assertRaisesRegex(
+                    recovery_state.RecoveryStateError,
+                    "parent binding changed",
+                ):
+                    owner.release_unactivated_reservation(
+                        "lease-1",
+                        transition_context=cross_context,
+                    )
+                self.assertEqual(owner.path.read_bytes(), bytes_before)
+
+                blocked = dict(binding)
+                blocked["e_row"] = "E5"
+                with self.assertRaisesRegex(
+                    recovery_state.RecoveryStateError,
+                    "exact E row",
+                ):
+                    recovery_state.RecoveryTransitionContext(
+                        _M7b1ParentContext(
+                            "BS3.E1.finalize",
+                            project_id="project-1",
+                            epoch=17,
+                            attempt_id="bs-attempt-3",
+                            sink=sink,
+                        ),
+                        entry_point="release_unactivated_reservation",
+                        binding=blocked,
+                    )
+                self.assertEqual(owner.path.read_bytes(), bytes_before)
+        finally:
+            shutil.rmtree(root)
+
+    def test_bs_e2_e3_e4_aliases_bind_exact_terminal_results(self) -> None:
+        common_identity = {"path": "opaque", "object_identity": {"kind": "test"}}
+
+        class Target:
+            workspace_key = "1" * 64
+
+            def __init__(self, lease_id: str, run_id: str) -> None:
+                self.value = {
+                    "generation": 9,
+                    "git_common_dir_identity": common_identity,
+                    "lease": {
+                        "lease_id": lease_id,
+                        "lease_kind": "normal-contained",
+                        "run_id": run_id,
+                        "source_state_id": "source-1",
+                        "grant_id": None,
+                    },
+                    "history": [],
+                }
+
+            def state(self) -> dict[str, object]:
+                return {
+                    key: (
+                        list(value)
+                        if isinstance(value, list)
+                        else dict(value)
+                        if isinstance(value, dict)
+                        else value
+                    )
+                    for key, value in self.value.items()
+                }
+
+        cases = (
+            (
+                "E2",
+                "BS3.E2.finalize",
+                "release_legacy_terminal",
+                ("legacy-terminal-released",),
+            ),
+            (
+                "E3",
+                "BS3.E3.finalize",
+                "release_contained_terminal",
+                ("contained-terminal-released",),
+            ),
+            (
+                "E4",
+                "BS3.E4.finalize",
+                "release_contained_terminal",
+                (
+                    "containment-loss-reconciled",
+                    "contained-terminal-released",
+                ),
+            ),
+        )
+        for row, transition_id, entry_point, events in cases:
+            with self.subTest(row=row):
+                lease_id = f"lease-{row}"
+                run_id = f"run-{row}"
+                target = Target(lease_id, run_id)
+                sink = recovery_state.RecoveryTransitionContext.sink_name(
+                    entry_point,
+                    target.workspace_key,
+                )
+                parent = _M7b1ParentContext(
+                    transition_id,
+                    project_id="project-1",
+                    epoch=17,
+                    attempt_id=f"attempt-{row}",
+                    sink=sink,
+                )
+                context = recovery_state.RecoveryTransitionContext(
+                    parent,
+                    entry_point=entry_point,
+                    binding={
+                        "project_id": "project-1",
+                        "common_dir_identity": common_identity,
+                        "prospective_epoch": 17,
+                        "bs_generation": 3,
+                        "bs_attempt": f"attempt-{row}",
+                        "incident_id": "incident-1",
+                        "target_registry_key": target.workspace_key,
+                        "target_registry_generation": 9,
+                        "lease_id": lease_id,
+                        "run_id": run_id,
+                        "source_state_id": "source-1",
+                        "grant_id": None,
+                        "e_row": row,
+                        "target_result_generation": 0,
+                    },
+                )
+
+                def finalize() -> dict[str, object]:
+                    target.value["generation"] = 10
+                    target.value["lease"] = None
+                    target.value["history"] = [
+                        {"event": event, "lease_id": lease_id}
+                        for event in events
+                    ]
+                    return target.state()
+
+                result = context.run(target, finalize)
+                self.assertIsNone(result["lease"])
+                self.assertEqual(parent.receipt["status"], "complete")
+
+    def test_alias_class_substitution_rejects_before_registry_mutation(self) -> None:
+        binding = {
+            "project_id": "project-1",
+            "common_dir_identity": None,
+            "epoch": 1,
+            "incident_id": "incident-1",
+            "incident_generation": 0,
+            "target_registry_key": "1" * 64,
+            "target_registry_generation": 0,
+            "attempt_id": "attempt-1",
+        }
+        with self.assertRaisesRegex(
+            recovery_state.RecoveryStateError,
+            "exact E row",
+        ):
+            recovery_state.RecoveryTransitionContext(
+                _M7b1ParentContext(
+                    "BS3.E1.finalize",
+                    project_id="project-1",
+                    epoch=1,
+                    attempt_id="attempt-1",
+                    sink="unused",
+                ),
+                entry_point="release_unactivated_reservation",
+                binding=binding,
+            )
+        with self.assertRaisesRegex(
+            recovery_state.RecoveryStateError,
+            "unknown or substituted",
+        ):
+            recovery_state.RecoveryTransitionContext(
+                _M7b1ParentContext(
+                    "BS3.E1.finalize",
+                    project_id="project-1",
+                    epoch=1,
+                    attempt_id="attempt-1",
+                    sink="unused",
+                ),
+                entry_point="commit_handoff",
+                binding=binding,
+            )
+
+    def test_managed_registry_rejects_missing_context_before_first_sink(self) -> None:
+        root = ROOT / f".m7b1-managed-{next(tempfile._get_candidate_names())}"
+        root.mkdir()
+        try:
+            workspace = root / "workspace"
+            workspace.mkdir()
+            state_root = root / "state"
+            owner = recovery_state.RecoveryRegistry(
+                workspace,
+                state_root=state_root,
+                managed_transition_required=True,
+            )
+            with self.assertRaisesRegex(
+                recovery_state.RecoveryStateError,
+                "guarded transition context",
+            ):
+                owner.initialize()
+            self.assertFalse(state_root.exists())
+        finally:
+            shutil.rmtree(root)
 
 
 if __name__ == "__main__":
