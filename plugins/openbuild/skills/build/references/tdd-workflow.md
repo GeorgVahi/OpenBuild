@@ -49,6 +49,12 @@ For recovery-autonomy changes, the red/green evidence must include the owner-lev
 
 A reviewer must not edit tests or implementation, commit, push, or run write-capable remediation. It returns evidence-backed findings to the root. The root verifies each finding and routes confirmed behavioral remediation back through the red → green workflow before requesting another review.
 
+## R-005 recovery fixtures
+
+Recovery snapshot tests must prove that `task-relevant-v2` never invokes or buffers a global ignored listing, uses only literal allowed-root pathspec batches, accepts a huge outside-scope ignored tree under a low byte budget, does not touch an ignored outside-scope reparse point, inventories and detects drift for an allowed ignored path, and still rejects nonignored outside drift. They must tamper the policy/projection, reject cross-mode revalidation and an older reader at the `2.4.1` floor, and prove an absent legacy policy alone retains global `full-ignored-v1` revalidation without migration rewrite.
+
+Continuation tests must require a durable root-completion-first audit and digest-bound continuation receipt before an incomplete response, show attributable RUN/direct-fix/QA/review paths do not re-prompt, and retain a decision-required new-writer boundary. Review tests must cover canonical/deduplicated finding keys, owner-private ledger append/consult and concurrent drift, diff-revision `max_steps`, fresh epoch after material fix, and automation exhaustion. Browser QA tests must reject a missing or post-resume/self-authored network guard, child-output network claims, nonce/process/diff/argv/scenario drift, replay/tamper evidence, raw path/cookie/secret leakage, guard-observed external activity, nonzero/unknown exit, and a live tree.
+
 ## Completion record
 
 For each milestone record:

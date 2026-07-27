@@ -285,6 +285,31 @@ class ProjectRuntimeM6Tests(unittest.TestCase):
             self.fail(result.stderr.decode("utf-8", "replace"))
         return result.stdout.decode("ascii", "strict").strip()
 
+    @unittest.skipUnless(os.name == "nt", "Windows mutable replace retry")
+    def test_mutable_state_replace_retries_transient_windows_file_locks(self) -> None:
+        path = self.temp / "replace-retry" / "state.json"
+        attempts = 0
+
+        def transient_move(source: Path, target: Path, *, replace: bool) -> None:
+            nonlocal attempts
+            if replace:
+                attempts += 1
+                if attempts < 3:
+                    failure = PermissionError(13, "transient test lock", str(target))
+                    failure.winerror = 5
+                    raise failure
+            self._windows_move(source, target, replace=replace)
+
+        with mock.patch.object(
+            project_state,
+            "_windows_move_write_through",
+            side_effect=transient_move,
+        ):
+            project_state._replace_json(path, {"schema": 1, "value": "published"})
+
+        self.assertEqual(attempts, 3)
+        self.assertEqual(project_state._read_json(path)["value"], "published")
+
     def _terminal_lane(
         self,
         lane_id: str,

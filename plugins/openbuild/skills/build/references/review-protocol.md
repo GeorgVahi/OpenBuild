@@ -90,6 +90,7 @@ Acceptance coverage:
 
 Findings:
 1. <critical|high|medium|low> — <path:line or authoritative evidence>
+   Finding key: <canonical review_finding_key(owner, contract, consequence)>
    Impact: <observable consequence>
    Fix: <smallest owning-layer correction>
 
@@ -185,3 +186,9 @@ Accept a milestone only when all are true:
 - terminal-compatibility/post-commit diffs additionally prove exact historical `run-dir-v1` matching without rewrite/path leakage, same-OS-account threat-boundary disclosure, stable private remediation scope, immutable producer versus root-completion attribution, distinct confirmed action-snapshot issuance, owner-enforced binding format+digest, intent-authoritative atomic capability consumption and crash replay, task commit/Git barrier evidence, resumable invalidation/release phases, privacy-safe outcomes, and unchanged automatic outside-only abandonment.
 
 For every risk, an evidence-backed `ACCEPT` at the current configured step may close the gate when coverage is complete, validation is green, confidence is sufficient, and no configured trigger remains. Critical work uses only a map with `critical_confirmed = true`. If exact profile selection fails, keep the gate incomplete and report the terminal reason.
+
+## R-005 canonical progress
+
+Review progress is a canonical domain-separated `openbuild.review-progress.v2` value over a random stable 64-hex specification lineage digest, the specification revision, immutable full-diff digest, validation digest, acceptance-criteria digest, and sorted stable open/closed `finding_key` values. Persist the lineage in the Build specification, keep it unchanged across that specification's revisions, and pass every field to each runner-owned review dispatch. The runner validates the exact schema, de-duplicates keys, consults only the matching lineage in its owner-private digest ledger under lock, and appends the eligible dispatch before process creation; concurrent ledger drift fails closed. Existing v1 entries remain digest-verified and readable but have no lineage and therefore cannot block a new v2 Build. Keep `max_steps=3` per immutable diff revision; a material fix automatically begins a fresh same-lineage review epoch, while an unrelated lineage begins as `first-review`. An unchanged finding key, diff-only churn without validation/AC evidence or a finding closure, or a fourth same-diff attempt is `automation-exhausted`, never an excuse for a repeated permission prompt or a new workspace orchestration artifact.
+
+Before an incomplete review response for an attributable partial diff, invoke `_record-root-completion` with the intended continuation action and require both the durable audit and its digest-bound automatic continuation receipt. Routine review/QA/direct-fix/RUN continuation then proceeds without repeating a permission question. A new writer stays a separate decision-required security action.

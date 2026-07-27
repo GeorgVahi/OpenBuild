@@ -103,7 +103,16 @@ NON_ERROR_JSONL_EVENT_TYPES = {
 SCHEMA_VERSION = 1
 OBSERVATION_BUDGET_SECONDS = 900
 NONRECOVERY_ALLOWED_SET_DOMAIN = b"openbuild-nonrecovery-allowed-set-v1\0"
+LEGACY_REVIEW_PROGRESS_DOMAIN = b"openbuild.review-progress.v1\0"
+REVIEW_PROGRESS_DOMAIN = b"openbuild.review-progress.v2\0"
+REVIEW_LEDGER_DOMAIN = b"openbuild.review-progress-ledger.v1\0"
+REVIEW_DISPATCH_DOMAIN = b"openbuild.review-dispatch.v1\0"
+BROWSER_QA_FINDING_DOMAIN = b"openbuild.review-finding.v1\0"
+BROWSER_QA_DOMAIN = b"openbuild.browser-qa.v1\0"
 ROOT_COMPLETION_SOURCE_SCHEMA = "openbuild.root-completion-source.v1"
+REVIEW_MAX_STEPS_PER_DIFF = 3
+REVIEW_LEDGER_MAX_ENTRIES = 256
+REVIEW_LEDGER_MAX_BYTES = 1024 * 1024
 RUN_HANDLE = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{10}$")
 PACKAGED_PROFILE_DIR = Path(__file__).resolve().parents[1] / "profiles"
 SEARCH_DEVELOPER_INSTRUCTIONS = (
@@ -214,6 +223,963 @@ def _canonical_json_bytes(value: Mapping[str, Any]) -> bytes:
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
+
+
+def _require_lower_hex(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+        raise RunnerError(f"{label} must be a 64-character lowercase SHA-256 digest")
+    return value
+
+
+def automatic_continuation_policy(
+    *,
+    incomplete: bool,
+    attributable_partial_diff: bool,
+    root_completion_audited: bool,
+    requested_action: str,
+) -> dict[str, Any]:
+    """Classify a closed incomplete outcome without manufacturing authority.
+
+    The audit is deliberately first: even a routine review/QA continuation
+    cannot consume the existing root-completion authority until the owner has
+    durably audited the partial diff.  A recovery writer is still a new
+    security-relevant executor, never a continuation shortcut.
+    """
+    if requested_action not in {"run", "direct-fix", "qa", "review", "new-writer"}:
+        raise RunnerError("automatic continuation action is unsupported")
+    if not incomplete:
+        return {"status": "not-applicable", "permission_prompt": False}
+    if not attributable_partial_diff:
+        return {
+            "status": "blocked",
+            "reason": "partial-diff-attribution-unavailable",
+            "permission_prompt": False,
+        }
+    if not root_completion_audited:
+        return {
+            "status": "blocked",
+            "reason": "root-completion-audit-required",
+            "permission_prompt": False,
+        }
+    if requested_action == "new-writer":
+        return {
+            "status": "decision-required",
+            "reason": "new-writer-security-action",
+            "permission_prompt": True,
+        }
+    return {
+        "status": "continue-automatically",
+        "action": requested_action,
+        "permission_prompt": False,
+    }
+
+
+def automatic_continuation_record(
+    *,
+    root_completion_audit: Mapping[str, Any],
+    requested_action: str,
+) -> dict[str, Any]:
+    """Bind the continuation decision to the already durable root audit."""
+    if (
+        not isinstance(root_completion_audit, Mapping)
+        or root_completion_audit.get("event") != "root-completion-authorized"
+        or root_completion_audit.get("automatic") is not True
+        or root_completion_audit.get("writer_action") != "none"
+    ):
+        raise RunnerError("automatic continuation requires a valid root-completion audit")
+    audit_digest = sha256_bytes(_canonical_json_bytes(root_completion_audit))
+    policy = automatic_continuation_policy(
+        incomplete=True,
+        attributable_partial_diff=True,
+        root_completion_audited=True,
+        requested_action=requested_action,
+    )
+    record: dict[str, Any] = {
+        "schema": "openbuild.automatic-continuation.v1",
+        "root_completion_audit_digest": audit_digest,
+        "requested_action": requested_action,
+        "policy": policy,
+    }
+    record["continuation_digest"] = sha256_bytes(
+        b"openbuild.automatic-continuation.v1\0" + _canonical_json_bytes(record)
+    )
+    return record
+
+
+def _canonical_finding_keys(value: Any, label: str) -> list[str]:
+    if not isinstance(value, list):
+        raise RunnerError(f"{label} must be a list of finding_key values")
+    keys = [_require_lower_hex(item, f"{label} finding_key") for item in value]
+    if len(keys) != len(set(keys)):
+        raise RunnerError(f"{label} contains a duplicate finding_key")
+    return sorted(keys)
+
+
+def review_finding_key(*, owner: str, contract: str, consequence: str) -> str:
+    """Derive a wording-independent key from the finding's semantic identity."""
+    fields: dict[str, str] = {}
+    for label, value in (
+        ("owner", owner),
+        ("contract", contract),
+        ("consequence", consequence),
+    ):
+        if not isinstance(value, str):
+            raise RunnerError(f"review finding {label} must be a string")
+        normalized = " ".join(value.strip().casefold().split())
+        if not normalized or len(normalized.encode("utf-8")) > 1024:
+            raise RunnerError(f"review finding {label} is empty or too large")
+        fields[label] = normalized
+    return sha256_bytes(BROWSER_QA_FINDING_DOMAIN + _canonical_json_bytes(fields))
+
+
+def review_progress_record(
+    *,
+    specification_lineage_digest: str,
+    specification_revision: str,
+    full_diff_digest: str,
+    validation_digest: str,
+    acceptance_criteria_digest: str,
+    open_finding_keys: list[str],
+    closed_finding_keys: list[str],
+) -> dict[str, Any]:
+    """Create the canonical, path-free review-progress value for one diff epoch."""
+    if not isinstance(specification_revision, str) or not re.fullmatch(r"R-[0-9]{3,}", specification_revision):
+        raise RunnerError("review progress specification revision is invalid")
+    open_keys = _canonical_finding_keys(open_finding_keys, "open finding keys")
+    closed_keys = _canonical_finding_keys(closed_finding_keys, "closed finding keys")
+    if set(open_keys) & set(closed_keys):
+        raise RunnerError("review progress finding_key cannot be both open and closed")
+    record: dict[str, Any] = {
+        "schema": "openbuild.review-progress.v2",
+        "specification_lineage_digest": _require_lower_hex(
+            specification_lineage_digest, "review progress specification lineage"
+        ),
+        "specification_revision": specification_revision,
+        "full_diff_digest": _require_lower_hex(full_diff_digest, "review progress full diff"),
+        "validation_digest": _require_lower_hex(validation_digest, "review progress validation"),
+        "acceptance_criteria_digest": _require_lower_hex(
+            acceptance_criteria_digest, "review progress acceptance criteria"
+        ),
+        "open_finding_keys": open_keys,
+        "closed_finding_keys": closed_keys,
+    }
+    record["progress_digest"] = sha256_bytes(REVIEW_PROGRESS_DOMAIN + _canonical_json_bytes(record))
+    return record
+
+
+def _legacy_review_progress_record(
+    *,
+    specification_revision: str,
+    full_diff_digest: str,
+    validation_digest: str,
+    acceptance_criteria_digest: str,
+    open_finding_keys: list[str],
+    closed_finding_keys: list[str],
+) -> dict[str, Any]:
+    """Rebuild a 2.4.1-pre-release progress value so existing private ledgers remain readable."""
+    if not isinstance(specification_revision, str) or not re.fullmatch(r"R-[0-9]{3,}", specification_revision):
+        raise RunnerError("review progress specification revision is invalid")
+    open_keys = _canonical_finding_keys(open_finding_keys, "open finding keys")
+    closed_keys = _canonical_finding_keys(closed_finding_keys, "closed finding keys")
+    if set(open_keys) & set(closed_keys):
+        raise RunnerError("review progress finding_key cannot be both open and closed")
+    record: dict[str, Any] = {
+        "schema": "openbuild.review-progress.v1",
+        "specification_revision": specification_revision,
+        "full_diff_digest": _require_lower_hex(full_diff_digest, "review progress full diff"),
+        "validation_digest": _require_lower_hex(validation_digest, "review progress validation"),
+        "acceptance_criteria_digest": _require_lower_hex(
+            acceptance_criteria_digest, "review progress acceptance criteria"
+        ),
+        "open_finding_keys": open_keys,
+        "closed_finding_keys": closed_keys,
+    }
+    record["progress_digest"] = sha256_bytes(
+        LEGACY_REVIEW_PROGRESS_DOMAIN + _canonical_json_bytes(record)
+    )
+    return record
+
+
+def _validate_review_progress(value: Mapping[str, Any], label: str) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise RunnerError(f"{label} must be an object")
+    legacy_fields = {
+        "schema",
+        "specification_revision",
+        "full_diff_digest",
+        "validation_digest",
+        "acceptance_criteria_digest",
+        "open_finding_keys",
+        "closed_finding_keys",
+        "progress_digest",
+    }
+    fields = legacy_fields | {"specification_lineage_digest"}
+    if value.get("schema") == "openbuild.review-progress.v1" and set(value) == legacy_fields:
+        record = _legacy_review_progress_record(
+            specification_revision=value.get("specification_revision"),
+            full_diff_digest=value.get("full_diff_digest"),
+            validation_digest=value.get("validation_digest"),
+            acceptance_criteria_digest=value.get("acceptance_criteria_digest"),
+            open_finding_keys=value.get("open_finding_keys"),
+            closed_finding_keys=value.get("closed_finding_keys"),
+        )
+    elif value.get("schema") == "openbuild.review-progress.v2" and set(value) == fields:
+        record = review_progress_record(
+            specification_lineage_digest=value.get("specification_lineage_digest"),
+            specification_revision=value.get("specification_revision"),
+            full_diff_digest=value.get("full_diff_digest"),
+            validation_digest=value.get("validation_digest"),
+            acceptance_criteria_digest=value.get("acceptance_criteria_digest"),
+            open_finding_keys=value.get("open_finding_keys"),
+            closed_finding_keys=value.get("closed_finding_keys"),
+        )
+    else:
+        raise RunnerError(f"{label} fields are incomplete or unknown")
+    if value.get("schema") != record["schema"] or value.get("progress_digest") != record["progress_digest"]:
+        raise RunnerError(f"{label} canonical digest drifted")
+    return record
+
+
+def review_progress_decision(
+    previous: Mapping[str, Any],
+    current: Mapping[str, Any],
+) -> dict[str, str]:
+    """Fail closed when another review epoch has no independently visible progress."""
+    before = _validate_review_progress(previous, "previous review progress")
+    after = _validate_review_progress(current, "current review progress")
+    if before.get("specification_lineage_digest") != after.get("specification_lineage_digest"):
+        raise RunnerError("review progress specification lineage drifted")
+    if before["specification_revision"] != after["specification_revision"]:
+        before_revision = int(before["specification_revision"].removeprefix("R-"))
+        after_revision = int(after["specification_revision"].removeprefix("R-"))
+        if after_revision <= before_revision:
+            raise RunnerError("review progress specification revision did not advance")
+        if before["full_diff_digest"] == after["full_diff_digest"]:
+            raise RunnerError("review progress specification revision changed without a new diff")
+    if before["progress_digest"] == after["progress_digest"]:
+        return {"status": "automation-exhausted", "reason": "unchanged-progress-digest"}
+    before_open = set(before["open_finding_keys"])
+    after_open = set(after["open_finding_keys"])
+    before_closed = set(before["closed_finding_keys"])
+    after_closed = set(after["closed_finding_keys"])
+    if not before_closed <= after_closed:
+        raise RunnerError("review progress reopened an already closed finding_key")
+    removed = before_open - after_open
+    if not removed <= after_closed:
+        raise RunnerError("review progress dropped a finding_key without closing it")
+    persistent = sorted(before_open & after_open)
+    if persistent:
+        return {"status": "automation-exhausted", "reason": "unchanged-finding-key"}
+    closed = after_closed - before_closed
+    validation_or_ac_changed = (
+        before["validation_digest"] != after["validation_digest"]
+        or before["acceptance_criteria_digest"] != after["acceptance_criteria_digest"]
+    )
+    if (
+        before["full_diff_digest"] != after["full_diff_digest"]
+        and not validation_or_ac_changed
+        and not closed
+    ):
+        return {"status": "automation-exhausted", "reason": "diff-only-churn"}
+    return {"status": "progressed", "reason": "validation-ac-or-finding-change"}
+
+
+def _review_progress_paths(registry: RecoveryRegistry) -> tuple[Path, Path]:
+    return (
+        registry.directory / "review-progress-ledger-v1.json",
+        registry.directory / "review-progress-ledger-v1.lock",
+    )
+
+
+def _review_dispatch_entry(
+    *,
+    run_id: str,
+    agent_name: str,
+    task_name: str,
+    progress: Mapping[str, Any],
+    decision: Mapping[str, str],
+) -> dict[str, Any]:
+    if (
+        not isinstance(run_id, str)
+        or not run_id
+        or len(run_id.encode("utf-8")) > 255
+        or "/" in run_id
+        or "\\" in run_id
+    ):
+        raise RunnerError("review dispatch run identity is invalid")
+    if agent_name not in SUPPORTED_AGENTS or not agent_name.startswith("openbuild_review_"):
+        raise RunnerError("review dispatch profile is invalid")
+    if not isinstance(task_name, str) or not task_name.strip():
+        raise RunnerError("review dispatch task is empty")
+    if set(decision) != {"status", "reason"} or decision.get("status") not in {
+        "first-review",
+        "progressed",
+    }:
+        raise RunnerError("review dispatch progress decision is not eligible")
+    entry: dict[str, Any] = {
+        "schema": "openbuild.review-dispatch.v1",
+        "run_id": run_id,
+        "agent_name": agent_name,
+        "task_name": task_name.strip(),
+        "progress": _validate_review_progress(progress, "review dispatch progress"),
+        "decision": dict(decision),
+    }
+    entry["entry_digest"] = sha256_bytes(
+        REVIEW_DISPATCH_DOMAIN + _canonical_json_bytes(entry)
+    )
+    return entry
+
+
+def _review_progress_ledger(
+    *,
+    workspace_key: str,
+    entries: list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    _require_lower_hex(workspace_key, "review progress workspace key")
+    if len(entries) > REVIEW_LEDGER_MAX_ENTRIES:
+        raise RunnerError("review progress ledger entry limit exceeded")
+    canonical_entries: list[dict[str, Any]] = []
+    seen_runs: set[str] = set()
+    for raw in entries:
+        if not isinstance(raw, Mapping) or set(raw) != {
+            "schema",
+            "run_id",
+            "agent_name",
+            "task_name",
+            "progress",
+            "decision",
+            "entry_digest",
+        }:
+            raise RunnerError("review progress ledger entry is incomplete or unknown")
+        entry = _review_dispatch_entry(
+            run_id=raw.get("run_id"),
+            agent_name=raw.get("agent_name"),
+            task_name=raw.get("task_name"),
+            progress=raw.get("progress"),
+            decision=raw.get("decision"),
+        )
+        if raw.get("schema") != entry["schema"] or raw.get("entry_digest") != entry["entry_digest"]:
+            raise RunnerError("review progress ledger entry digest drifted")
+        if entry["run_id"] in seen_runs:
+            raise RunnerError("review progress ledger repeats a run identity")
+        seen_runs.add(entry["run_id"])
+        canonical_entries.append(entry)
+    ledger: dict[str, Any] = {
+        "schema": "openbuild.review-progress-ledger.v1",
+        "workspace_key": workspace_key,
+        "entries": canonical_entries,
+    }
+    ledger["ledger_digest"] = sha256_bytes(
+        REVIEW_LEDGER_DOMAIN + _canonical_json_bytes(ledger)
+    )
+    if len(_canonical_json_bytes(ledger)) > REVIEW_LEDGER_MAX_BYTES:
+        raise RunnerError("review progress ledger byte limit exceeded")
+    return ledger
+
+
+def _read_review_progress_ledger(registry: RecoveryRegistry) -> dict[str, Any]:
+    path, _lock_path = _review_progress_paths(registry)
+    if not path.is_file():
+        return _review_progress_ledger(
+            workspace_key=registry.workspace_key,
+            entries=[],
+        )
+    try:
+        raw = _read_existing_private_prompt_bytes(
+            path,
+            maximum=REVIEW_LEDGER_MAX_BYTES,
+        )
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, RunnerError) as exc:
+        raise RunnerError("review progress ledger is unreadable") from exc
+    if not isinstance(value, Mapping) or set(value) != {
+        "schema",
+        "workspace_key",
+        "entries",
+        "ledger_digest",
+    }:
+        raise RunnerError("review progress ledger is incomplete or unknown")
+    entries = value.get("entries")
+    if not isinstance(entries, list):
+        raise RunnerError("review progress ledger entries are malformed")
+    ledger = _review_progress_ledger(
+        workspace_key=value.get("workspace_key"),
+        entries=entries,
+    )
+    if (
+        value.get("schema") != ledger["schema"]
+        or value.get("workspace_key") != registry.workspace_key
+        or value.get("ledger_digest") != ledger["ledger_digest"]
+    ):
+        raise RunnerError("review progress ledger binding drifted")
+    return ledger
+
+
+def review_progress_from_args(args: argparse.Namespace) -> dict[str, Any] | None:
+    values = (
+        getattr(args, "review_specification_lineage_digest", None),
+        getattr(args, "review_specification_revision", None),
+        getattr(args, "review_full_diff_digest", None),
+        getattr(args, "review_validation_digest", None),
+        getattr(args, "review_acceptance_criteria_digest", None),
+    )
+    finding_values = (
+        getattr(args, "review_open_finding_key", None) or [],
+        getattr(args, "review_closed_finding_key", None) or [],
+    )
+    is_review = str(getattr(args, "agent", "")).startswith("openbuild_review_")
+    if not is_review:
+        if any(value is not None for value in values) or any(finding_values):
+            raise RunnerError("review progress arguments are valid only for review agents")
+        return None
+    if any(value is None for value in values):
+        raise RunnerError(
+            "review dispatch requires specification lineage, revision, full-diff, validation, and acceptance-criteria digests"
+        )
+    return review_progress_record(
+        specification_lineage_digest=values[0],
+        specification_revision=values[1],
+        full_diff_digest=values[2],
+        validation_digest=values[3],
+        acceptance_criteria_digest=values[4],
+        open_finding_keys=list(finding_values[0]),
+        closed_finding_keys=list(finding_values[1]),
+    )
+
+
+def _review_progress_dispatch_decision(
+    ledger: Mapping[str, Any],
+    current: Mapping[str, Any],
+) -> dict[str, str]:
+    entries = ledger.get("entries")
+    if not isinstance(entries, list):
+        raise RunnerError("review progress ledger entries are malformed")
+    current_record = _validate_review_progress(current, "current review progress")
+    lineage = current_record.get("specification_lineage_digest")
+    same_lineage_entries = [
+        entry
+        for entry in entries
+        if isinstance(entry, Mapping)
+        and isinstance(entry.get("progress"), Mapping)
+        and entry["progress"].get("specification_lineage_digest") == lineage
+    ]
+    same_diff_attempts = sum(
+        1
+        for entry in same_lineage_entries
+        if isinstance(entry, Mapping)
+        and isinstance(entry.get("progress"), Mapping)
+        and entry["progress"].get("full_diff_digest") == current_record["full_diff_digest"]
+    )
+    if same_diff_attempts >= REVIEW_MAX_STEPS_PER_DIFF:
+        raise RunnerError("review automation exhausted for the immutable full diff")
+    if not same_lineage_entries:
+        return {"status": "first-review", "reason": "no-prior-review-progress-for-lineage"}
+    previous = same_lineage_entries[-1].get("progress")
+    decision = review_progress_decision(previous, current_record)
+    if decision["status"] != "progressed":
+        raise RunnerError(f"review automation exhausted: {decision['reason']}")
+    return decision
+
+
+def preview_review_dispatch(
+    *,
+    repo: Path,
+    progress: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Consult owner-private review state without mutating it."""
+    registry = RecoveryRegistry(repo)
+    ensure_private_run_dir(registry.directory)
+    with registry._lock():
+        ledger = _read_review_progress_ledger(registry)
+        decision = _review_progress_dispatch_decision(ledger, progress)
+    return {
+        "workspace_key": registry.workspace_key,
+        "expected_ledger_digest": ledger["ledger_digest"],
+        "progress": _validate_review_progress(progress, "review dispatch progress"),
+        "decision": decision,
+    }
+
+
+def commit_review_dispatch(
+    *,
+    repo: Path,
+    run_id: str,
+    agent_name: str,
+    task_name: str,
+    preview: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Append one review attempt only when the consulted ledger is unchanged."""
+    if not isinstance(preview, Mapping) or set(preview) != {
+        "workspace_key",
+        "expected_ledger_digest",
+        "progress",
+        "decision",
+    }:
+        raise RunnerError("review dispatch preview is incomplete or unknown")
+    registry = RecoveryRegistry(repo)
+    ensure_private_run_dir(registry.directory)
+    if preview.get("workspace_key") != registry.workspace_key:
+        raise RunnerError("review dispatch workspace binding drifted")
+    path, _lock_path = _review_progress_paths(registry)
+    with registry._lock():
+        ledger = _read_review_progress_ledger(registry)
+        if ledger["ledger_digest"] != preview.get("expected_ledger_digest"):
+            raise RunnerError("review progress changed before dispatch")
+        decision = _review_progress_dispatch_decision(ledger, preview.get("progress"))
+        if decision != preview.get("decision"):
+            raise RunnerError("review dispatch progress decision drifted")
+        entry = _review_dispatch_entry(
+            run_id=run_id,
+            agent_name=agent_name,
+            task_name=task_name,
+            progress=preview["progress"],
+            decision=decision,
+        )
+        updated = _review_progress_ledger(
+            workspace_key=registry.workspace_key,
+            entries=[*ledger["entries"], entry],
+        )
+        try:
+            durable_write_private_json(path, updated)
+        except (OSError, RecoveryStateError) as exc:
+            raise RunnerError(f"durable review progress append failed closed: {exc}") from exc
+    return {
+        "schema": entry["schema"],
+        "entry_digest": entry["entry_digest"],
+        "progress_digest": entry["progress"]["progress_digest"],
+        "decision": entry["decision"],
+    }
+
+
+def browser_qa_receipt(
+    *,
+    specification_revision: str,
+    pre_worktree_digest: str,
+    post_worktree_digest: str,
+    argv_digest: str,
+    scenario_manifest_digest: str,
+    network_guard_digest: str,
+    nonce: str,
+    child_pid: int,
+    child_identity: str,
+    exit_code: int | None,
+    process_tree_stopped: bool,
+    observed_external_requests: int,
+    observed_external_actions: int,
+    runtime: str = "local-browser",
+    scenario_count: int = 1,
+    check_count: int = 1,
+    passed_checks: int = 1,
+) -> dict[str, Any]:
+    """Project one verified private browser-substitute observation safely.
+
+    This function accepts only runner-owned observations and projects digests;
+    it never emits a raw path, PID, process identity, cookie, environment, or
+    nonce.  Callers must retain the private lifecycle evidence separately.
+    """
+    if not isinstance(specification_revision, str) or not re.fullmatch(r"R-[0-9]{3,}", specification_revision):
+        raise RunnerError("browser QA specification revision is invalid")
+    for value, label in (
+        (pre_worktree_digest, "browser QA pre-worktree"),
+        (post_worktree_digest, "browser QA post-worktree"),
+        (argv_digest, "browser QA argv"),
+        (scenario_manifest_digest, "browser QA scenario manifest"),
+        (network_guard_digest, "browser QA network guard"),
+        (nonce, "browser QA nonce"),
+    ):
+        _require_lower_hex(value, label)
+    if pre_worktree_digest != post_worktree_digest:
+        raise RunnerError("browser QA worktree diff drifted")
+    if type(child_pid) is not int or child_pid <= 0 or not isinstance(child_identity, str) or not child_identity:
+        raise RunnerError("browser QA child creation identity is unavailable")
+    if type(exit_code) is not int or exit_code != 0:
+        raise RunnerError("browser QA substitute exit is not successful")
+    if process_tree_stopped is not True:
+        raise RunnerError("browser QA substitute process tree is live or unknown")
+    if type(observed_external_requests) is not int or type(observed_external_actions) is not int:
+        raise RunnerError("browser QA external observation is malformed")
+    if observed_external_requests != 0 or observed_external_actions != 0:
+        raise RunnerError("browser QA observed external request or action")
+    if (
+        not isinstance(runtime, str)
+        or not runtime
+        or len(runtime.encode("utf-8")) > 128
+        or type(scenario_count) is not int
+        or type(check_count) is not int
+        or type(passed_checks) is not int
+        or scenario_count <= 0
+        or check_count <= 0
+        or passed_checks != check_count
+    ):
+        raise RunnerError("browser QA scenario/check evidence is incomplete")
+    private_binding = {
+        "nonce": nonce,
+        "child_pid": child_pid,
+        "child_identity": child_identity,
+        "argv_digest": argv_digest,
+        "scenario_manifest_digest": scenario_manifest_digest,
+        "network_guard_digest": network_guard_digest,
+        "runtime": runtime,
+        "scenario_count": scenario_count,
+        "check_count": check_count,
+        "passed_checks": passed_checks,
+    }
+    receipt: dict[str, Any] = {
+        "schema": "openbuild.browser-qa.v1",
+        "specification_revision": specification_revision,
+        "pre_worktree_digest": pre_worktree_digest,
+        "post_worktree_digest": post_worktree_digest,
+        "argv_digest": argv_digest,
+        "scenario_manifest_digest": scenario_manifest_digest,
+        "network_guard_digest": network_guard_digest,
+        "runtime": runtime,
+        "scenario_count": scenario_count,
+        "check_count": check_count,
+        "passed_checks": passed_checks,
+        "evidence_limitation": "isolated-local-substitute",
+        "observation_digest": sha256_bytes(BROWSER_QA_DOMAIN + _canonical_json_bytes(private_binding)),
+    }
+    receipt["receipt_digest"] = sha256_bytes(BROWSER_QA_DOMAIN + _canonical_json_bytes(receipt))
+    return receipt
+
+
+def verify_browser_qa_receipt(
+    *,
+    receipt: Mapping[str, Any],
+    private_evidence: Mapping[str, Any],
+    expected_specification_revision: str,
+    expected_worktree_digest: str,
+    expected_argv_digest: str,
+    expected_scenario_manifest_digest: str,
+    consumed_receipt_digests: set[str],
+) -> dict[str, Any]:
+    """Re-derive one current-diff receipt and consume it exactly once."""
+    evidence_fields = {
+        "specification_revision",
+        "pre_worktree_digest",
+        "post_worktree_digest",
+        "argv_digest",
+        "scenario_manifest_digest",
+        "network_guard_digest",
+        "nonce",
+        "child_pid",
+        "child_identity",
+        "exit_code",
+        "process_tree_stopped",
+        "observed_external_requests",
+        "observed_external_actions",
+        "runtime",
+        "scenario_count",
+        "check_count",
+        "passed_checks",
+    }
+    if not isinstance(private_evidence, Mapping) or set(private_evidence) != evidence_fields:
+        raise RunnerError("browser QA private evidence is incomplete or self-authored")
+    expected = browser_qa_receipt(**dict(private_evidence))
+    if not isinstance(receipt, Mapping) or dict(receipt) != expected:
+        raise RunnerError("browser QA receipt is stale, tampered, or replaced")
+    if (
+        expected["specification_revision"] != expected_specification_revision
+        or expected["pre_worktree_digest"] != expected_worktree_digest
+        or expected["post_worktree_digest"] != expected_worktree_digest
+        or expected["argv_digest"] != expected_argv_digest
+        or expected["scenario_manifest_digest"] != expected_scenario_manifest_digest
+    ):
+        raise RunnerError("browser QA receipt does not bind the current revision or command")
+    digest = expected["receipt_digest"]
+    if digest in consumed_receipt_digests:
+        raise RunnerError("browser QA receipt replayed")
+    consumed_receipt_digests.add(digest)
+    return expected
+
+
+def _browser_qa_environment(environment: Mapping[str, str]) -> dict[str, str]:
+    """Return the deliberately credential-free environment for a QA child."""
+    blocked_fragments = (
+        "API_KEY",
+        "TOKEN",
+        "SECRET",
+        "COOKIE",
+        "PASSWORD",
+        "CREDENTIAL",
+        "AUTH",
+        "PROXY",
+    )
+    blocked_exact = PROVIDER_ENVIRONMENT_OVERRIDES | {
+        "OPENAI_PROVIDER",
+        "CODEX_PROVIDER",
+        "OPENBUILD_RUNTIME_PORT",
+    }
+    return {
+        key: value
+        for key, value in scrub_api_credentials(environment).items()
+        if key.upper() not in blocked_exact
+        and not any(fragment in key.upper() for fragment in blocked_fragments)
+    }
+
+
+def _validate_browser_qa_scenario(value: Mapping[str, Any]) -> tuple[list[str], str]:
+    """Validate the small immutable substitute manifest without publishing it."""
+    if not isinstance(value, Mapping) or set(value) != {"schema", "origins"}:
+        raise RunnerError("browser QA scenario manifest is incomplete or unknown")
+    if value.get("schema") != "openbuild.browser-qa-scenario.v1":
+        raise RunnerError("browser QA scenario manifest schema is unsupported")
+    origins = value.get("origins")
+    if not isinstance(origins, list) or not origins or any(not isinstance(item, str) for item in origins):
+        raise RunnerError("browser QA scenario origins are invalid")
+    normalized: list[str] = []
+    for origin in origins:
+        if origin == "file":
+            normalized.append(origin)
+            continue
+        match = re.fullmatch(r"http://(127\.0\.0\.1|localhost|\[::1\])(?::[0-9]{1,5})?", origin)
+        if match is None:
+            raise RunnerError("browser QA scenario origin is outside the loopback/file allowlist")
+        normalized.append(origin)
+    if len(normalized) != len(set(normalized)):
+        raise RunnerError("browser QA scenario origins are duplicated")
+    manifest = {"schema": value["schema"], "origins": sorted(normalized)}
+    return manifest["origins"], sha256_bytes(BROWSER_QA_DOMAIN + _canonical_json_bytes(manifest))
+
+
+def run_browser_qa_substitute(
+    *,
+    repo: Path,
+    specification_revision: str,
+    argv: list[str],
+    scenario_manifest: Mapping[str, Any],
+    network_guard: Any | None,
+    timeout_seconds: float = 60.0,
+) -> dict[str, Any]:
+    """Run one generic browser QA substitute and emit only a verified receipt.
+
+    The guard must attach while the Windows child is still suspended and emit
+    observations independently of child stdout/stderr.  No trusted guard is
+    currently synthesized from project code; absence is a fail-closed result.
+    """
+    if not isinstance(repo, Path) or not repo.is_dir():
+        raise RunnerError("browser QA repository is unavailable")
+    if not isinstance(argv, list) or not argv or any(not isinstance(item, str) or not item for item in argv):
+        raise RunnerError("browser QA argv is malformed")
+    if timeout_seconds <= 0:
+        raise RunnerError("browser QA timeout is invalid")
+    origins, scenario_digest = _validate_browser_qa_scenario(scenario_manifest)
+    for item in argv:
+        if item.startswith(("http://", "https://")) and item not in origins:
+            raise RunnerError("browser QA argv is outside the loopback/file allowlist")
+    if os.name != "nt":
+        raise RunnerError("browser QA pre-execution network isolation is unavailable")
+    if (
+        network_guard is None
+        or not callable(getattr(network_guard, "attach_suspended", None))
+        or not callable(getattr(network_guard, "finalize", None))
+    ):
+        raise RunnerError("browser QA independent network guard is unavailable")
+    try:
+        pre = compute_worktree_fingerprint(repo).public["digest"]
+    except (DiscoveryContractError, KeyError, TypeError) as exc:
+        raise RunnerError("browser QA pre-worktree fingerprint is unavailable") from exc
+    nonce = secrets.token_hex(32)
+    argv_digest = sha256_bytes(BROWSER_QA_DOMAIN + _canonical_json_bytes({"argv": argv}))
+    process: subprocess.Popen[Any] | None = None
+    observation: Mapping[str, Any] | None = None
+    guard_attachment: Mapping[str, Any] | None = None
+    windows_job: Any | None = None
+    try:
+        with tempfile.TemporaryDirectory(prefix="openbuild-browser-qa-") as profile:
+            environment = _browser_qa_environment(os.environ)
+            environment["OPENBUILD_BROWSER_QA_PROFILE"] = profile
+            environment["OPENBUILD_BROWSER_QA_NONCE"] = nonce
+            environment["OPENBUILD_BROWSER_QA_ALLOWED_ORIGINS"] = json.dumps(
+                origins,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            options: dict[str, Any]
+            if os.name == "nt":
+                windows_job = create_windows_kill_job(bind_current=False)
+                options = {
+                    "creationflags": (
+                        subprocess.CREATE_NEW_PROCESS_GROUP
+                        | subprocess.CREATE_NO_WINDOW
+                        | _WINDOWS_CREATE_SUSPENDED
+                    )
+                }
+            else:
+                options = {"start_new_session": True}
+            process = subprocess.Popen(
+                argv,
+                cwd=repo,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=False,
+                **options,
+            )
+            identity = process_identity_from_popen(process)
+            if identity is None:
+                raise RunnerError("browser QA child creation identity is unavailable")
+            setattr(process, "_openbuild_process_identity", identity)
+            if windows_job is not None:
+                assign_windows_process_to_job(windows_job, process)
+                verify_windows_process_in_job(windows_job, process)
+                guard_attachment = network_guard.attach_suspended(
+                    process=process,
+                    nonce=nonce,
+                    allowed_origins=tuple(origins),
+                )
+                expected_origin_digest = sha256_bytes(
+                    BROWSER_QA_DOMAIN
+                    + _canonical_json_bytes({"allowed_origins": sorted(origins)})
+                )
+                if (
+                    not isinstance(guard_attachment, Mapping)
+                    or set(guard_attachment)
+                    != {
+                        "schema",
+                        "guard_id",
+                        "nonce",
+                        "allowed_origins_digest",
+                        "enforced_before_resume",
+                    }
+                    or guard_attachment.get("schema")
+                    != "openbuild.browser-network-guard.v1"
+                    or not isinstance(guard_attachment.get("guard_id"), str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", guard_attachment["guard_id"])
+                    or guard_attachment.get("nonce") != nonce
+                    or guard_attachment.get("allowed_origins_digest")
+                    != expected_origin_digest
+                    or guard_attachment.get("enforced_before_resume") is not True
+                ):
+                    raise RunnerError("browser QA independent network guard did not attach")
+                resume_windows_suspended_process(process)
+            try:
+                stdout, stderr = process.communicate(timeout=timeout_seconds)
+            except subprocess.TimeoutExpired as exc:
+                raise RunnerError("browser QA substitute exceeded its observation window") from exc
+            if len(stdout) > 1024 * 1024 or len(stderr) > 1024 * 1024:
+                raise RunnerError("browser QA substitute output exceeded its evidence limit")
+            if process.poll() is None:
+                raise RunnerError("browser QA substitute exit is unknown")
+            observation = network_guard.finalize(
+                attachment=guard_attachment,
+                process=process,
+            )
+            if not isinstance(observation, Mapping) or set(observation) != {
+                "schema",
+                "guard_id",
+                "nonce",
+                "independently_observed",
+                "external_requests",
+                "external_actions",
+                "runtime",
+                "scenario_count",
+                "check_count",
+                "passed_checks",
+            }:
+                raise RunnerError("browser QA independent observation is incomplete")
+            if (
+                observation.get("schema") != "openbuild.browser-network-observation.v1"
+                or observation.get("guard_id") != guard_attachment.get("guard_id")
+                or observation.get("nonce") != nonce
+                or observation.get("independently_observed") is not True
+            ):
+                raise RunnerError("browser QA private observation nonce drifted")
+            if windows_job is not None:
+                tree_deadline = time.monotonic() + 5.0
+                while (
+                    query_windows_job_active_processes(windows_job) != 0
+                    and time.monotonic() < tree_deadline
+                ):
+                    time.sleep(0.05)
+                tree_stopped = query_windows_job_active_processes(windows_job) == 0
+            else:
+                tree_stopped = process_group_status(process.pid) == "stopped"
+            try:
+                post = compute_worktree_fingerprint(repo).public["digest"]
+            except (DiscoveryContractError, KeyError, TypeError) as exc:
+                raise RunnerError("browser QA post-worktree fingerprint is unavailable") from exc
+            private_evidence = {
+                "specification_revision": specification_revision,
+                "pre_worktree_digest": pre,
+                "post_worktree_digest": post,
+                "argv_digest": argv_digest,
+                "scenario_manifest_digest": scenario_digest,
+                "network_guard_digest": sha256_bytes(
+                    BROWSER_QA_DOMAIN + _canonical_json_bytes(dict(guard_attachment))
+                ),
+                "nonce": nonce,
+                "child_pid": process.pid,
+                "child_identity": identity,
+                "exit_code": process.returncode,
+                "process_tree_stopped": tree_stopped,
+                "observed_external_requests": observation["external_requests"],
+                "observed_external_actions": observation["external_actions"],
+                "runtime": observation["runtime"],
+                "scenario_count": observation["scenario_count"],
+                "check_count": observation["check_count"],
+                "passed_checks": observation["passed_checks"],
+            }
+            receipt = browser_qa_receipt(**private_evidence)
+            return verify_browser_qa_receipt(
+                receipt=receipt,
+                private_evidence=private_evidence,
+                expected_specification_revision=specification_revision,
+                expected_worktree_digest=pre,
+                expected_argv_digest=argv_digest,
+                expected_scenario_manifest_digest=scenario_digest,
+                consumed_receipt_digests=set(),
+            )
+    finally:
+        if windows_job is not None:
+            try:
+                if query_windows_job_active_processes(windows_job) != 0:
+                    terminate_guardian_provider("windows-job", windows_job)
+            finally:
+                close_windows_job(windows_job)
+        elif process is not None:
+            group_state = process_group_status(process.pid)
+            if group_state == "running":
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+
+def trusted_browser_network_guard() -> Any | None:
+    """Return only an owner-provided guard; project or child evidence is never trusted."""
+    return None
+
+
+def browser_qa_substitute_run(args: argparse.Namespace) -> int:
+    """CLI owner for the isolated substitute; fail closed when no guard exists."""
+    repo = Path(args.repo).expanduser().resolve()
+    scenario_path = Path(args.scenario_file).expanduser().resolve()
+    if not repo.is_dir() or not scenario_path.is_file():
+        raise RunnerError("browser QA repository or scenario manifest is unavailable")
+    try:
+        raw = read_regular_file_no_follow(scenario_path)
+        if raw is None or len(raw) > 64 * 1024:
+            raise RunnerError("browser QA scenario manifest is unavailable or too large")
+        scenario = json.loads(raw.decode("utf-8"))
+    except (DiscoveryContractError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RunnerError("browser QA scenario manifest is unreadable") from exc
+    if not isinstance(scenario, Mapping):
+        raise RunnerError("browser QA scenario manifest must be an object")
+    argv = list(args.qa_argv)
+    if argv and argv[0] == "--":
+        argv = argv[1:]
+    receipt = run_browser_qa_substitute(
+        repo=repo,
+        specification_revision=args.specification_revision,
+        argv=argv,
+        scenario_manifest=scenario,
+        network_guard=trusted_browser_network_guard(),
+        timeout_seconds=args.timeout,
+    )
+    print(json.dumps(receipt, ensure_ascii=False, indent=2))
+    return 0
 
 
 def nonrecovery_allowed_set_digest(allowed_files: list[str]) -> str:
@@ -6705,7 +7671,22 @@ def record_root_completion_authorization_run(args: argparse.Namespace) -> int:
         )
     except (OSError, RecoveryStateError) as exc:
         raise RunnerError(f"durable root completion audit failed closed: {exc}") from exc
-    print(json.dumps(record, ensure_ascii=False, indent=2))
+    continuation = automatic_continuation_record(
+        root_completion_audit=record,
+        requested_action=getattr(args, "continuation_action", "run"),
+    )
+    continuation_path = run_dir / "automatic-continuation.json"
+    if continuation_path.is_file() and read_json(continuation_path) != continuation:
+        raise RunnerError("automatic continuation replay binding drifted")
+    try:
+        durable_write_private_json(
+            continuation_path,
+            continuation,
+            fault=getattr(args, "durability_fault", None),
+        )
+    except (OSError, RecoveryStateError) as exc:
+        raise RunnerError(f"durable automatic continuation failed closed: {exc}") from exc
+    print(json.dumps({**record, "continuation": continuation}, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -7255,6 +8236,12 @@ def _start_run(args: argparse.Namespace) -> int:
     if run_dir.exists() and any(run_dir.iterdir()):
         raise RunnerError(f"run directory must be absent or empty: {run_dir}")
     ensure_private_run_dir(run_dir)
+    review_progress = review_progress_from_args(args)
+    review_dispatch_preview = (
+        preview_review_dispatch(repo=repo, progress=review_progress)
+        if review_progress is not None
+        else None
+    )
 
     codex_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).expanduser().resolve()
     validate_subscription_configuration(codex_home, repo)
@@ -7308,6 +8295,21 @@ def _start_run(args: argparse.Namespace) -> int:
         is_git_repo=is_git_repository(repo),
     )
     effective_prompt(profile, args.task_name, task_prompt)
+    review_dispatch_binding: dict[str, Any] | None = None
+    if review_dispatch_preview is not None:
+        review_entry = _review_dispatch_entry(
+            run_id=run_dir.name,
+            agent_name=profile.name,
+            task_name=args.task_name,
+            progress=review_dispatch_preview["progress"],
+            decision=review_dispatch_preview["decision"],
+        )
+        review_dispatch_binding = {
+            "schema": review_entry["schema"],
+            "entry_digest": review_entry["entry_digest"],
+            "progress_digest": review_entry["progress"]["progress_digest"],
+            "decision": review_entry["decision"],
+        }
     prompt_snapshot = run_dir / "prompt.md"
     request = {
         "schema_version": SCHEMA_VERSION,
@@ -7336,6 +8338,8 @@ def _start_run(args: argparse.Namespace) -> int:
         "discovery_route_binding": discovery_route_binding,
         "search_fallback_source": search_fallback_source,
         "search_fallback_binding": search_fallback_binding,
+        "review_progress": review_progress,
+        "review_dispatch": review_dispatch_binding,
         "auth_mode": auth_mode,
         "activation_timeout": args.activation_timeout,
         "command": command,
@@ -7459,6 +8463,16 @@ def _start_run(args: argparse.Namespace) -> int:
     except (OSError, RecoveryStateError) as exc:
         raise RunnerError(f"durable run prompt binding failed closed: {exc}") from exc
 
+    if review_dispatch_preview is not None:
+        review_dispatch = commit_review_dispatch(
+            repo=repo,
+            run_id=run_dir.name,
+            agent_name=profile.name,
+            task_name=request["task_name"],
+            preview=review_dispatch_preview,
+        )
+        if review_dispatch != review_dispatch_binding:
+            raise RunnerError("review dispatch ledger binding drifted after request commit")
     if (
         registry is not None
         and registry_lease_id is not None
@@ -8548,6 +9562,16 @@ def add_project_lane_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--project-integration-ref")
 
 
+def add_review_progress_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--review-specification-lineage-digest")
+    parser.add_argument("--review-specification-revision")
+    parser.add_argument("--review-full-diff-digest")
+    parser.add_argument("--review-validation-digest")
+    parser.add_argument("--review-acceptance-criteria-digest")
+    parser.add_argument("--review-open-finding-key", action="append", default=[])
+    parser.add_argument("--review-closed-finding-key", action="append", default=[])
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -8568,6 +9592,7 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--specification-revision")
     start.add_argument("--recovery-target-milestone")
     add_project_lane_arguments(start)
+    add_review_progress_arguments(start)
     start.add_argument("--activation-timeout", type=float, default=300.0)
     start.add_argument("--codex-bin", default=os.environ.get("OPENBUILD_CODEX_BIN", "codex"))
     start.set_defaults(handler=start_run)
@@ -8591,6 +9616,7 @@ def build_parser() -> argparse.ArgumentParser:
     dispatch.add_argument("--specification-revision")
     dispatch.add_argument("--recovery-target-milestone")
     add_project_lane_arguments(dispatch)
+    add_review_progress_arguments(dispatch)
     dispatch.add_argument("--activation-timeout", type=float, default=300.0)
     dispatch.add_argument("--codex-bin", default=os.environ.get("OPENBUILD_CODEX_BIN", "codex"))
     dispatch.set_defaults(handler=dispatch_run)
@@ -8625,6 +9651,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     stage_prompt.add_argument("--repo", required=True)
     stage_prompt.set_defaults(handler=stage_prompt_run)
+
+    browser_qa = subparsers.add_parser(
+        "_browser-qa-substitute",
+        help=argparse.SUPPRESS,
+    )
+    browser_qa.add_argument("--repo", required=True)
+    browser_qa.add_argument("--specification-revision", required=True)
+    browser_qa.add_argument("--scenario-file", required=True)
+    browser_qa.add_argument("--timeout", type=float, default=60.0)
+    browser_qa.add_argument("qa_argv", nargs=argparse.REMAINDER)
+    browser_qa.set_defaults(handler=browser_qa_substitute_run)
 
     worker = subparsers.add_parser("_worker", help=argparse.SUPPRESS)
     worker.add_argument("--run-dir", required=True)
@@ -8684,6 +9721,11 @@ def build_parser() -> argparse.ArgumentParser:
     root_completion.add_argument("--milestone", required=True)
     root_completion.add_argument("--allowed-set-digest", required=True)
     root_completion.add_argument("--diff-attribution-digest", required=True)
+    root_completion.add_argument(
+        "--continuation-action",
+        choices=["run", "direct-fix", "qa", "review", "new-writer"],
+        default="run",
+    )
     root_completion.set_defaults(handler=record_root_completion_authorization_run)
     authorize = subparsers.add_parser("_authorize-recovery", help=argparse.SUPPRESS)
     authorize.add_argument("--repo", required=True)

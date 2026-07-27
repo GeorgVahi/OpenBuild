@@ -43,7 +43,7 @@ def _transition_aliases() -> Mapping[str, tuple[str, ...]]:
 
 REGISTRY_SCHEMA = 1
 IDENTITY_VERSION = 2
-READER_FLOOR = "2.4.0"
+READER_FLOOR = "2.4.1"
 _LEGACY_READER_FLOORS = {
     "2.2.0",
     "2.2.1",
@@ -53,6 +53,7 @@ _LEGACY_READER_FLOORS = {
     "2.3.2",
     "2.3.5",
     "2.3.6",
+    "2.4.0",
 }
 DEFAULT_MAX_RECORDS = 100_000
 DEFAULT_MAX_BYTES = 2 * 1024 * 1024 * 1024
@@ -81,6 +82,40 @@ _DOMAIN_CONTAINMENT_LOSS_ORPHAN_OBSERVATION = (
 _DOMAIN_REMEDIATION_SCOPE = b"openbuild-remediation-scope-v1\0"
 _DOMAIN_POST_COMMIT_ACTION = b"openbuild-post-commit-root-completion-action-v1\0"
 _DOMAIN_POST_COMMIT_AUTHORIZATION = b"openbuild-post-commit-root-completion-authorization-v1\0"
+_DOMAIN_SNAPSHOT_POLICY = b"openbuild-recovery-snapshot-policy-v1\0"
+
+_TASK_RELEVANT_SNAPSHOT_POLICY = {
+    "mode": "task-relevant-v2",
+    "allowed_ignored": "included",
+    "git_visible_status": "included",
+    "ignored_outside_scope": "excluded",
+}
+_FULL_IGNORED_SNAPSHOT_POLICY = {
+    "mode": "full-ignored-v1",
+    "allowed_ignored": "included",
+    "git_visible_status": "included",
+    "ignored_outside_scope": "included",
+}
+
+
+def _snapshot_policy(mode: str) -> dict[str, str]:
+    if mode == "task-relevant-v2":
+        return dict(_TASK_RELEVANT_SNAPSHOT_POLICY)
+    if mode == "full-ignored-v1":
+        return dict(_FULL_IGNORED_SNAPSHOT_POLICY)
+    raise RecoveryStateError("recovery snapshot inventory policy is unsupported")
+
+
+def _snapshot_policy_mode(snapshot: Mapping[str, Any]) -> str:
+    """Return the immutable capture mode, preserving legacy absent-policy state."""
+    policy = snapshot.get("inventory_policy")
+    if policy is None:
+        # Historic private sources have no policy field.  They must be read in
+        # their original full-inventory mode, never silently migrated on read.
+        return "full-ignored-v1"
+    if not isinstance(policy, Mapping) or dict(policy) != _TASK_RELEVANT_SNAPSHOT_POLICY:
+        raise RecoveryStateError("recovery snapshot inventory policy is malformed")
+    return "task-relevant-v2"
 
 
 class RecoveryStateError(RuntimeError):
@@ -439,6 +474,7 @@ def _validate_public_snapshot(value: Any, name: str) -> None:
             "hashed_bytes",
             "outside_set_delta",
         },
+        {"inventory_policy_id"},
     )
     for field in (
         "head_id",
@@ -462,6 +498,9 @@ def _validate_public_snapshot(value: Any, name: str) -> None:
         raise RecoveryStateError(f"{name} outside-set delta must be a list")
     for path_id in snapshot["outside_set_delta"]:
         _require_hex(path_id, f"{name} outside-set path ID")
+    policy_id = snapshot.get("inventory_policy_id")
+    if policy_id is not None:
+        _require_hex(policy_id, f"{name} inventory policy ID")
 
 
 def _validate_private_inventory_record(value: Any) -> None:
@@ -532,6 +571,7 @@ def _validate_private_snapshot(value: Any, name: str) -> None:
             "public",
             "allowed_set_digest",
         },
+        {"inventory_policy"},
     )
     _require_string(snapshot["head"], f"{name} HEAD")
     if snapshot["ref"] is not None:
@@ -572,6 +612,13 @@ def _validate_private_snapshot(value: Any, name: str) -> None:
         _require_string(path, f"{name} record path")
         _validate_private_inventory_record(record)
     _validate_public_snapshot(snapshot["public"], f"{name} public projection")
+    mode = _snapshot_policy_mode(snapshot)
+    expected_policy_id = _domain_digest(_DOMAIN_SNAPSHOT_POLICY, _snapshot_policy(mode))
+    if mode == "task-relevant-v2":
+        if snapshot["public"].get("inventory_policy_id") != expected_policy_id:
+            raise RecoveryStateError(f"{name} inventory policy projection drifted")
+    elif "inventory_policy_id" in snapshot["public"]:
+        raise RecoveryStateError(f"{name} legacy snapshot unexpectedly carries a policy projection")
     if snapshot["public"]["record_count"] != len(snapshot["records"]):
         raise RecoveryStateError(f"{name} private/public record count drifted")
     _require_hex(snapshot["allowed_set_digest"], f"{name} allowed-set digest")
@@ -3396,6 +3443,7 @@ class RecoveryRegistry:
             current = self._capture_snapshot(
                 key=key,
                 allowed_paths=source["pre_snapshot"]["allowed_paths"],
+                policy_mode=_snapshot_policy_mode(source["pre_snapshot"]),
             )
             if current != source["pre_snapshot"]:
                 raise RecoveryStateError(
@@ -4207,7 +4255,78 @@ class RecoveryRegistry:
             projected.append(item)
         return sorted(projected, key=lambda item: item["path_id"])
 
-    def _capture_snapshot(self, *, key: bytes, allowed_paths: Sequence[str]) -> dict[str, Any]:
+    def _ignored_entries_for_snapshot(
+        self,
+        *,
+        allowed: Sequence[str],
+        policy_mode: str,
+    ) -> dict[str, bool]:
+        base = ("ls-files", "--others", "--ignored", "--exclude-standard", "-z")
+        if policy_mode == "full-ignored-v1":
+            outputs = [self._git(*base)]
+        else:
+            roots: list[str] = []
+            for path in sorted(allowed, key=lambda value: (value.count("/"), value)):
+                if not any(
+                    path == root or path.startswith(root + "/")
+                    for root in roots
+                ):
+                    roots.append(path)
+            batches: list[list[str]] = []
+            batch: list[str] = []
+            batch_size = 0
+            for root in roots:
+                pathspec = f":(top,literal){root}"
+                size = len(pathspec.encode("utf-8")) + 1
+                if size > 16 * 1024:
+                    raise RecoveryStateError(
+                        "allowed path exceeds the bounded ignored-query argument size"
+                    )
+                if batch and batch_size + size > 16 * 1024:
+                    batches.append(batch)
+                    batch = []
+                    batch_size = 0
+                batch.append(pathspec)
+                batch_size += size
+            if batch:
+                batches.append(batch)
+            outputs = [
+                self._git(
+                    *base,
+                    "--directory",
+                    "--no-empty-directory",
+                    "--",
+                    *batch_paths,
+                )
+                for batch_paths in batches
+            ]
+
+        entries: dict[str, bool] = {}
+        for raw in outputs:
+            for item in raw.split(b"\0"):
+                if not item:
+                    continue
+                path, directory_marker = _decode_ignored_git_path(item)
+                if policy_mode == "task-relevant-v2" and not any(
+                    path == root or path.startswith(root + "/")
+                    for root in allowed
+                ):
+                    raise RecoveryStateError(
+                        "bounded ignored query returned a path outside the task allowlist"
+                    )
+                entries[path] = entries.get(path, False) or directory_marker
+                if len(entries) > self.max_records:
+                    raise RecoveryStateError("checkpoint record limit exceeded")
+        return entries
+
+    def _capture_snapshot(
+        self,
+        *,
+        key: bytes,
+        allowed_paths: Sequence[str],
+        policy_mode: str = "task-relevant-v2",
+    ) -> dict[str, Any]:
+        policy = _snapshot_policy(policy_mode)
         allowed = sorted({_normalize_relative(path) for path in allowed_paths})
         if len(allowed) != len(allowed_paths):
             raise RecoveryStateError("allowed paths contain a normalized collision")
@@ -4222,13 +4341,13 @@ class RecoveryRegistry:
         status_entries = self._parse_status(
             self._git("status", "--porcelain=v2", "-z", "--untracked-files=all")
         )
-        ignored_entries: dict[str, bool] = {}
-        ignored_raw = self._git("ls-files", "--others", "--ignored", "--exclude-standard", "-z")
-        for item in ignored_raw.split(b"\0"):
-            if not item:
-                continue
-            path, directory_marker = _decode_ignored_git_path(item)
-            ignored_entries[path] = ignored_entries.get(path, False) or directory_marker
+        # task-relevant-v2 gives Git only literal allowlist pathspecs and asks
+        # it to collapse wholly ignored directories.  Unlike the legacy mode,
+        # it never globally enumerates or buffers unrelated ignored trees.
+        ignored_entries = self._ignored_entries_for_snapshot(
+            allowed=allowed,
+            policy_mode=policy_mode,
+        )
         ignored_paths = sorted(ignored_entries)
         records: dict[str, dict[str, Any]] = {}
         aliases: dict[tuple[Any, ...], str] = {}
@@ -4280,7 +4399,9 @@ class RecoveryRegistry:
             "hashed_bytes": budget["bytes"],
             "outside_set_delta": [],
         }
-        return {
+        if policy_mode == "task-relevant-v2":
+            public["inventory_policy_id"] = _domain_digest(_DOMAIN_SNAPSHOT_POLICY, policy)
+        snapshot: dict[str, Any] = {
             "head": head,
             "ref": ref,
             "full_index": index_entries,
@@ -4292,6 +4413,9 @@ class RecoveryRegistry:
             "public": public,
             "allowed_set_digest": allowed_set_digest,
         }
+        if policy_mode == "task-relevant-v2":
+            snapshot["inventory_policy"] = policy
+        return snapshot
 
     @staticmethod
     def _path_is_allowed(path: str, allowed: Sequence[str], records: Mapping[str, Mapping[str, Any]]) -> bool:
@@ -4448,7 +4572,11 @@ class RecoveryRegistry:
         if checkpoint.get("checkpoint_digest") != stored.get("checkpoint_digest"):
             raise RecoveryStateError("checkpoint digest drifted")
         pre = source["pre_snapshot"]
-        candidate = self._capture_snapshot(key=key, allowed_paths=pre["allowed_paths"])
+        candidate = self._capture_snapshot(
+            key=key,
+            allowed_paths=pre["allowed_paths"],
+            policy_mode=_snapshot_policy_mode(pre),
+        )
         reasons: list[str] = []
         if (
             candidate["head"] != pre["head"]
@@ -4503,7 +4631,11 @@ class RecoveryRegistry:
         source = self._read_source_locked(source_state_id)
         key = bytes.fromhex(source["checkpoint_key"])
         pre = source["pre_snapshot"]
-        current = self._capture_snapshot(key=key, allowed_paths=pre["allowed_paths"])
+        current = self._capture_snapshot(
+            key=key,
+            allowed_paths=pre["allowed_paths"],
+            policy_mode=_snapshot_policy_mode(pre),
+        )
         if current != pre:
             raise RecoveryStateError(
                 "semantic escalation requires an authoritative zero-write snapshot"
@@ -4909,6 +5041,7 @@ class RecoveryRegistry:
                     current = self._capture_snapshot(
                         key=key,
                         allowed_paths=source["pre_snapshot"]["allowed_paths"],
+                        policy_mode=_snapshot_policy_mode(source["pre_snapshot"]),
                     )
                     current_digest = _digest(current)
                 except (KeyError, TypeError, RecoveryStateError) as exc:

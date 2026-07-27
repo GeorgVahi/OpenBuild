@@ -3467,6 +3467,36 @@ def validate_implementation_delegation_contract(
             "versioning.md v5 reconciliation: missing reader-floor rollout contract",
         ),
         (
+            skill_text,
+            "task-relevant-v2",
+            "SKILL.md R-005: missing task-relevant recovery snapshot contract",
+        ),
+        (
+            protocol_text,
+            "max_steps` is bounded per immutable full-diff revision",
+            "implementation-delegation.md R-005: missing immutable diff review budget",
+        ),
+        (
+            review_protocol,
+            "openbuild.review-progress.v2",
+            "review-protocol.md R-005: missing canonical review progress contract",
+        ),
+        (
+            review_protocol,
+            "Finding key: <canonical review_finding_key",
+            "review-protocol.md R-005: missing stable finding key result field",
+        ),
+        (
+            tdd_workflow,
+            "ignored outside-scope reparse point",
+            "tdd-workflow.md R-005: missing scoped ignored snapshot fixture",
+        ),
+        (
+            versioning_text,
+            "2.4.1 task-relevant recovery snapshot transition",
+            "versioning.md R-005: missing reader-floor rollout contract",
+        ),
+        (
             readme,
             "continues observing automatically within one immutable 15-minute budget",
             "README.md automatic orchestration: missing immutable 15-minute continuation",
@@ -5004,10 +5034,15 @@ def validate_project_lane_runner_bridge(
 def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> list[str]:
     errors: list[str] = []
     recovery_contract = [
-        ('READER_FLOOR = "2.4.0"', "reader floor"),
+        ('READER_FLOOR = "2.4.1"', "reader floor"),
         ('_LEGACY_READER_FLOORS = {', "legacy reader compatibility"),
         ('"2.3.5",', "2.3.5 reader compatibility"),
         ('"2.3.6",', "2.3.6 reader compatibility"),
+        ('"2.4.0",', "2.4.0 reader compatibility"),
+        ('"task-relevant-v2"', "task-relevant snapshot policy"),
+        ('"full-ignored-v1"', "legacy snapshot policy"),
+        ("_snapshot_policy_mode", "policy-bound revalidation"),
+        ("inventory_policy_id", "policy-bound public projection"),
         (
             "state = self._read_registry_for_write_locked(rebarrier=True)",
             "pending abandonment reader floor before source replay",
@@ -5169,6 +5204,8 @@ def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> lis
             "pre-publication source schema gate",
         ),
         ('"--ignored", "--exclude-standard", "-z"', "Git provenance"),
+        ('f":(top,literal){root}"', "task-relevant ignored pathspec"),
+        ('"--directory"', "bounded ignored directory listing"),
         ('b"openbuild-content-v1\\0"', "keyed privacy"),
         ('b"openbuild-path-v1\\0"', "keyed privacy"),
         ("DEFAULT_MAX_RECORDS = 100_000", "inventory limits"),
@@ -5381,6 +5418,25 @@ def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> lis
         ('"recovery_parent_checkpoint"', "runner target parent verification"),
         ("audit_guardian_health", "post-boundary guardian loss quarantine"),
         ("reconcile_implementation_registry", "runner terminal lifecycle"),
+        ("def automatic_continuation_policy(", "root-completion-first continuation policy"),
+        ("def automatic_continuation_record(", "durable continuation audit binding"),
+        ('run_dir / "automatic-continuation.json"', "production continuation receipt"),
+        ("def review_progress_record(", "canonical review progress"),
+        ("def review_progress_decision(", "review progress exhaustion gate"),
+        ("def preview_review_dispatch(", "review progress pre-dispatch consult"),
+        ("def commit_review_dispatch(", "durable review progress dispatch append"),
+        ("review_progress = review_progress_from_args(args)", "production review dispatch gate"),
+        ("def review_finding_key(", "stable review finding identity"),
+        ('b"openbuild.review-progress.v2\\0"', "review progress domain separation"),
+        ('"specification_lineage_digest"', "review progress lineage partition"),
+        ("def browser_qa_receipt(", "browser QA receipt"),
+        ("def verify_browser_qa_receipt(", "browser QA current-diff acceptance"),
+        ("def run_browser_qa_substitute(", "browser QA creation-bound lifecycle"),
+        ("def browser_qa_substitute_run(", "production browser QA owner"),
+        ('"enforced_before_resume"', "browser QA pre-execution network guard"),
+        ("def trusted_browser_network_guard(", "browser QA trusted guard boundary"),
+        ('"openbuild.browser-qa.v1"', "browser QA receipt schema"),
+        ('b"openbuild.browser-qa.v1\\0"', "browser QA domain separation"),
         ("registry.record_terminal_evidence", "runner terminal receipt binding"),
         ("_expected_lease_run_id(lease)", "terminal exact run binding"),
         (
@@ -5665,6 +5721,10 @@ def validate_recovery_control_plane(runner_text: str, recovery_text: str) -> lis
 
 
 def main() -> int:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(errors="replace")
     args = sys.argv[1:]
     if args not in ([], ["--commit-gate"], ["--no-commit-gate"]):
         print("Usage: python scripts/validate_package.py [--commit-gate|--no-commit-gate]")

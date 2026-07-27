@@ -40,6 +40,8 @@ For a recovery state-machine release, synchronize the manifest version with the 
 
 For a versioned repository, bump every Build-created commit unless an applicable repository policy explicitly defines a different release-only or generated scheme. Never postpone a required bump to a later cleanup commit.
 
+For the 2.4.1 task-relevant recovery snapshot transition, exact 2.4.0 and earlier supported floors remain readable without rewrite. A source whose snapshot omits the policy remains `full-ignored-v1`; a new source writes `task-relevant-v2` only after the registry floor is durably `2.4.1`, before any private-source replacement. The 2.4.1 reader must preserve that source mode through revalidation, and a 2.4.0 reader must reject a non-vacant 2.4.1 registry rather than interpreting the new policy as its historical full ignored inventory.
+
 ## Prerelease and release boundary
 
 - Use a repository-defined prerelease sequence for development branches when applicable; increment it for each commit that changes the installable or public contract.

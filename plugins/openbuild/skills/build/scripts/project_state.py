@@ -17,6 +17,7 @@ import re
 import secrets
 import stat
 import subprocess
+import time
 import unicodedata
 from contextlib import contextmanager
 from pathlib import Path
@@ -28,6 +29,7 @@ from recovery_state import RecoveryRegistry, RecoveryStateError
 
 SCHEMA_VERSION = 1
 MAX_JSON_BYTES = 256 * 1024
+WINDOWS_REPLACE_RETRY_SECONDS = 2.0
 _HEX_64 = frozenset("0123456789abcdef")
 _MILESTONE_ID = re.compile(r"[a-z][a-z0-9-]{0,62}\Z")
 _MILESTONE_STATES = frozenset({"ready", "waiting", "completed"})
@@ -399,9 +401,21 @@ def _windows_move_write_through(source: Path, target: Path, *, replace: bool) ->
     error = ctypes.get_last_error()
     if not replace and error in {80, 183}:
         raise FileExistsError(error, "private target already exists", str(target))
-    raise ProjectStateError(
+    failure = ProjectStateError(
         f"write-through private-object publish failed: {ctypes.WinError(error)}"
     )
+    failure.winerror = error  # type: ignore[attr-defined]
+    raise failure
+
+
+def _windows_replace_error_code(error: BaseException) -> int | None:
+    current: BaseException | None = error
+    while current is not None:
+        value = getattr(current, "winerror", None)
+        if isinstance(value, int):
+            return value
+        current = current.__cause__
+    return None
 
 
 def _create_windows_private_directory(path: Path, user_sid: str) -> None:
@@ -656,10 +670,24 @@ def _replace_json(path: Path, value: Mapping[str, Any]) -> None:
     temp = path.with_name(f".{path.name}.{secrets.token_hex(16)}.tmp")
     _write_exclusive_json(temp, value)
     try:
-        if os.name == "nt":
-            _windows_move_write_through(temp, path, replace=True)
-        else:
-            os.replace(temp, path)
+        deadline = time.monotonic() + WINDOWS_REPLACE_RETRY_SECONDS
+        delay = 0.01
+        while True:
+            try:
+                if os.name == "nt":
+                    _windows_move_write_through(temp, path, replace=True)
+                else:
+                    os.replace(temp, path)
+                break
+            except (OSError, ProjectStateError) as exc:
+                if (
+                    os.name != "nt"
+                    or _windows_replace_error_code(exc) not in {5, 32, 33}
+                    or time.monotonic() >= deadline
+                ):
+                    raise
+                time.sleep(delay)
+                delay = min(delay * 2, 0.1)
     except (OSError, ProjectStateError) as exc:
         raise ProjectStateError(
             "mutable coordinator state could not be replaced"

@@ -353,7 +353,34 @@ class RecoveryControlPlanePackageTests(unittest.TestCase):
         self.assertEqual(validate_recovery_control_plane(self.runner, self.recovery), [])
 
         mutations = [
-            ("recovery", 'READER_FLOOR = "2.4.0"', 'READER_FLOOR = "1"', "reader floor"),
+            ("recovery", 'READER_FLOOR = "2.4.1"', 'READER_FLOOR = "1"', "reader floor"),
+            ("recovery", '"2.4.0",', '"2.4.9",', "2.4.0 reader compatibility"),
+            ("recovery", '"task-relevant-v2"', '"unscoped-v2"', "task-relevant snapshot policy"),
+            ("recovery", 'f":(top,literal){root}"', 'f"{root}"', "task-relevant ignored pathspec"),
+            ("runner", 'def automatic_continuation_record(', 'def old_automatic_continuation_record(', "durable continuation audit binding"),
+            ("runner", 'def review_progress_record(', 'def old_review_progress_record(', "canonical review progress"),
+            ("runner", '"specification_lineage_digest"', '"legacy_task_id"', "review progress lineage partition"),
+            ("runner", 'def commit_review_dispatch(', 'def old_commit_review_dispatch(', "durable review progress dispatch append"),
+            ("runner", 'def review_finding_key(', 'def old_review_finding_key(', "stable review finding identity"),
+            ("runner", 'def browser_qa_receipt(', 'def browser_qa_log(', "browser QA receipt"),
+            (
+                "runner",
+                'def verify_browser_qa_receipt(',
+                'def old_verify_browser_qa_receipt(',
+                "browser QA current-diff acceptance",
+            ),
+            (
+                "runner",
+                'def run_browser_qa_substitute(',
+                'def old_run_browser_qa_substitute(',
+                "browser QA creation-bound lifecycle",
+            ),
+            (
+                "runner",
+                'def trusted_browser_network_guard(',
+                'def unsafe_browser_network_guard(',
+                "browser QA trusted guard boundary",
+            ),
             ("recovery", '"2.3.5",', '"2.3.4",', "2.3.5 reader compatibility"),
             ("recovery", '"2.3.6",', '"2.3.4",', "2.3.6 reader compatibility"),
             (

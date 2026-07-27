@@ -4,6 +4,25 @@ OpenBuild follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.4.1] - 2026-07-27
+
+### Added
+
+- Added the versioned `task-relevant-v2` recovery snapshot policy: allowed paths and Git-visible status remain fully inventoried, while unrelated ignored caches and reparse points are never globally enumerated, opened, or charged against checkpoint limits. Ignored classification uses bounded literal allowed-root pathspec batches; policy-less sources retain replay-compatible global `full-ignored-v1` revalidation, and the durable reader floor advances to `2.4.1`.
+- Added canonical lineage-bound review progress and stable finding keys backed by an owner-private digest ledger that every reviewer dispatch must consult and append, so remediating a reviewed diff opens a fresh bounded review epoch, unrelated Build specifications start independently in the same repository, and unchanged findings, concurrent ledger drift, a fourth same-diff attempt, and diff-only churn terminate deterministically as `automation-exhausted`. Legacy progress entries remain digest-verifiable without blocking a new lineage.
+- Added a creation-bound local Browser QA substitute with a fresh profile, credential stripping, loopback/file allowlisting, an independent network guard attached before child resume, full process-tree proof, current-diff binding, privacy-safe receipts, and stale/tamper/replay rejection. Project or child output is never accepted as network proof, and platforms without trusted pre-execution isolation fail closed before child code.
+
+### Fixed
+
+- Fixed repeated operational stops after contained-writer cancellation, terminal abandonment, semantic `BLOCKED`, false-green focused validation, and preserved partial diffs: OpenBuild now audits and consumes existing same-scope root-completion authority before returning an incomplete outcome.
+- Fixed recovery checkpoints being disabled by large `.scratch`, ignored `node_modules` contents, or ignored Windows reparse points outside the task scope.
+- Fixed the progressive-review ceiling being applied to the whole Build lifecycle instead of the immutable diff that was actually reviewed, and made unavailable Codex Browser sessions use the local substitute only when independently enforced isolation evidence is available.
+- Added a bounded retry for transient Windows access/sharing violations during mutable coordinator publication, while preserving fail-closed behavior for non-transient errors.
+
+### Changed
+
+- Preserved the packaged defaults, `codex-exec-explicit-model`, project → user → packaged precedence, and the ban on unknown-model agent routes; synchronized the manifest, CHANGELOG, README, and Russian README release pins for `2.4.1`.
+
 ## [2.4.0] - 2026-07-25
 
 ### Added

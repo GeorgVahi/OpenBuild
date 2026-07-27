@@ -1232,6 +1232,17 @@ class CodexInvocationTests(unittest.TestCase):
         agent_runner.atomic_write_bytes(prompt, content)
         return prompt
 
+    def review_progress_args(self) -> dict[str, object]:
+        return {
+            "review_specification_lineage_digest": "9" * 64,
+            "review_specification_revision": "R-006",
+            "review_full_diff_digest": "a" * 64,
+            "review_validation_digest": "b" * 64,
+            "review_acceptance_criteria_digest": "c" * 64,
+            "review_open_finding_key": [],
+            "review_closed_finding_key": [],
+        }
+
     def test_command_pins_model_effort_sandbox_jsonl_and_result_file(self) -> None:
         command = agent_runner.build_codex_command(
             codex_bin="codex",
@@ -1431,6 +1442,7 @@ class CodexInvocationTests(unittest.TestCase):
                 task_name="interrupt_cleanup",
                 activation_timeout=300.0,
                 codex_bin="codex",
+                **self.review_progress_args(),
             )
             with mock.patch.object(agent_runner, "validate_subscription_configuration"), mock.patch.object(
                 agent_runner, "load_agent_profile", return_value=profile
@@ -1471,6 +1483,7 @@ class CodexInvocationTests(unittest.TestCase):
                 task_name="unconfirmed_startup_cleanup",
                 activation_timeout=300.0,
                 codex_bin="codex",
+                **self.review_progress_args(),
             )
             with mock.patch.object(agent_runner, "validate_subscription_configuration"), mock.patch.object(
                 agent_runner, "load_agent_profile", return_value=profile
@@ -1512,6 +1525,7 @@ class CodexInvocationTests(unittest.TestCase):
                 task_name="unconfirmed_codex_spawn",
                 activation_timeout=300.0,
                 codex_bin="codex",
+                **self.review_progress_args(),
             )
 
             def spawn_worker(*_args: object, **_kwargs: object) -> object:
@@ -1565,6 +1579,7 @@ class CodexInvocationTests(unittest.TestCase):
                 task_name="interrupt_cleanup_failure",
                 activation_timeout=300.0,
                 codex_bin="codex",
+                **self.review_progress_args(),
             )
             with mock.patch.object(agent_runner, "validate_subscription_configuration"), mock.patch.object(
                 agent_runner, "load_agent_profile", return_value=profile
@@ -1607,6 +1622,7 @@ class CodexInvocationTests(unittest.TestCase):
                 task_name="interrupt_receipt_failure",
                 activation_timeout=300.0,
                 codex_bin="codex",
+                **self.review_progress_args(),
             )
             real_atomic_write_json = agent_runner.atomic_write_json
 
@@ -1652,6 +1668,7 @@ class CodexInvocationTests(unittest.TestCase):
                 task_name="artifact_cleanup",
                 activation_timeout=300.0,
                 codex_bin="codex",
+                **self.review_progress_args(),
             )
             real_atomic_write_json = agent_runner.atomic_write_json
 
@@ -1701,6 +1718,7 @@ class CodexInvocationTests(unittest.TestCase):
                 task_name="receipt_output_failure",
                 activation_timeout=300.0,
                 codex_bin="codex",
+                **self.review_progress_args(),
             )
             ready_receipt = {
                 "status": "running",
@@ -3767,7 +3785,15 @@ class CodexInvocationTests(unittest.TestCase):
                 )
             audit = json.loads(audit_output.getvalue())
             self.assertEqual(audit["event"], "root-completion-authorized")
+            self.assertEqual(
+                audit["continuation"]["policy"]["status"],
+                "continue-automatically",
+            )
+            self.assertFalse(
+                audit["continuation"]["policy"]["permission_prompt"],
+            )
             self.assertTrue((run_dir / "root-completion-authorized.json").is_file())
+            self.assertTrue((run_dir / "automatic-continuation.json").is_file())
             reloaded_owner = agent_runner.RecoveryRegistry(
                 repo, state_root=root / "state"
             )
@@ -4024,7 +4050,16 @@ class CodexInvocationTests(unittest.TestCase):
                 allowed_set_digest=checkpoint["allowed_set_digest"],
                 diff_attribution_digest=diff_attribution_digest,
             )
-            self.assertEqual(json.loads(audit_output.getvalue()), expected_audit)
+            self.assertEqual(
+                json.loads(audit_output.getvalue()),
+                {
+                    **expected_audit,
+                    "continuation": agent_runner.automatic_continuation_record(
+                        root_completion_audit=expected_audit,
+                        requested_action="run",
+                    ),
+                },
+            )
             self.assertEqual(
                 agent_runner.read_json(run_dir / "root-completion-authorized.json"),
                 expected_audit,
@@ -9715,6 +9750,451 @@ class M7b1ManagedOperationFenceTests(unittest.TestCase):
                         lambda: effects.append(transition_id),
                     )
         self.assertEqual(effects, [])
+
+
+class R005ContinuationReviewAndBrowserTests(unittest.TestCase):
+    def test_continuation_requires_root_audit_and_preserves_new_writer_decision(self) -> None:
+        policy = agent_runner.automatic_continuation_policy(
+            incomplete=True,
+            attributable_partial_diff=True,
+            root_completion_audited=False,
+            requested_action="review",
+        )
+        self.assertEqual(policy["status"], "blocked")
+        self.assertEqual(policy["reason"], "root-completion-audit-required")
+
+        continued = agent_runner.automatic_continuation_policy(
+            incomplete=True,
+            attributable_partial_diff=True,
+            root_completion_audited=True,
+            requested_action="review",
+        )
+        self.assertEqual(continued["status"], "continue-automatically")
+        self.assertFalse(continued["permission_prompt"])
+
+        writer = agent_runner.automatic_continuation_policy(
+            incomplete=True,
+            attributable_partial_diff=True,
+            root_completion_audited=True,
+            requested_action="new-writer",
+        )
+        self.assertEqual(writer["status"], "decision-required")
+        self.assertTrue(writer["permission_prompt"])
+        continuation = agent_runner.automatic_continuation_record(
+            root_completion_audit=agent_runner.root_completion_authorization_record(
+                specification_revision="R-006",
+                milestone="M1",
+                allowed_set_digest="a" * 64,
+                diff_attribution_digest="b" * 64,
+            ),
+            requested_action="review",
+        )
+        self.assertEqual(
+            continuation["policy"]["status"],
+            "continue-automatically",
+        )
+        self.assertFalse(continuation["policy"]["permission_prompt"])
+
+    def test_review_progress_is_canonical_and_detects_exhaustion(self) -> None:
+        first_key = agent_runner.review_finding_key(
+            owner=" recovery_state.py ",
+            contract="TASK-RELEVANT   SNAPSHOT",
+            consequence="Ignored cache blocks containment",
+        )
+        same_key = agent_runner.review_finding_key(
+            owner="recovery_state.py",
+            contract="task-relevant snapshot",
+            consequence="ignored cache blocks containment",
+        )
+        self.assertEqual(first_key, same_key)
+        baseline = agent_runner.review_progress_record(
+            specification_lineage_digest="9" * 64,
+            specification_revision="R-005",
+            full_diff_digest="a" * 64,
+            validation_digest="b" * 64,
+            acceptance_criteria_digest="c" * 64,
+            open_finding_keys=["2" * 64, "1" * 64],
+            closed_finding_keys=[],
+        )
+        self.assertEqual(baseline["schema"], "openbuild.review-progress.v2")
+        self.assertEqual(baseline["open_finding_keys"], ["1" * 64, "2" * 64])
+        with self.assertRaisesRegex(agent_runner.RunnerError, "duplicate"):
+            agent_runner.review_progress_record(
+                specification_lineage_digest="9" * 64,
+                specification_revision="R-005",
+                full_diff_digest="a" * 64,
+                validation_digest="b" * 64,
+                acceptance_criteria_digest="c" * 64,
+                open_finding_keys=["1" * 64, "1" * 64],
+                closed_finding_keys=[],
+            )
+        churn = agent_runner.review_progress_decision(baseline, agent_runner.review_progress_record(
+            specification_lineage_digest="9" * 64,
+            specification_revision="R-005",
+            full_diff_digest="d" * 64,
+            validation_digest="b" * 64,
+            acceptance_criteria_digest="c" * 64,
+            open_finding_keys=["1" * 64, "2" * 64],
+            closed_finding_keys=[],
+        ))
+        self.assertEqual(churn["status"], "automation-exhausted")
+        self.assertEqual(
+            agent_runner.review_progress_decision(baseline, baseline)["reason"],
+            "unchanged-progress-digest",
+        )
+        progressed = agent_runner.review_progress_decision(
+            baseline,
+            agent_runner.review_progress_record(
+                specification_lineage_digest="9" * 64,
+                specification_revision="R-006",
+                full_diff_digest="d" * 64,
+                validation_digest="e" * 64,
+                acceptance_criteria_digest="f" * 64,
+                open_finding_keys=[],
+                closed_finding_keys=["1" * 64, "2" * 64],
+            ),
+        )
+        self.assertEqual(progressed["status"], "progressed")
+        with self.assertRaisesRegex(agent_runner.RunnerError, "without a new diff"):
+            agent_runner.review_progress_decision(
+                baseline,
+                agent_runner.review_progress_record(
+                    specification_lineage_digest="9" * 64,
+                    specification_revision="R-006",
+                    full_diff_digest="a" * 64,
+                    validation_digest="e" * 64,
+                    acceptance_criteria_digest="f" * 64,
+                    open_finding_keys=[],
+                    closed_finding_keys=["1" * 64, "2" * 64],
+                ),
+            )
+        with self.assertRaisesRegex(agent_runner.RunnerError, "did not advance"):
+            agent_runner.review_progress_decision(
+                baseline,
+                agent_runner.review_progress_record(
+                    specification_lineage_digest="9" * 64,
+                    specification_revision="R-004",
+                    full_diff_digest="d" * 64,
+                    validation_digest="e" * 64,
+                    acceptance_criteria_digest="f" * 64,
+                    open_finding_keys=[],
+                    closed_finding_keys=["1" * 64, "2" * 64],
+                ),
+            )
+        with self.assertRaisesRegex(agent_runner.RunnerError, "without closing"):
+            agent_runner.review_progress_decision(
+                baseline,
+                agent_runner.review_progress_record(
+                    specification_lineage_digest="9" * 64,
+                    specification_revision="R-005",
+                    full_diff_digest="d" * 64,
+                    validation_digest="e" * 64,
+                    acceptance_criteria_digest="f" * 64,
+                    open_finding_keys=[],
+                    closed_finding_keys=[],
+                ),
+            )
+
+    def test_review_dispatch_persists_and_consults_private_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary) / "repo"
+            repo.mkdir()
+            first = agent_runner.review_progress_record(
+                specification_lineage_digest="9" * 64,
+                specification_revision="R-006",
+                full_diff_digest="a" * 64,
+                validation_digest="b" * 64,
+                acceptance_criteria_digest="c" * 64,
+                open_finding_keys=[],
+                closed_finding_keys=[],
+            )
+            preview = agent_runner.preview_review_dispatch(repo=repo, progress=first)
+            committed = agent_runner.commit_review_dispatch(
+                repo=repo,
+                run_id="review-1",
+                agent_name="openbuild_review_balanced",
+                task_name="balanced review",
+                preview=preview,
+            )
+            self.assertEqual(committed["decision"]["status"], "first-review")
+            owner = agent_runner.RecoveryRegistry(repo)
+            ledger_path = agent_runner._review_progress_paths(owner)[0]
+            self.assertTrue(ledger_path.is_file())
+            self.assertFalse((repo / "review-progress-ledger-v1.json").exists())
+
+            with self.assertRaisesRegex(
+                agent_runner.RunnerError,
+                "automation exhausted",
+            ):
+                agent_runner.preview_review_dispatch(repo=repo, progress=first)
+
+            second = agent_runner.review_progress_record(
+                specification_lineage_digest="9" * 64,
+                specification_revision="R-006",
+                full_diff_digest="d" * 64,
+                validation_digest="e" * 64,
+                acceptance_criteria_digest="c" * 64,
+                open_finding_keys=[],
+                closed_finding_keys=["1" * 64],
+            )
+            second_preview = agent_runner.preview_review_dispatch(
+                repo=repo,
+                progress=second,
+            )
+            second_commit = agent_runner.commit_review_dispatch(
+                repo=repo,
+                run_id="review-2",
+                agent_name="openbuild_review_strong",
+                task_name="strong review",
+                preview=second_preview,
+            )
+            self.assertEqual(second_commit["decision"]["status"], "progressed")
+
+            unrelated = agent_runner.review_progress_record(
+                specification_lineage_digest="8" * 64,
+                specification_revision="R-001",
+                full_diff_digest="f" * 64,
+                validation_digest="e" * 64,
+                acceptance_criteria_digest="c" * 64,
+                open_finding_keys=[],
+                closed_finding_keys=[],
+            )
+            unrelated_preview = agent_runner.preview_review_dispatch(
+                repo=repo,
+                progress=unrelated,
+            )
+            self.assertEqual(
+                unrelated_preview["decision"],
+                {
+                    "status": "first-review",
+                    "reason": "no-prior-review-progress-for-lineage",
+                },
+            )
+
+            stale = dict(second_preview)
+            with self.assertRaisesRegex(
+                agent_runner.RunnerError,
+                "changed before dispatch",
+            ):
+                agent_runner.commit_review_dispatch(
+                    repo=repo,
+                    run_id="review-stale",
+                    agent_name="openbuild_review_strongest",
+                    task_name="stale review",
+                    preview=stale,
+                )
+
+    def test_review_cli_requires_canonical_progress_arguments(self) -> None:
+        with self.assertRaisesRegex(agent_runner.RunnerError, "requires specification lineage"):
+            agent_runner.review_progress_from_args(
+                Namespace(agent="openbuild_review_balanced")
+            )
+        record = agent_runner.review_progress_from_args(
+            Namespace(
+                agent="openbuild_review_balanced",
+                review_specification_lineage_digest="9" * 64,
+                review_specification_revision="R-006",
+                review_full_diff_digest="a" * 64,
+                review_validation_digest="b" * 64,
+                review_acceptance_criteria_digest="c" * 64,
+                review_open_finding_key=[],
+                review_closed_finding_key=["d" * 64],
+            )
+        )
+        self.assertEqual(record["closed_finding_keys"], ["d" * 64])
+
+    def test_browser_qa_receipt_rejects_tamper_replay_and_external_activity(self) -> None:
+        private_evidence = {
+            "specification_revision": "R-005",
+            "pre_worktree_digest": "a" * 64,
+            "post_worktree_digest": "a" * 64,
+            "argv_digest": "b" * 64,
+            "scenario_manifest_digest": "c" * 64,
+            "network_guard_digest": "f" * 64,
+            "nonce": "d" * 64,
+            "child_pid": 101,
+            "child_identity": "process-created-1",
+            "exit_code": 0,
+            "process_tree_stopped": True,
+            "observed_external_requests": 0,
+            "observed_external_actions": 0,
+            "runtime": "project-native-playwright",
+            "scenario_count": 8,
+            "check_count": 205,
+            "passed_checks": 205,
+        }
+        receipt = agent_runner.browser_qa_receipt(**private_evidence)
+        consumed: set[str] = set()
+        accepted = agent_runner.verify_browser_qa_receipt(
+            receipt=receipt,
+            private_evidence=private_evidence,
+            expected_specification_revision="R-005",
+            expected_worktree_digest="a" * 64,
+            expected_argv_digest="b" * 64,
+            expected_scenario_manifest_digest="c" * 64,
+            consumed_receipt_digests=consumed,
+        )
+        self.assertEqual(accepted, receipt)
+        with self.assertRaisesRegex(agent_runner.RunnerError, "replayed"):
+            agent_runner.verify_browser_qa_receipt(
+                receipt=receipt,
+                private_evidence=private_evidence,
+                expected_specification_revision="R-005",
+                expected_worktree_digest="a" * 64,
+                expected_argv_digest="b" * 64,
+                expected_scenario_manifest_digest="c" * 64,
+                consumed_receipt_digests=consumed,
+            )
+        tampered = dict(receipt)
+        tampered["check_count"] = 204
+        with self.assertRaisesRegex(agent_runner.RunnerError, "tampered"):
+            agent_runner.verify_browser_qa_receipt(
+                receipt=tampered,
+                private_evidence=private_evidence,
+                expected_specification_revision="R-005",
+                expected_worktree_digest="a" * 64,
+                expected_argv_digest="b" * 64,
+                expected_scenario_manifest_digest="c" * 64,
+                consumed_receipt_digests=set(),
+            )
+        with self.assertRaisesRegex(agent_runner.RunnerError, "current revision or command"):
+            agent_runner.verify_browser_qa_receipt(
+                receipt=receipt,
+                private_evidence=private_evidence,
+                expected_specification_revision="R-006",
+                expected_worktree_digest="a" * 64,
+                expected_argv_digest="b" * 64,
+                expected_scenario_manifest_digest="c" * 64,
+                consumed_receipt_digests=set(),
+            )
+        self.assertEqual(receipt["schema"], "openbuild.browser-qa.v1")
+        self.assertNotIn("process-created-1", json.dumps(receipt))
+        self.assertNotIn("nonce", json.dumps(receipt))
+        with self.assertRaisesRegex(agent_runner.RunnerError, "external"):
+            agent_runner.browser_qa_receipt(
+                specification_revision="R-005",
+                pre_worktree_digest="a" * 64,
+                post_worktree_digest="a" * 64,
+                argv_digest="b" * 64,
+                scenario_manifest_digest="c" * 64,
+                network_guard_digest="f" * 64,
+                nonce="e" * 64,
+                child_pid=101,
+                child_identity="process-created-1",
+                exit_code=0,
+                process_tree_stopped=True,
+                observed_external_requests=1,
+                observed_external_actions=0,
+                runtime="project-native-playwright",
+                scenario_count=8,
+                check_count=205,
+                passed_checks=205,
+            )
+
+    @unittest.skipUnless(os.name == "nt", "suspended pre-execution network guard contract")
+    def test_browser_qa_substitute_is_creation_bound_and_strips_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary) / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "tests@example.invalid"],
+                cwd=repo,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "OpenBuild Tests"],
+                cwd=repo,
+                check=True,
+            )
+            (repo / "fixture.txt").write_text("fixture\n", encoding="utf-8", newline="\n")
+            subprocess.run(["git", "add", "fixture.txt"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "--quiet", "-m", "fixture"], cwd=repo, check=True)
+            script = (
+                "import os, sys; "
+                "sys.exit(1 if 'OPENAI_API_KEY' in os.environ else 0)"
+            )
+
+            class Guard:
+                def attach_suspended(
+                    self,
+                    *,
+                    process: object,
+                    nonce: str,
+                    allowed_origins: tuple[str, ...],
+                ) -> dict[str, object]:
+                    self.asserted_process = process
+                    return {
+                        "schema": "openbuild.browser-network-guard.v1",
+                        "guard_id": "9" * 64,
+                        "nonce": nonce,
+                        "allowed_origins_digest": agent_runner.sha256_bytes(
+                            agent_runner.BROWSER_QA_DOMAIN
+                            + agent_runner._canonical_json_bytes(
+                                {"allowed_origins": sorted(allowed_origins)}
+                            )
+                        ),
+                        "enforced_before_resume": True,
+                    }
+
+                def finalize(
+                    self,
+                    *,
+                    attachment: dict[str, object],
+                    process: object,
+                ) -> dict[str, object]:
+                    self.asserted_process = process
+                    return {
+                        "schema": "openbuild.browser-network-observation.v1",
+                        "guard_id": attachment["guard_id"],
+                        "nonce": attachment["nonce"],
+                        "independently_observed": True,
+                        "external_requests": 0,
+                        "external_actions": 0,
+                        "runtime": "project-native-playwright",
+                        "scenario_count": 2,
+                        "check_count": 5,
+                        "passed_checks": 5,
+                    }
+
+            with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "must-not-reach-child"}):
+                receipt = agent_runner.run_browser_qa_substitute(
+                    repo=repo,
+                    specification_revision="R-005",
+                    argv=[sys.executable, "-c", script],
+                    scenario_manifest={
+                        "schema": "openbuild.browser-qa-scenario.v1",
+                        "origins": ["file"],
+                    },
+                    network_guard=Guard(),
+                )
+
+            self.assertEqual(receipt["runtime"], "project-native-playwright")
+            self.assertEqual(receipt["scenario_count"], 2)
+            self.assertEqual(receipt["check_count"], 5)
+            self.assertEqual(receipt["passed_checks"], 5)
+            self.assertEqual(
+                receipt["pre_worktree_digest"],
+                receipt["post_worktree_digest"],
+            )
+
+    def test_browser_qa_substitute_fails_closed_without_independent_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            with self.assertRaisesRegex(
+                agent_runner.RunnerError,
+                "network guard|pre-execution network isolation",
+            ):
+                agent_runner.run_browser_qa_substitute(
+                    repo=repo,
+                    specification_revision="R-006",
+                    argv=[sys.executable, "-c", "raise SystemExit(0)"],
+                    scenario_manifest={
+                        "schema": "openbuild.browser-qa-scenario.v1",
+                        "origins": ["file"],
+                    },
+                    network_guard=None,
+                )
 
 
 if __name__ == "__main__":

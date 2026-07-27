@@ -214,7 +214,7 @@ class RegistryContractTests(unittest.TestCase):
                 action_snapshot_id="9" * 64,
                 action_snapshot_sha256=hashlib.sha256(action_snapshot_bytes).hexdigest(),
             )
-            self.assertEqual(owner.state()["reader_floor"], "2.4.0")
+            self.assertEqual(owner.state()["reader_floor"], recovery_state.READER_FLOOR)
             authorization = owner.issue_post_commit_root_completion_authorization(action)
             issued_source = owner.read_private_source(preflight["source_state_id"])
             issued_action = issued_source["post_commit_root_completion"]["action"]
@@ -1168,7 +1168,7 @@ class RegistryContractTests(unittest.TestCase):
             self.assertEqual(first.workspace_key, second.workspace_key)
             self.assertTrue(first.directory.is_relative_to(state_root))
             self.assertFalse(first.directory.is_relative_to(workspace))
-            self.assertEqual(state["reader_floor"], "2.4.0")
+            self.assertEqual(state["reader_floor"], recovery_state.READER_FLOOR)
             self.assertEqual(state["identity_version"], 2)
             self.assertEqual(state["workspace_key"], first.workspace_key)
             self.assertIn("git_common_dir_identity", state)
@@ -1218,8 +1218,8 @@ class RegistryContractTests(unittest.TestCase):
                     specification_revision="R-001",
                 )
 
-            self.assertEqual(observed_floors, ["2.4.0"])
-            self.assertEqual(owner.state()["reader_floor"], "2.4.0")
+            self.assertEqual(observed_floors, [recovery_state.READER_FLOOR])
+            self.assertEqual(owner.state()["reader_floor"], recovery_state.READER_FLOOR)
 
     def test_digest_consistent_malformed_registry_generations_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1641,9 +1641,13 @@ class RegistryContractTests(unittest.TestCase):
             private = owner.read_private_source(checkpoint["source_state_id"])
             self.assertEqual(len(bytes.fromhex(private["checkpoint_key"])), 32)
             self.assertIn("allowed/seed.txt", private["pre_snapshot"]["records"])
-            self.assertIn("ignored/cache.txt", private["pre_snapshot"]["records"])
+            self.assertNotIn("ignored/cache.txt", private["pre_snapshot"]["records"])
+            self.assertEqual(
+                private["pre_snapshot"]["inventory_policy"]["mode"],
+                "task-relevant-v2",
+            )
 
-    def test_ignored_nested_repository_marker_is_normalized_and_fully_inventoried(self) -> None:
+    def test_ignored_nested_repository_outside_scope_is_not_opened_or_inventoried(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             workspace = self.make_git_workspace(root)
@@ -1656,12 +1660,15 @@ class RegistryContractTests(unittest.TestCase):
 
             checkpoint = self.checkpoint(owner)
             private = owner.read_private_source(checkpoint["source_state_id"])
-            self.assertIn("ignored/nested-repository/private.txt", private["pre_snapshot"]["records"])
+            self.assertNotIn(
+                "ignored/nested-repository/private.txt",
+                private["pre_snapshot"]["records"],
+            )
 
             (nested / "private.txt").write_text("changed\n", encoding="utf-8", newline="\n")
             changed = owner.revalidate_checkpoint(checkpoint)
-            self.assertEqual(changed["disposition"], "recovery-ineligible")
-            self.assertIn("outside-set-drift", changed["reasons"])
+            self.assertEqual(changed["disposition"], "recovery-eligible")
+            self.assertEqual(changed["reasons"], [])
 
     def test_independent_normal_starts_serialize_to_one_lease(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -2075,8 +2082,8 @@ class RegistryContractTests(unittest.TestCase):
             checkpoint = self.checkpoint(owner)
             (workspace / "ignored" / "cache.txt").write_text("changed ignored\n", encoding="utf-8", newline="\n")
             changed = owner.revalidate_checkpoint(checkpoint)
-            self.assertEqual(changed["disposition"], "recovery-ineligible")
-            self.assertIn("outside-set-drift", changed["reasons"])
+            self.assertEqual(changed["disposition"], "recovery-eligible")
+            self.assertEqual(changed["reasons"], [])
 
             source_path = owner.source_path(checkpoint["source_state_id"])
             private = json.loads(source_path.read_text(encoding="utf-8"))
@@ -2932,7 +2939,7 @@ class RegistryContractTests(unittest.TestCase):
             )
 
             self.assertIsNone(pending["quarantine"])
-            self.assertEqual(pending["reader_floor"], "2.4.0")
+            self.assertEqual(pending["reader_floor"], recovery_state.READER_FLOOR)
             self.assertEqual(
                 pending["lease"]["semantic_disposition"]["schema"],
                 "terminal-abandonment-v3",
@@ -3165,7 +3172,7 @@ class RegistryContractTests(unittest.TestCase):
 
             replay = self.owner(workspace, root / "state").state()
             self.assertEqual(replay["digest"], released["digest"])
-            self.assertEqual(replay["reader_floor"], "2.4.0")
+            self.assertEqual(replay["reader_floor"], recovery_state.READER_FLOOR)
 
     def test_ac05_mixed_drift_rejects_terminal_abandonment_without_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -3257,7 +3264,7 @@ class RegistryContractTests(unittest.TestCase):
 
             pending = owner.record_terminal_abandonment("normal-1")
             semantic = pending["lease"]["semantic_disposition"]
-            self.assertEqual(pending["reader_floor"], "2.4.0")
+            self.assertEqual(pending["reader_floor"], recovery_state.READER_FLOOR)
             self.assertEqual(pending["lease"]["lease_kind"], "normal-contained")
             self.assertEqual(semantic["schema"], "terminal-abandonment-v3")
             self.assertEqual(
@@ -3405,7 +3412,7 @@ class RegistryContractTests(unittest.TestCase):
 
             pending = owner.record_terminal_abandonment("normal-1")
             semantic = pending["lease"]["semantic_disposition"]
-            self.assertEqual(pending["reader_floor"], "2.4.0")
+            self.assertEqual(pending["reader_floor"], recovery_state.READER_FLOOR)
             self.assertEqual(semantic["schema"], "terminal-abandonment-v5")
             self.assertEqual(
                 semantic["cause"],
@@ -3956,14 +3963,14 @@ class RegistryContractTests(unittest.TestCase):
             upgraded_owner = self.owner(workspace, root / "state")
 
             pending = upgraded_owner.record_terminal_abandonment("normal-1")
-            self.assertEqual(pending["reader_floor"], "2.4.0")
+            self.assertEqual(pending["reader_floor"], recovery_state.READER_FLOOR)
             upgraded_owner.complete_terminal_abandonment("normal-1")
             upgraded_owner.acknowledge_guardian_close("normal-1", self.guardian_close())
             released = upgraded_owner.release_contained_terminal("normal-1")
             replay = self.owner(workspace, root / "state").state()
 
             self.assertEqual(replay["digest"], released["digest"])
-            self.assertEqual(replay["reader_floor"], "2.4.0")
+            self.assertEqual(replay["reader_floor"], recovery_state.READER_FLOOR)
             self.assertEqual(
                 len(
                     [
@@ -4023,7 +4030,7 @@ class RegistryContractTests(unittest.TestCase):
             def assert_promoted_before_source(source: dict[str, object]):
                 self.assertEqual(
                     upgraded._read_registry_locked(rebarrier=False)["reader_floor"],
-                    "2.4.0",
+                    recovery_state.READER_FLOOR,
                 )
                 return commit_source(source)
 
@@ -4031,7 +4038,7 @@ class RegistryContractTests(unittest.TestCase):
                 upgraded, "_commit_source_locked", side_effect=assert_promoted_before_source
             ):
                 completed = upgraded.complete_terminal_abandonment("normal-1")
-            self.assertEqual(completed["reader_floor"], "2.4.0")
+            self.assertEqual(completed["reader_floor"], recovery_state.READER_FLOOR)
             self.assertEqual(
                 completed["lease"]["semantic_disposition"]["checkpoint_invalidation"],
                 "completed",
@@ -4077,7 +4084,7 @@ class M7b1ReadBoundaryTests(unittest.TestCase):
                 ("state_for_activation", lambda: owner.state_for_activation(), False),
                 (
                     "assert_reader_compatible",
-                    lambda: owner.assert_reader_compatible("2.4.0"),
+                    lambda: owner.assert_reader_compatible(recovery_state.READER_FLOOR),
                     True,
                 ),
                 (
@@ -4507,6 +4514,142 @@ class M7b1TransitionGuardTests(unittest.TestCase):
             self.assertFalse(state_root.exists())
         finally:
             shutil.rmtree(root)
+
+
+class TaskRelevantSnapshotPolicyTests(unittest.TestCase):
+    """R-005 checkpoint policy regressions (new state and legacy read mode)."""
+
+    make_git_workspace = RegistryContractTests.make_git_workspace
+    owner = RegistryContractTests.owner
+    checkpoint = RegistryContractTests.checkpoint
+
+    def test_task_relevant_v2_never_globally_lists_an_ignored_outside_scope_reparse_path(self) -> None:
+        owner = recovery_state.RecoveryRegistry(ROOT, state_root=ROOT / "state-not-used")
+        ignored_calls: list[tuple[str, ...]] = []
+
+        def git(*arguments: str, **_kwargs: object) -> bytes:
+            if arguments[:2] == ("rev-parse", "--verify"):
+                return b"a" * 40 + b"\n"
+            if arguments[:3] == ("symbolic-ref", "-q", "HEAD"):
+                return b"refs/heads/main\n"
+            if arguments[:2] == ("ls-files", "--stage"):
+                return b""
+            if arguments[:2] == ("status", "--porcelain=v2"):
+                return b""
+            if arguments[:2] == ("ls-files", "--others"):
+                ignored_calls.append(arguments)
+                if "--" in arguments:
+                    self.assertIn("--directory", arguments)
+                    self.assertEqual(arguments[-1], ":(top,literal)allowed")
+                    return b""
+                return b"ignored/reparse\0"
+            raise AssertionError(arguments)
+
+        def record(
+            path: str,
+            *,
+            records: dict[str, dict[str, object]],
+            **_kwargs: object,
+        ) -> None:
+            if path == "ignored/reparse":
+                raise recovery_state.RecoveryStateError("outside ignored reparse was opened")
+            records[path] = {
+                "kind": "file",
+                "mode": 0o100644,
+                "size": 0,
+                "mtime_ns": 0,
+                "identity": {"device": 1, "inode": 1},
+                "sha256": "a" * 64,
+                "content_id": "b" * 64,
+            }
+
+        with mock.patch.object(owner, "_git", side_effect=git), mock.patch.object(
+            owner, "_record_path", side_effect=record
+        ):
+            snapshot = owner._capture_snapshot(key=b"k" * 32, allowed_paths=["allowed"])
+            self.assertEqual(snapshot["inventory_policy"]["mode"], "task-relevant-v2")
+            self.assertEqual(set(snapshot["records"]), {"allowed"})
+            self.assertEqual(len(ignored_calls), 1)
+            self.assertIn("--", ignored_calls[0])
+            with self.assertRaisesRegex(recovery_state.RecoveryStateError, "outside ignored reparse"):
+                owner._capture_snapshot(
+                    key=b"k" * 32,
+                    allowed_paths=["allowed"],
+                    policy_mode="full-ignored-v1",
+                )
+            self.assertNotIn("--", ignored_calls[-1])
+
+    def test_2_4_0_reader_rejects_a_nonvacant_2_4_1_registry(self) -> None:
+        owner = recovery_state.RecoveryRegistry(ROOT, state_root=ROOT / "state-not-used")
+        registry = owner._empty(readonly=True)
+        registry["generation"] = 1
+        registry["previous_generation_digest"] = "a" * 64
+        registry["lease"] = {"lease_id": "not-vacant"}
+        registry["digest"] = recovery_state._digest(registry)
+        with mock.patch.object(recovery_state, "READER_FLOOR", "2.4.0"), mock.patch.object(
+            recovery_state,
+            "_LEGACY_READER_FLOORS",
+            recovery_state._LEGACY_READER_FLOORS - {"2.4.1"},
+        ), self.assertRaisesRegex(recovery_state.RecoveryStateError, "reader floor"):
+            owner._validate_registry(registry)
+
+    def test_task_relevant_v2_excludes_ignored_outside_scope_but_protects_allowed_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = self.make_git_workspace(root)
+            (workspace / ".gitignore").write_text(
+                "ignored/\nallowed/\n", encoding="utf-8", newline="\n"
+            )
+            run_git(workspace, "add", ".gitignore")
+            run_git(workspace, "commit", "--quiet", "-m", "ignore generated trees")
+            (workspace / "ignored" / "huge.bin").write_bytes(b"x" * 4096)
+            run_git(workspace, "rm", "--cached", "--quiet", "allowed/seed.txt")
+            run_git(workspace, "commit", "--quiet", "-m", "make allowed fixture ignored")
+            owner = self.owner(workspace, root / "state", max_bytes=128)
+            owner.initialize()
+
+            checkpoint = self.checkpoint(owner)
+            private = owner.read_private_source(checkpoint["source_state_id"])
+            policy = private["pre_snapshot"]["inventory_policy"]
+            self.assertEqual(policy["mode"], "task-relevant-v2")
+            self.assertNotIn("ignored/huge.bin", private["pre_snapshot"]["records"])
+            self.assertIn("allowed/seed.txt", private["pre_snapshot"]["records"])
+            self.assertLess(private["pre_snapshot"]["public"]["hashed_bytes"], 128)
+
+            (workspace / "allowed" / "seed.txt").write_text(
+                "allowed ignored drift\n", encoding="utf-8", newline="\n"
+            )
+            revalidated = owner.revalidate_checkpoint(checkpoint)
+            self.assertEqual(revalidated["disposition"], "recovery-eligible")
+
+            (workspace / "outside.txt").write_text(
+                "unignored outside drift\n", encoding="utf-8", newline="\n"
+            )
+            rejected = owner.revalidate_checkpoint(revalidated)
+            self.assertEqual(rejected["disposition"], "recovery-ineligible")
+            self.assertIn("outside-set-drift", rejected["reasons"])
+
+    def test_legacy_full_ignored_snapshot_revalidates_in_legacy_mode_without_policy_rewrite(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = self.make_git_workspace(root)
+            owner = self.owner(workspace, root / "state")
+            owner.initialize()
+            original_capture = owner._capture_snapshot
+
+            def capture_legacy(**kwargs: object) -> dict[str, object]:
+                return original_capture(**kwargs, policy_mode="full-ignored-v1")
+
+            with mock.patch.object(owner, "_capture_snapshot", side_effect=capture_legacy):
+                checkpoint = self.checkpoint(owner)
+            source_path = owner.source_path(checkpoint["source_state_id"])
+            source = json.loads(source_path.read_text(encoding="utf-8"))
+
+            legacy = owner.read_private_source(checkpoint["source_state_id"])
+            self.assertNotIn("inventory_policy", legacy["pre_snapshot"])
+            revalidated = owner.revalidate_checkpoint(legacy["public_checkpoint"], persist=False)
+            self.assertEqual(revalidated["disposition"], "recovery-eligible")
+            self.assertIn("ignored/cache.txt", legacy["pre_snapshot"]["records"])
 
 
 if __name__ == "__main__":
